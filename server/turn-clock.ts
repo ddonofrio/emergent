@@ -24,7 +24,7 @@ export class TurnClock {
     this.previous = now();
   }
   status(): TurnStatus {
-    return { phase: this.phase, enabled: this.enabled, turn: Math.floor(this.engine.tick / TURN_TICKS) + 1, tick: this.engine.tick, agents: { ...this.decisions } };
+    return { phase: this.phase, enabled: this.enabled, turn: this.phase === 'advancing' ? this.endTick / TURN_TICKS : Math.floor(this.engine.tick / TURN_TICKS) + 1, tick: this.engine.tick, agents: { ...this.decisions } };
   }
   setEnabled(enabled: boolean) {
     this.enabled = enabled;

@@ -1,13 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { once } from 'node:events';
 import { Engine } from '../src/core/engine';
 import { island } from '../src/modules/island';
 import type { Block, Entity, WorldModule } from '../src/core/types';
 import { Store } from '../server/store';
 import { worldTools } from '../server/agents/tools';
-import { AgentRuntime } from '../server/agents/runtime';
 import { apply } from '../server/agents/harness-plugin';
 
 const entity = (id = 't1', x = .5, z = .5): Entity => ({ id, name: id, kind: 'troglodyte', controller: 'agent', position: [x,1,z], height: 2, yaw: 0, inventory: null, color: '#ffffff', status: 'idle' });

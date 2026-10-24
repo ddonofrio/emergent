@@ -1,6 +1,7 @@
 # Emergent
 
 - Write all source, comments, UI text, documentation, and agent instructions in English. Do not use emojis.
+- The user manages the application server. Do not start, stop, restart, or change the running server's state unless the user explicitly requests that operation. Make code and configuration changes, run offline checks, and tell the user when a restart is needed.
 - Build the smallest useful, runnable increment. Prefer established libraries and patterns over new frameworks.
 - Keep documentation minimal and close to the code. Tests are construction tools: add focused checks for difficult invariants, not coverage for its own sake.
 - Keep the simulation engine, world modules, agent runtime, and observer UI independent. World-specific rules belong in modules.
