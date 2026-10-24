@@ -1,0 +1,16 @@
+{
+  "name": "emergent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "dev": "tsx --env-file-if-exists=.env server/index.ts",
+    "start": "tsx --env-file-if-exists=.env server/index.ts --production",
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": { "three": "0.186.1" },
+  "devDependencies": { "@types/node": "^24.0.0", "@types/three": "^0.183.0", "tsx": "^4.20.0", "typescript": "^5.9.0", "vite": "8.3.5" }
+}

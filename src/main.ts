@@ -1,0 +1,225 @@
+import './style.css';
+import { WorldView } from './view/world-view';
+import { advancePlayback } from './view/playback-clock';
+import type { TurnStatus } from './core/time';
+import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from './core/types';
+
+interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; agentsEnabled: boolean; latestTick: number; maxTurns: number; runtime: TurnStatus; }
+interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
+const app = document.querySelector<HTMLDivElement>('#app')!;
+app.innerHTML = `
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent<span class="version">LAB / 001</span></a>
+    <div class="header-middle"><span class="status-dot" id="connection-dot"></span><span id="connection">Connecting</span><span class="divider">/</span><span>World observatory</span></div>
+    <div class="header-actions"><button id="help-button" class="quiet">Field guide</button><a href="/api/export" class="quiet export">Export record <span>↗</span></a></div>
+  </header>
+  <main>
+    <section class="observation-area" aria-label="World observation">
+      <div class="world-toolbar"><div><span class="eyebrow">ACTIVE MODULE</span><h1 id="module-name">First Shore <span>01</span></h1></div><div class="world-stats"><span><i class="tiny-square"></i> 1 m voxels</span><span id="world-size">100 m island</span><span id="population">3 inhabitants</span></div></div>
+      <div id="world" class="world"><div class="loading" id="loading"><span class="loader"></span>Opening the observatory…</div>
+        <div class="world-top"><span class="glass-tag" id="view-mode">LIVE OBSERVATION</span><span class="glass-tag world-clock" id="world-clock">DAY 001 · 00:00</span></div>
+        <div class="camera-tools"><button id="overview" title="Overview" aria-label="Overview">◈</button><button id="top-down" title="Top view" aria-label="Top view">⊞</button><button id="follow" title="Follow selected inhabitant" aria-label="Follow selected inhabitant">◎</button></div>
+        <div class="world-bottom"><div class="scale"><span>N ↑</span><i></i><span>100 m / ISLAND DIAMETER</span></div><div class="camera-hint">DRAG Orbit <b>·</b> SCROLL Zoom <b>·</b> WASD + Q/E Fly</div></div>
+        <div id="toast" role="status"></div>
+      </div>
+      <section class="timeline" aria-label="Recorded world timeline">
+        <div class="timeline-top"><div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span> Live</button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00.0</span></div><div class="timeline-right"><span id="record-status">Recording every 100 ms</span><select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div></div>
+        <div class="scrubber"><div id="event-marks"></div><input id="seek" type="range" min="0" max="1" value="0" step="2" aria-label="Seek world history"></div>
+        <div class="timeline-labels"><span id="range-start">00:00</span><span>PAST <span class="timeline-line">─────────────────</span> WORLD TIME <span class="timeline-line">─────────────────</span> PRESENT</span><span id="range-end">00:00</span></div>
+      </section>
+    </section>
+    <aside class="inspector" aria-label="World inspector">
+      <div class="experiment"><span class="eyebrow">EXPERIMENT 001</span><div class="experiment-title">A world without a task.<span class="seed">SEED 731</span></div><p>Watch curiosity become behavior.</p><div id="runtime-mode" class="runtime-mode">Connecting to runtime</div><p id="turn-status" role="status">One turn = one world second</p><button id="agent-toggle" class="agent-toggle">Pause world <span>Ⅱ</span></button></div>
+      <div class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">03</span></div><div id="entity-list"></div></div>
+      <div class="inspector-tabs" role="tablist"><button id="journal-tab" role="tab" aria-selected="true" class="active">Journal</button><button id="details-tab" role="tab" aria-selected="false">In focus</button><span id="event-count">0</span></div>
+      <div id="journal" class="journal" role="tabpanel"><p class="empty">Waiting for the first trace.</p></div>
+      <div id="details" class="details hidden" role="tabpanel"></div>
+      <div class="inspector-footer"><span class="status-dot"></span><span id="persistence">Local persistent recording</span><span id="lost">0 lost</span></div>
+    </aside>
+  </main>
+  <dialog id="guide"><button id="close-guide" class="dialog-close" aria-label="Close field guide">×</button><span class="eyebrow">EMERGENT / FIELD GUIDE</span><h2>Observe. Rewind. Discover.</h2><p>Two Troglodytes share a finite island with a wandering duck. There is no assigned objective. Each shared turn advances one world second after all model decisions arrive. The world waits for unavailable models; your camera and recorded history remain usable.</p><dl><dt>Move the camera</dt><dd>Drag to orbit, right-drag to pan, scroll to zoom. Focus the world and use WASD + Q/E to fly. Shift moves faster. Select a name, then use Follow.</dd><dt>Read the past</dt><dd>Drag the timeline to any recorded moment, choose a day, or pause and play at up to 8×. Live returns to the present. Observer playback never rewinds the actual experiment.</dd><dt>Run a model</dt><dd>Copy <code>.env.example</code> to <code>.env</code>, configure <code>LLM_API_KEY</code>, <code>LLM_BASE_URL</code> and <code>LLM_MODEL</code>, then restart the server. Without a key, the clearly labelled scripted demo exercises the same actions. Each agent stops at <code>AGENT_MAX_TURNS</code>.</dd><dt>Keep an experiment</dt><dd>The server records physics at 10 Hz, events and private notes in SQLite, with checkpoints every 30 seconds. Reopening resumes it. Export downloads the full world history. Use a new <code>DATA_DIR</code> to start a fresh experiment.</dd><dt>Physical limits</dt><dd>One material stack, up to 64 blocks. Three-metre reach. Speech uses seven words, travels at most 10 metres and cannot pass through solid blocks. Water deeper than half a Troglodyte is refused. Sinking items beyond the lower boundary are permanently lost.</dd></dl><p class="guide-note">MVP: voxel terrain stays fixed until edited; thrown items use gravity, collisions and buoyancy. Poured water disperses. Inference waiting has no duration in world history. At 1×, one recorded turn takes one real second. Long actions continue across turns at their normal speed.</p></dialog>`;
+
+const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+let view: WorldView;
+try { view = new WorldView($('world'), id => selectEntity(id)); }
+catch { $('loading').textContent = 'WebGL is unavailable. Enable hardware acceleration and reload to observe the world.'; throw new Error('WebGL unavailable.'); }
+let meta: Metadata;
+let shown: WorldState;
+let liveDynamic: Omit<WorldState,'blocks'>;
+const liveCells = new Map<string,string>();
+let latest = 0, selected = 't1', isLive = true, playing = false, cursor = 0, events: WorldEvent[] = [], liveEvents: WorldEvent[] = [];
+let epoch = 0, seekTimer: ReturnType<typeof setTimeout>, replayFrames: Frame[] = [], fetching = false, replayClock = 0, replayRequest = 0, lastPlayback = performance.now(), lastUi = 0, nextReplayFetch = 0, seeking = false;
+let activeTab = 'journal', dayCount = 0;
+
+function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
+function elapsed(tick: number) { const seconds = tick/20; return `${String(Math.floor(seconds/60)).padStart(2,'0')}:${(seconds%60).toFixed(1).padStart(4,'0')}`; }
+function dayOf(tick: number) { return Math.floor(tick / (meta.module.daySeconds*20))+1; }
+function clock(tick: number) { const minute = Math.floor((tick/20%meta.module.daySeconds)/meta.module.daySeconds*1440); return `${String(Math.floor(minute/60)).padStart(2,'0')}:${String(minute%60).padStart(2,'0')}`; }
+function setConnection(connected: boolean) { $('connection').textContent = connected ? 'Connected' : 'Reconnecting'; $('connection-dot').classList.toggle('offline',!connected); }
+function selectEntity(id: string) { selected = id; view.select(id); renderInspector(); }
+function setBoot(boot: Boot) {
+  meta = boot; latest = boot.latestTick; liveDynamic = boot.state; liveCells.clear();
+  for (const [x,y,z,kind] of boot.state.blocks) liveCells.set(key([x,y,z]),kind);
+  liveEvents = boot.events; $('loading').classList.add('hidden');
+  $('runtime-mode').textContent = meta.mode === 'demo' ? 'SCRIPTED DEMO · No LLM connected' : `LLM CONNECTED · ${meta.model}`;
+  $('runtime-mode').classList.toggle('model',meta.mode === 'llm');
+  $('module-name').textContent = meta.module.name; $('population').textContent = `${boot.state.entities.length} inhabitants`;
+  if (isLive) goLive(); else renderTimeline();
+}
+const stream = new EventSource('/api/stream');
+stream.addEventListener('boot', event => { setConnection(true); setBoot(JSON.parse((event as MessageEvent).data)); });
+stream.addEventListener('status', event => {
+  if (!meta) return;
+  meta.runtime = JSON.parse((event as MessageEvent).data).runtime; meta.agentsEnabled = meta.runtime.enabled;
+  renderTimeline(); renderInspector();
+});
+stream.addEventListener('frame', event => {
+  const packet = JSON.parse((event as MessageEvent).data) as { frame: Frame; agentsEnabled: boolean; runtime: TurnStatus }, frame = packet.frame;
+  if (!meta) return;
+  latest = frame.tick; meta.agentsEnabled = packet.agentsEnabled; meta.runtime = packet.runtime; liveDynamic = frame;
+  for (const [k,kind] of frame.changes) { if (kind) liveCells.set(k,kind); else liveCells.delete(k); }
+  liveEvents = [...liveEvents,...frame.events].slice(-200);
+  if (isLive) {
+    shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);
+    if (frame.events.length) renderJournal();
+  }
+  if (performance.now()-lastUi > 200) { renderTimeline(); renderInspector(); lastUi = performance.now(); }
+});
+stream.onerror = () => setConnection(false);
+
+function goLive() {
+  if (!meta || !liveDynamic) return;
+  epoch++; replayRequest++; fetching = false; seeking = false; clearTimeout(seekTimer); isLive = true; playing = false; replayFrames = [];
+  shown = { ...liveDynamic, blocks: [...liveCells].map(([k,kind]) => [...unkey(k),kind]) };
+  cursor = latest; events = liveEvents; view.load(shown,meta.module); renderTimeline(); renderInspector(); renderJournal();
+}
+async function seek(tick: number) {
+  const request = ++epoch; replayRequest++; fetching = false; seeking = true; isLive = false; playing = false; replayFrames = []; view.hold();
+  cursor = Math.min(latest,Math.max(0,tick)); renderTimeline();
+  try {
+    const response = await fetch(`/api/state?tick=${cursor}`); if (!response.ok) throw new Error('Could not load recorded history.');
+    const data = await response.json() as Boot; if (request !== epoch) return;
+    shown = data.state; cursor = shown.tick; replayClock = cursor; seeking = false; events = data.events; view.load(shown,meta.module); renderTimeline(); renderInspector(); renderJournal();
+  } catch (error) { if (request === epoch) toast(error instanceof Error ? error.message : 'History unavailable.'); }
+  finally { if (request === epoch) seeking = false; }
+}
+async function fetchReplay() {
+  if (fetching || seeking || isLive || !playing || performance.now() < nextReplayFetch || (replayFrames.at(-1)?.tick ?? cursor) >= latest) return;
+  const request = ++replayRequest, modeEpoch = epoch; fetching = true;
+  nextReplayFetch = performance.now() + 200;
+  try {
+    const after = replayFrames.at(-1)?.tick ?? cursor;
+    const response = await fetch(`/api/frames?tick=${after}`); if (!response.ok) throw new Error('Replay fetch failed.');
+    const data = await response.json() as Frame[];
+    if (request === replayRequest && modeEpoch === epoch && !isLive) replayFrames.push(...data);
+  } catch { if (modeEpoch === epoch) { playing = false; toast('Replay interrupted. Press play to retry.'); } }
+  finally { if (request === replayRequest) fetching = false; }
+}
+function playback(now: number) {
+  const dt = Math.min(now-lastPlayback,100); lastPlayback = now;
+  if (playing && !isLive) {
+    if (replayFrames.length < 80) void fetchReplay();
+    if (replayFrames.length) {
+      const speed = Number($<HTMLSelectElement>('speed').value);
+      replayClock = advancePlayback(replayClock, dt, speed, replayFrames.at(-1)!.tick);
+      let changed = false;
+      while (replayFrames.length && replayFrames[0].tick <= replayClock) {
+        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] }; view.update(frame,false,speed); events = [...events,...frame.events].slice(-200); changed = true;
+      }
+      if (changed) { renderTimeline(); renderInspector(); renderJournal(); }
+    }
+    // Stay in replay at the recording edge. Only the Live button changes observer mode.
+  }
+  requestAnimationFrame(playback);
+}
+requestAnimationFrame(playback);
+
+function renderTimeline() {
+  if (!meta) return;
+  $('view-mode').textContent = isLive ? meta.runtime.phase === 'thinking' ? 'LIVE · WAITING FOR MODELS' : meta.runtime.phase === 'paused' ? 'LIVE · WORLD PAUSED' : 'LIVE OBSERVATION' : playing ? 'RECORDED PLAYBACK' : 'PAUSED OBSERVATION';
+  $('view-mode').classList.toggle('past',!isLive); $('world-clock').textContent = `DAY ${String(dayOf(cursor)).padStart(3,'0')} · ${clock(cursor)}`;
+  $('live').classList.toggle('active',isLive); $('play').textContent = isLive || playing ? 'Ⅱ' : '▶'; $('play').setAttribute('aria-label',isLive || playing ? 'Pause observation' : 'Play recording');
+  $('playback-time').textContent = elapsed(cursor); $('range-end').textContent = elapsed(latest);
+  const slider = $<HTMLInputElement>('seek'); slider.max = String(Math.max(2,latest)); slider.value = String(cursor); slider.style.setProperty('--progress',`${cursor/Math.max(1,latest)*100}%`);
+  const count = dayOf(latest);
+  if (count !== dayCount) { const day = $<HTMLSelectElement>('day'); day.replaceChildren(); for (let i = 1;i<=count;i++) { const option = new Option(`Day ${String(i).padStart(3,'0')}`,String(i)); day.add(option); } dayCount = count; }
+  $<HTMLSelectElement>('day').value = String(dayOf(cursor));
+  $('agent-toggle').textContent = meta.agentsEnabled ? 'Pause world  Ⅱ' : meta.runtime.phase === 'advancing' ? 'Pausing after this turn' : 'Resume world  ▶';
+  const waiting = Object.entries(meta.runtime.agents).filter(([,s]) => s.state === 'thinking' || s.state === 'waiting').map(([id]) => shown?.entities.find(e=>e.id===id)?.name ?? id);
+  $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'limited' ? 'Model turn budget reached' : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
+  $('record-status').textContent = isLive ? '1 turn = 1 world second' : playing && cursor >= latest ? 'Waiting for the next recorded turn' : 'World time · inference waits omitted';
+  const marks = $('event-marks'); marks.replaceChildren();
+  for (const event of liveEvents.filter(e => ['discovery','lost','memory','agent-error'].includes(e.type))) {
+    const mark = document.createElement('i'); mark.style.left = `${event.tick/Math.max(1,latest)*100}%`; mark.className = event.type; mark.title = event.message; marks.append(mark);
+  }
+}
+function renderInspector() {
+  if (!shown) return;
+  $('lost').textContent = `${shown.lost} lost`; $('entity-count').textContent = String(shown.entities.length).padStart(2,'0');
+  const list = $('entity-list');
+  for (const e of shown.entities) {
+    const displayStatus = isLive && meta.runtime.phase === 'thinking' ? meta.runtime.agents[e.id]?.state ?? 'held' : isLive && meta.runtime.phase === 'limited' && e.controller === 'agent' ? 'turn limit' : e.status;
+    const existing = document.getElementById(`entity-${e.id}`);
+    if (existing) {
+      existing.classList.toggle('selected',e.id===selected); existing.setAttribute('aria-pressed',String(e.id===selected));
+      const status = existing.querySelector('.entity-status')!; status.textContent=displayStatus; status.classList.toggle('thinking',displayStatus==='thinking' || displayStatus==='waiting'); continue;
+    }
+    const button = document.createElement('button'); button.className = `inhabitant ${e.id === selected ? 'selected' : ''}`; button.setAttribute('aria-pressed',String(e.id === selected));
+    button.id = `entity-${e.id}`;
+    const avatar = document.createElement('span'); avatar.className = `avatar ${e.kind}`; avatar.style.setProperty('--entity-color',e.color); avatar.innerHTML = '<i></i>';
+    const text = document.createElement('span'); text.className = 'inhabitant-text'; const name = document.createElement('strong'); name.textContent = e.name;
+    const kind = document.createElement('small'); kind.textContent = e.kind === 'troglodyte' ? 'Troglodyte' : 'Duck · NPC'; text.append(name,kind);
+    const status = document.createElement('span'); status.className = `entity-status ${displayStatus === 'thinking' || displayStatus === 'waiting' ? 'thinking' : ''}`; status.textContent = displayStatus;
+    button.append(avatar,text,status); button.onclick = () => selectEntity(e.id); button.ondblclick = () => view.focus(e.id); list.append(button);
+  }
+  if (activeTab === 'details') renderDetails();
+}
+function renderDetails() {
+  const e = shown.entities.find(e => e.id === selected); if (!e) return;
+  const panel = $('details'); panel.replaceChildren();
+  const title = document.createElement('h3'); title.textContent = `${e.name} / ${e.kind}`; panel.append(title);
+  const pairs = [['Position',e.position.map(v => v.toFixed(1)).join(' / ')],['Facing',`${Math.round(e.yaw)}°`],['State',e.status],['Inventory',e.inventory ? `${e.inventory.count} × ${e.inventory.kind}${e.inventory.kind === 'bucket' ? e.inventory.water ? ' · full' : ' · empty' : ''}` : 'Empty hands'],['Perception',`${meta.module.perception.range} m · ${meta.module.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
+  for (const [label,value] of pairs) { const row = document.createElement('div'); row.className = 'detail-row'; const a = document.createElement('span'); a.textContent = label; const b = document.createElement('span'); b.textContent = value; row.append(a,b); panel.append(row); }
+  const focus = document.createElement('button'); focus.className = 'focus-button'; focus.textContent = `Follow ${e.name}`; focus.onclick = () => view.focus(e.id); panel.append(focus);
+  const label = document.createElement('h4'); label.textContent = 'PRIVATE NOTES IN THIS RECORD'; panel.append(label);
+  const notes = events.filter(event => event.actor === selected && event.type === 'memory').slice(-12);
+  if (!notes.length) { const p = document.createElement('p'); p.className = 'muted'; p.textContent = 'No memory notes in the visible journal window.'; panel.append(p); }
+  for (const note of notes) { const p = document.createElement('p'); p.textContent = note.message; panel.append(p); }
+}
+function renderJournal() {
+  const journal = $('journal'), wasAtTop = journal.scrollTop < 20; journal.replaceChildren();
+  const visible = events.filter(e => e.type !== 'observation' && e.type !== 'tool-result').slice(-70).reverse(); $('event-count').textContent = String(visible.length);
+  for (const event of visible) {
+    const row = document.createElement('article'); row.className = `journal-entry ${event.type}`;
+    const time = document.createElement('button'); time.className = 'event-time'; time.textContent = elapsed(event.tick); time.title = 'Jump to this recorded moment'; time.onclick = () => void seek(event.tick);
+    const content = document.createElement('div'); const header = document.createElement('div'); header.className = 'event-heading';
+    const actor = document.createElement('strong'); actor.textContent = shown?.entities.find(e => e.id === event.actor)?.name ?? 'World';
+    const type = document.createElement('span'); type.textContent = event.type; header.append(actor,type);
+    const message = document.createElement('p'); message.textContent = event.message; content.append(header,message);
+    if (event.data) { const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Trace'; const pre = document.createElement('pre'); pre.textContent = JSON.stringify(event.data,null,2); details.append(summary,pre); content.append(details); }
+    row.append(time,content); journal.append(row);
+  }
+  if (!visible.length) { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'No events at this point in the recording.'; journal.append(empty); }
+  if (wasAtTop) journal.scrollTop = 0;
+}
+$('live').onclick = goLive;
+$('play').onclick = () => {
+  if (!meta || seeking) return;
+  if (isLive) { isLive = false; playing = false; replayClock = cursor; epoch++; view.hold(); }
+  else { playing = !playing; replayClock = cursor; if (playing) void fetchReplay(); else view.hold(); }
+  renderTimeline();
+};
+$<HTMLInputElement>('seek').oninput = event => { const tick = Number((event.target as HTMLInputElement).value); isLive = false; playing = false; seeking = true; view.hold(); epoch++; cursor = tick; clearTimeout(seekTimer); renderTimeline(); seekTimer = setTimeout(() => void seek(tick),90); };
+$<HTMLSelectElement>('day').onchange = event => void seek((Number((event.target as HTMLSelectElement).value)-1)*meta.module.daySeconds*20);
+$('overview').onclick = () => view.overview(); $('top-down').onclick = () => view.topDown(); $('follow').onclick = () => view.focus(selected);
+$('agent-toggle').onclick = async () => {
+  try { const response = await fetch('/api/control',{ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentsEnabled: !meta.agentsEnabled }) }); if (!response.ok) throw new Error(); meta = await response.json(); renderTimeline(); }
+  catch { toast('Could not change agent state. Check the connection.'); }
+};
+for (const tab of ['journal','details']) $(tab+'-tab').onclick = () => {
+  activeTab = tab; for (const name of ['journal','details']) { $(name).classList.toggle('hidden',name!==tab); $(name+'-tab').classList.toggle('active',name===tab); $(name+'-tab').setAttribute('aria-selected',String(name===tab)); }
+  if (tab === 'details') renderDetails();
+};
+$('help-button').onclick = () => $<HTMLDialogElement>('guide').showModal();
+$('close-guide').onclick = () => $<HTMLDialogElement>('guide').close();
+window.addEventListener('beforeunload', () => { stream.close(); view.dispose(); });

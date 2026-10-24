@@ -1,0 +1,133 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import { Engine } from '../src/core/engine';
+import { island } from '../src/modules/island';
+import type { Block, Entity, WorldModule } from '../src/core/types';
+import { Store } from '../server/store';
+import { worldTools } from '../server/agents/tools';
+import { AgentRuntime } from '../server/agents/runtime';
+import { apply } from '../server/agents/harness-plugin';
+
+const entity = (id = 't1', x = .5, z = .5): Entity => ({ id, name: id, kind: 'troglodyte', controller: 'agent', position: [x,1,z], height: 2, yaw: 0, inventory: null, color: '#ffffff', status: 'idle' });
+function fixture(blocks: Block[] = [], entities = [entity()]): Engine {
+  const floor: Block[] = [];
+  for (let x=-8;x<=8;x++) for (let z=-8;z<=8;z++) floor.push([x,0,z,'stone']);
+  const module: WorldModule = { ...island, generate: () => ({ blocks: [...floor,...blocks], entities }) };
+  return new Engine(module);
+}
+test('half-height water boundary and swept movement refuse a deep intermediate cell', () => {
+  const e = entity();
+  assert.equal(island.canEnter(e,[0,-1,0]).ok,true);
+  assert.equal(island.canEnter(e,[0,-1.01,0]).ok,false);
+  const engine = fixture();
+  engine.voxels.set([0,0,1],null); engine.voxels.set([0,-2,1],'sand');
+  const before = engine.state();
+  assert.equal(engine.act('t1',{action:'move',distance:3}).ok,false);
+  assert.deepEqual(engine.entities,before.entities);
+});
+test('movement continues without decisions and cannot walk through a newly placed obstacle', () => {
+  const engine = fixture();
+  assert.equal(engine.act('t1',{action:'move',distance:4}).ok,true);
+  for(let i=0;i<10;i++) engine.step();
+  assert.ok(engine.entity('t1').position[2] > .5);
+  for(let y=1;y<=4;y++) engine.voxels.set([0,y,2],'stone');
+  for(let i=0;i<80;i++) engine.step();
+  assert.ok(engine.entity('t1').position[2] < 2);
+  assert.equal(engine.entity('t1').motion,undefined);
+});
+test('inventory conserves finite blocks and rejects mixed materials and overflow', () => {
+  const engine = fixture([[1,1,0,'wood'],[-1,1,0,'dirt']]);
+  const before = engine.voxels.cells.size;
+  assert.equal(engine.act('t1',{action:'remove',target:[1,1,0]}).ok,true);
+  assert.equal(engine.voxels.cells.size,before-1);
+  assert.equal(engine.act('t1',{action:'remove',target:[-1,1,0]}).ok,false);
+  assert.equal(engine.act('t1',{action:'place',target:[1,1,0]}).ok,true);
+  assert.equal(engine.voxels.cells.size,before);
+  assert.equal(engine.entity('t1').inventory,null);
+  engine.entity('t1').inventory = {kind:'wood',count:64};
+  assert.equal(engine.act('t1',{action:'remove',target:[1,1,0]}).ok,false);
+  assert.equal(engine.voxels.get([1,1,0]),'wood');
+});
+test('centred hits transform one wood block; buckets fill, carry and pour water', () => {
+  const engine = fixture([[1,1,0,'wood']]);
+  assert.equal(engine.act('t1',{action:'hit',target:[1,1,0],impact:[0,0,0]}).ok,true);
+  assert.equal(engine.voxels.get([1,1,0]),'wood');
+  assert.equal(engine.act('t1',{action:'hit',target:[1,1,0],impact:[.5,.5,.5]}).ok,true);
+  assert.equal(engine.voxels.get([1,1,0]),undefined);
+  assert.deepEqual(engine.entity('t1').inventory,{kind:'bucket',count:1});
+  engine.entity('t1').position=[.5,-1,.5];
+  engine.voxels.set([0,0,0],null); engine.voxels.set([1,0,0],null);
+  engine.voxels.set([1,-1,0],null);
+  assert.equal(engine.act('t1',{action:'fill',target:[1,-1,0]}).ok,true);
+  assert.equal(engine.entity('t1').inventory!.water,true);
+  assert.equal(engine.act('t1',{action:'pour',target:[1,-1,0]}).ok,true);
+  assert.equal(engine.entity('t1').inventory!.water,false);
+});
+test('speech requires vocabulary, clear line of sight and ten-metre range; inbox survives resume', () => {
+  const engine = fixture([], [entity(),entity('t2',.5,5.5)]);
+  assert.equal(engine.act('t1',{action:'say',word:'hello'}).ok,false);
+  assert.equal(engine.act('t1',{action:'say',word:'hey'}).ok,true);
+  assert.equal(engine.observe('t2').heard.length,1);
+  engine.voxels.set([0,2,3],'stone');
+  engine.act('t1',{action:'say',word:'look'});
+  assert.equal(engine.observe('t2').heard.length,1);
+  engine.voxels.set([0,2,3],null); engine.entity('t2').position[2]=11;
+  engine.act('t1',{action:'say',word:'come'});
+  assert.equal(engine.observe('t2').heard.length,1);
+  const resumed = new Engine(engine.module,engine.state());
+  assert.deepEqual(resumed.observe('t2').heard,engine.observe('t2').heard);
+});
+test('observations do not reveal creatures behind solid walls or behind the observer', () => {
+  const engine = fixture([], [entity(),entity('t2',.5,4.5)]);
+  assert.equal(engine.observe('t1').entities.length,1);
+  engine.voxels.set([0,2,2],'stone');
+  assert.equal(engine.observe('t1').entities.length,0);
+  engine.voxels.set([0,2,2],null); engine.entity('t1').yaw=180;
+  assert.equal(engine.observe('t1').entities.length,0);
+});
+test('flat terrain is visible by its exposed faces, rather than its buried block centres', () => {
+  const engine = fixture();
+  const observation = engine.observe('t1');
+  assert.ok(observation.surfaces.find(s=>s.kind==='stone')!.count > 50);
+  assert.ok(observation.blocks.some(b=>b[2]>=5));
+});
+test('thrown stone is lost in the abyss while wood floats; neither duplicates inventory', () => {
+  const engine = fixture();
+  engine.entity('t1').inventory={kind:'stone',count:1};
+  assert.equal(engine.act('t1',{action:'throw',force:8}).ok,true);
+  assert.equal(engine.entity('t1').inventory,null);
+  engine.bodies[0].position=[30,1,30]; engine.bodies[0].velocity=[0,0,0];
+  engine.bodies.push({id:'wood',kind:'wood',position:[31,1,30],velocity:[0,0,0],resting:false});
+  for(let i=0;i<400;i++) engine.step();
+  assert.equal(engine.lost,1);
+  assert.equal(engine.bodies.length,1);
+  assert.equal(engine.bodies[0].kind,'wood');
+  assert.ok(engine.bodies[0].position[1] > -1);
+});
+test('SQLite replays exact edits, dynamics and events, including same-tick restart records', () => {
+  const engine = fixture([[1,1,0,'wood']]), store = new Store(':memory:',engine.module.manifest);
+  store.record(engine.frame(),engine.state());
+  const initial = store.stateAt(0);
+  engine.act('t1',{action:'remove',target:[1,1,0]}); engine.step(); engine.step();
+  const atTwo = engine.state(); store.record(engine.frame());
+  engine.event('world','session','Restart'); store.record(engine.frame(),engine.state());
+  engine.act('t1',{action:'throw',force:3}); engine.step(); engine.step(); store.record(engine.frame());
+  assert.deepEqual(store.stateAt(0),initial);
+  assert.deepEqual(store.stateAt(2),atTwo);
+  assert.deepEqual(store.stateAt(4),engine.state());
+  assert.ok(store.framesAfter(0)[0].changes.some(([key,kind]) => key==='1,1,0' && kind===null));
+  assert.equal(store.eventsAt(4).length,3);
+  store.close();
+});
+test('the Harness schema guard validates real tools; hit is an action, not a tool', async () => {
+  const engine = fixture(), memory = {notes:[] as string[]}, tools=worldTools(engine,'t1',memory);
+  assert.deepEqual(tools.map(t=>t.name),['observe','act','remember']);
+  const invalid = await tools[1].execute({action:'move',distance:'8'}) as {ok:boolean};
+  assert.equal(invalid.ok,false);
+  for(let i=0;i<15;i++) await tools[2].execute({note:`note ${i}`});
+  assert.equal(memory.notes.length,12);
+  let registered=0; apply({tools:{register(tool){assert.equal(typeof tool.output.render,'function');registered++;return()=>{};}}},{engine,entityId:'t1',memory});
+  assert.equal(registered,3);
+});
