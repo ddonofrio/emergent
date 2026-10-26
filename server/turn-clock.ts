@@ -34,6 +34,13 @@ export class TurnClock {
     // Once committed, finish the single second before pausing. Never commit half a decision set.
     this.hooks.status();
   }
+  entityChanged() {
+    if (this.phase === 'thinking') {
+      this.pending?.abort(); this.pending = undefined; this.prepared = undefined; this.decisions = {};
+      this.phase = this.enabled ? 'idle' : 'paused';
+    }
+    this.hooks.status();
+  }
   pump() {
     if (this.closed) return;
     if (this.phase === 'advancing') {
@@ -49,8 +56,7 @@ export class TurnClock {
       }
       return;
     }
-    if (!this.enabled || this.pending || this.phase === 'limited') return;
-    if (!this.agents.canAdvance()) { this.phase = 'limited'; this.hooks.status(); return; }
+    if (!this.enabled || this.pending) return;
     const controller = new AbortController(); this.pending = controller; this.phase = 'thinking'; this.decisions = {};
     this.hooks.status();
     void this.agents.prepareTurn(controller.signal, (id, status) => {

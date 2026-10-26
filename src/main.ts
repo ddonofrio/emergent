@@ -4,7 +4,7 @@ import { advancePlayback } from './view/playback-clock';
 import type { TurnStatus } from './core/time';
 import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from './core/types';
 
-interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; agentsEnabled: boolean; latestTick: number; maxTurns: number; runtime: TurnStatus; }
+interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; agentsEnabled: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -37,7 +37,7 @@ app.innerHTML = `
       <div class="inspector-footer"><span class="status-dot"></span><span id="persistence">Local persistent recording</span><span id="lost">0 lost</span></div>
     </aside>
   </main>
-  <dialog id="guide"><button id="close-guide" class="dialog-close" aria-label="Close field guide">×</button><span class="eyebrow">EMERGENT / FIELD GUIDE</span><h2>Observe. Rewind. Discover.</h2><p>Two Troglodytes share a finite island with a wandering duck. There is no assigned objective. Each shared turn advances one world second after all model decisions arrive. The world waits for unavailable models; your camera and recorded history remain usable.</p><dl><dt>Move the camera</dt><dd>Drag to orbit, right-drag to pan, scroll to zoom. Focus the world and use WASD + Q/E to fly. Shift moves faster. Select a name, then use Follow.</dd><dt>Read the past</dt><dd>Drag the timeline to any recorded moment, choose a day, or pause and play at up to 8×. Live returns to the present. Observer playback never rewinds the actual experiment.</dd><dt>Run a model</dt><dd>Copy <code>.env.example</code> to <code>.env</code>, configure <code>LLM_API_KEY</code>, <code>LLM_BASE_URL</code> and <code>LLM_MODEL</code>, then restart the server. Without a key, the clearly labelled scripted demo exercises the same actions. Each agent stops at <code>AGENT_MAX_TURNS</code>.</dd><dt>Keep an experiment</dt><dd>The server records physics at 10 Hz, events and private notes in SQLite, with checkpoints every 30 seconds. Reopening resumes it. Export downloads the full world history. Use a new <code>DATA_DIR</code> to start a fresh experiment.</dd><dt>Physical limits</dt><dd>One material stack, up to 64 blocks. Three-metre reach. Speech uses seven words, travels at most 10 metres and cannot pass through solid blocks. Water deeper than half a Troglodyte is refused. Sinking items beyond the lower boundary are permanently lost.</dd></dl><p class="guide-note">MVP: voxel terrain stays fixed until edited; thrown items use gravity, collisions and buoyancy. Poured water disperses. Inference waiting has no duration in world history. At 1×, one recorded turn takes one real second. Long actions continue across turns at their normal speed.</p></dialog>`;
+  <dialog id="guide"><button id="close-guide" class="dialog-close" aria-label="Close field guide">×</button><span class="eyebrow">EMERGENT / FIELD GUIDE</span><h2>Observe. Rewind. Discover.</h2><p>Two Troglodytes share a finite island with a wandering duck. There is no assigned objective. Each shared turn advances one world second after all model decisions arrive. The world waits for unavailable models; your camera and recorded history remain usable.</p><dl><dt>Move the camera</dt><dd>Drag to orbit, right-drag to pan, scroll to zoom. Focus the world and use WASD + Q/E to fly. Shift moves faster. Select a name, then use Follow.</dd><dt>Read the past</dt><dd>Drag the timeline to any recorded moment, choose a day, or pause and play at up to 8×. Live returns to the present. Observer playback never rewinds the actual experiment.</dd><dt>Run a model</dt><dd>Copy <code>.env.example</code> to <code>.env</code>, then configure OpenRouter and/or a local OpenAI-compatible provider. Without either provider, the clearly labelled scripted demo exercises the same actions. Agent decisions are unlimited unless an explicit optional cap is configured.</dd><dt>Keep an experiment</dt><dd>The server records physics at 10 Hz, events and private notes in SQLite, with checkpoints every 30 seconds. Reopening resumes the world. Export downloads the complete history.</dd><dt>Physical limits</dt><dd>One material stack, up to 64 blocks. Three-metre reach. Speech uses seven words, travels at most 10 metres and cannot pass through solid blocks. Water deeper than half a Troglodyte is refused. Sinking items beyond the lower boundary are permanently lost.</dd></dl><p class="guide-note">MVP: voxel terrain stays fixed until edited; thrown items use gravity, collisions and buoyancy. Poured water disperses. Inference waiting has no duration in world history. At 1×, one recorded turn takes one real second. Long actions continue across turns at their normal speed.</p></dialog>`;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 let view: WorldView;
@@ -146,7 +146,7 @@ function renderTimeline() {
   $<HTMLSelectElement>('day').value = String(dayOf(cursor));
   $('agent-toggle').textContent = meta.agentsEnabled ? 'Pause world  Ⅱ' : meta.runtime.phase === 'advancing' ? 'Pausing after this turn' : 'Resume world  ▶';
   const waiting = Object.entries(meta.runtime.agents).filter(([,s]) => s.state === 'thinking' || s.state === 'waiting').map(([id]) => shown?.entities.find(e=>e.id===id)?.name ?? id);
-  $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'limited' ? 'Model turn budget reached' : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
+  $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
   $('record-status').textContent = isLive ? '1 turn = 1 world second' : playing && cursor >= latest ? 'Waiting for the next recorded turn' : 'World time · inference waits omitted';
   const marks = $('event-marks'); marks.replaceChildren();
   for (const event of liveEvents.filter(e => ['discovery','lost','memory','agent-error'].includes(e.type))) {
@@ -158,21 +158,40 @@ function renderInspector() {
   $('lost').textContent = `${shown.lost} lost`; $('entity-count').textContent = String(shown.entities.length).padStart(2,'0');
   const list = $('entity-list');
   for (const e of shown.entities) {
-    const displayStatus = isLive && meta.runtime.phase === 'thinking' ? meta.runtime.agents[e.id]?.state ?? 'held' : isLive && meta.runtime.phase === 'limited' && e.controller === 'agent' ? 'turn limit' : e.status;
+    const enabled = e.enabled !== false;
+    const displayStatus = enabled ? isLive && meta.runtime.phase === 'thinking' ? meta.runtime.agents[e.id]?.state ?? 'held' : e.status : 'disabled';
     const existing = document.getElementById(`entity-${e.id}`);
     if (existing) {
-      existing.classList.toggle('selected',e.id===selected); existing.setAttribute('aria-pressed',String(e.id===selected));
+      existing.classList.toggle('selected',e.id===selected); existing.classList.toggle('disabled',!enabled);
+      const select = existing.querySelector('.inhabitant-select')!; select.setAttribute('aria-pressed',String(e.id===selected));
+      const toggle = existing.querySelector<HTMLInputElement>('.entity-toggle')!; toggle.checked = enabled; toggle.disabled = !isLive;
       const status = existing.querySelector('.entity-status')!; status.textContent=displayStatus; status.classList.toggle('thinking',displayStatus==='thinking' || displayStatus==='waiting'); continue;
     }
-    const button = document.createElement('button'); button.className = `inhabitant ${e.id === selected ? 'selected' : ''}`; button.setAttribute('aria-pressed',String(e.id === selected));
-    button.id = `entity-${e.id}`;
+    const row = document.createElement('div'); row.className = `inhabitant ${e.id === selected ? 'selected' : ''} ${enabled ? '' : 'disabled'}`; row.id = `entity-${e.id}`;
+    const button = document.createElement('button'); button.className = 'inhabitant-select'; button.setAttribute('aria-pressed',String(e.id === selected));
     const avatar = document.createElement('span'); avatar.className = `avatar ${e.kind}`; avatar.style.setProperty('--entity-color',e.color); avatar.innerHTML = '<i></i>';
     const text = document.createElement('span'); text.className = 'inhabitant-text'; const name = document.createElement('strong'); name.textContent = e.name;
     const kind = document.createElement('small'); kind.textContent = e.kind === 'troglodyte' ? 'Troglodyte' : 'Duck · NPC'; text.append(name,kind);
     const status = document.createElement('span'); status.className = `entity-status ${displayStatus === 'thinking' || displayStatus === 'waiting' ? 'thinking' : ''}`; status.textContent = displayStatus;
-    button.append(avatar,text,status); button.onclick = () => selectEntity(e.id); button.ondblclick = () => view.focus(e.id); list.append(button);
+    const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.className = 'entity-toggle'; toggle.checked = enabled; toggle.disabled = !isLive;
+    toggle.title = `Enable ${e.name}`; toggle.setAttribute('aria-label',`Enable ${e.name}`); toggle.onchange = () => void setEntityEnabled(e.id,toggle.checked,toggle);
+    button.append(avatar,text,status); button.onclick = () => selectEntity(e.id); button.ondblclick = () => view.focus(e.id); row.append(button,toggle); list.append(row);
   }
   if (activeTab === 'details') renderDetails();
+}
+async function setEntityEnabled(id: string, enabled: boolean, toggle: HTMLInputElement) {
+  toggle.disabled = true;
+  try {
+    const response = await fetch('/api/control',{ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entityId: id, entityEnabled: enabled }) });
+    if (!response.ok) throw new Error();
+    const packet = await response.json() as Metadata & { entity: WorldState['entities'][number] };
+    Object.assign(meta,packet);
+    const live = liveDynamic.entities.find(entity => entity.id === id); if (live) Object.assign(live,packet.entity);
+    if (isLive) { const visible = shown.entities.find(entity => entity.id === id); if (visible) Object.assign(visible,packet.entity); }
+    renderInspector();
+  } catch {
+    toggle.checked = !enabled; toggle.disabled = !isLive; toast('Could not change inhabitant state. Check the connection.');
+  }
 }
 function renderDetails() {
   const e = shown.entities.find(e => e.id === selected); if (!e) return;

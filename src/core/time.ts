@@ -5,12 +5,12 @@ export const STEP_MS = 1000 / TICKS_PER_SECOND;
 export const CLOCK_VERSION = 'lockstep-v1';
 
 export interface DecisionStatus {
-  state: 'thinking' | 'waiting' | 'ready' | 'moving' | 'turn limit';
+  state: 'thinking' | 'waiting' | 'ready' | 'moving' | 'disabled' | 'turn limit';
   attempts?: number;
   message?: string;
 }
 export interface TurnStatus {
-  phase: 'idle' | 'thinking' | 'advancing' | 'paused' | 'limited';
+  phase: 'idle' | 'thinking' | 'advancing' | 'paused';
   enabled: boolean;
   turn: number;
   tick: number;

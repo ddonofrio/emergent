@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open http://127.0.0.1:3000. Without credentials the app runs a clearly labelled **scripted demo**, not an LLM experiment. Copy `.env.example` to `.env`, set `LLM_API_KEY`, `LLM_BASE_URL` and `LLM_MODEL`, and restart for a Chat Completions tool-calling model. Keys remain server-side. Each agent has a configurable lifetime model-turn budget. Context retains complete tool/result groups plus twelve private notes.
+Open http://127.0.0.1:3000. Without a configured provider the app runs a clearly labelled **scripted demo**, not an LLM experiment. Copy `.env.example` to `.env` and configure OpenRouter and/or a local OpenAI-compatible server. Providers are attempted in declaration order; exhaustion pauses world time and retries indefinitely. Keys remain server-side. Agent decisions are unlimited unless an optional positive `AGENT_MAX_TURNS` is explicitly configured. Context retains complete tool/result groups plus twelve private notes.
 
 `npm run build` builds production assets; `npm start` serves them. `npm test` checks the physical invariants, replay and an agent loop against a local mock provider.
 

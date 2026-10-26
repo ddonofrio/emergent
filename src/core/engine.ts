@@ -1,9 +1,9 @@
 import { Voxels } from './voxels';
 import { TICKS_PER_SECOND } from './time';
-import { clone, distance, key, type Action, type ActionResult, type Body, type Entity, type Frame, type Observation, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
+import { clone, distance, key, type Action, type ActionResult, type Body, type Entity, type Frame, type NavigationPath, type NavigationReport, type Observation, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
 
 const ok = (message: string): ActionResult => ({ ok: true, message });
-const fail = (message: string): ActionResult => ({ ok: false, message });
+const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
 const center = (p: Vec3): Vec3 => p.map(v => v + .5) as Vec3;
 const faces: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 
@@ -21,7 +21,7 @@ export class Engine {
   constructor(readonly module: WorldModule, state?: WorldState) {
     const initial = state ?? module.generate();
     this.voxels = new Voxels(module.manifest.materials, initial.blocks);
-    this.entities = clone(initial.entities);
+    this.entities = clone(initial.entities).map(entity => ({ ...entity, enabled: entity.enabled !== false }));
     if (state) {
       this.tick = state.tick; this.bodies = clone(state.bodies); this.lost = state.lost;
       for (const [id, messages] of Object.entries(state.inbox ?? {})) this.inbox.set(id, clone(messages));
@@ -30,6 +30,15 @@ export class Engine {
   get time() { return this.tick / TICKS_PER_SECOND; }
   get day() { return Math.floor(this.time / this.module.manifest.daySeconds) + 1; }
   entity(id: string) { const entity = this.entities.find(e => e.id === id); if (!entity) throw new Error('Unknown entity.'); return entity; }
+  active(entity: Entity) { return entity.enabled !== false; }
+  setEntityEnabled(id: string, enabled: boolean) {
+    const entity = this.entity(id);
+    if (this.active(entity) === enabled) return false;
+    entity.enabled = enabled; delete entity.motion; delete entity.speech;
+    entity.status = enabled ? 'idle' : 'disabled';
+    this.event('world', 'entity-control', `${entity.name} was ${enabled ? 'enabled' : 'disabled'}.`, { entityId: id, enabled });
+    return true;
+  }
   event(actor: string, type: string, message: string, data?: unknown) {
     const event: WorldEvent = { id: this.nextEvent++, tick: this.tick, time: this.time, day: this.day, actor, type, message, ...(data === undefined ? {} : { data: clone(data) }) };
     this.pendingEvents.push(event); this.recentEvents.push(event);
@@ -68,10 +77,12 @@ export class Engine {
     // Preserve nearby reach targets and a representative of every visible material.
     const samples = new Map(blocks.slice(0,Math.max(0,maxBlocks-surfaces.size)).map(b => [key(b.slice(0,3) as Vec3),b]));
     for (const surface of surfaces.values()) { const b = blocks.find(b => b[3]===surface.kind)!; samples.set(key(surface.nearest),b); }
-    const entities = this.entities.filter(other => other.id !== id && this.visible(e, this.eye(other))).map(({ id, name, kind, position }) => ({ id, name, kind, position: clone(position) }));
+    const entities = this.entities.filter(other => other.id !== id && this.active(other) && this.visible(e, this.eye(other))).map(({ id, name, kind, position }) => ({ id, name, kind, position: clone(position) }));
+    const navigation = this.navigationReport(e);
     return { tick: this.tick, time: this.time, self: clone(e), blocks: [...samples.values()].slice(0,maxBlocks), surfaces: [...surfaces.values()], entities,
       items: clone(this.bodies.filter(b => this.visible(e, b.position))), heard: clone((this.inbox.get(id) ?? []).filter(m => this.tick - m.tick < 1200)),
-      description: `Facing ${Math.round(e.yaw)} degrees. ${blocks.length} visible blocks, ${entities.length} visible creatures. Water surface: Y=${this.module.manifest.waterLevel}. ${this.module.manifest.waterLevel > e.position[1] ? 'Your feet are in water.' : 'Your feet are dry.'} Only visible surfaces are listed; occluded and distant space is unknown.`, truncated: blocks.length > maxBlocks };
+      navigation,
+      description: `Facing ${Math.round(e.yaw)} degrees. ${blocks.length} visible blocks, ${entities.length} visible creatures. Water surface: Y=${this.module.manifest.waterLevel}. ${this.module.manifest.waterLevel > e.position[1] ? 'Your feet are in water.' : 'Your feet are dry.'} Navigation paths give collision-checked clearance through visible space; turn is relative to your current facing. Only visible surfaces are listed; occluded and distant space is unknown.`, truncated: blocks.length > maxBlocks };
   }
   private footAt(x: number, z: number, from: number, height: number): Vec3 | null {
     // Find the first reachable support, never teleport through a wall or a canopy.
@@ -91,11 +102,36 @@ export class Engine {
     if (!point) return { reason: 'No reachable support, or the path is obstructed.' };
     const allowed = this.module.canEnter(e, point);
     if (!allowed.ok) return { reason: allowed.message };
-    if (this.entities.some(other => other.id !== e.id && Math.hypot(other.position[0] - x, other.position[2] - z) < .55 && Math.abs(other.position[1] - point[1]) < 1)) return { reason: 'Another creature is in the way.' };
+    if (this.entities.some(other => other.id !== e.id && this.active(other) && Math.hypot(other.position[0] - x, other.position[2] - z) < .55 && Math.abs(other.position[1] - point[1]) < 1)) return { reason: 'Another creature is in the way.' };
     return { point };
+  }
+  private traceMovement(e: Entity, yaw: number, requestedDistance: number): { destination?: Vec3; clearance: number; reason?: string } {
+    const angle = yaw * Math.PI / 180, count = Math.ceil(requestedDistance / .15);
+    let destination = e.position;
+    for (let i = 1; i <= count; i++) {
+      const travelled = requestedDistance * i / count;
+      const step = this.movementPoint(e, e.position[0] + Math.sin(angle) * travelled, e.position[2] + Math.cos(angle) * travelled, destination[1]);
+      if (!step.point) return { clearance: requestedDistance * (i - 1) / count, reason: step.reason };
+      destination = step.point;
+    }
+    return { destination, clearance: requestedDistance };
+  }
+  private navigationReport(e: Entity, checkedDistance = 3, blockedAfter?: number): NavigationReport {
+    const headings: Pick<NavigationPath, 'direction' | 'turn'>[] = [
+      { direction: 'forward-left', turn: -45 },
+      { direction: 'forward', turn: 0 },
+      { direction: 'forward-right', turn: 45 },
+    ];
+    const paths = headings.map(({ direction, turn }) => ({
+      direction,
+      turn,
+      clearance: Math.floor(this.traceMovement(e, e.yaw + turn, checkedDistance).clearance * 10) / 10,
+    }));
+    return { checkedDistance, paths, ...(blockedAfter === undefined ? {} : { blockedAfter: Math.floor(blockedAfter * 10) / 10 }) };
   }
   act(id: string, action: Action): ActionResult {
     const e = this.entity(id);
+    if (!this.active(e)) return fail('This entity is disabled.');
     let result: ActionResult;
     try { result = this.execute(e, action); }
     catch (error) { result = fail(error instanceof Error ? error.message : 'Invalid action.'); }
@@ -111,19 +147,17 @@ export class Engine {
     }
     if (a.action === 'move') {
       if (!Number.isFinite(a.distance) || a.distance! <= 0 || a.distance! > 8) return fail('Move distance must be greater than zero and at most 8 metres.');
-      const angle = e.yaw * Math.PI / 180, count = Math.ceil(a.distance! / .15);
-      let p = e.position;
-      for (let i = 1; i <= count; i++) {
-        const step = this.movementPoint(e, e.position[0] + Math.sin(angle) * a.distance! * i / count, e.position[2] + Math.cos(angle) * a.distance! * i / count, p[1]);
-        if (!step.point) return fail(step.reason!);
-        p = step.point;
+      const route = this.traceMovement(e, e.yaw, a.distance!);
+      if (!route.destination) {
+        const navigation = this.navigationReport(e, Math.min(3, a.distance!), route.clearance);
+        return fail(`${route.reason} You did not move; the attempted route stays clear for about ${navigation.blockedAfter!.toFixed(1)} metres.`, navigation);
       }
-      e.motion = { destination: p, speed: e.controller === 'wander' ? 1 : 2 }; e.status = 'walking';
+      e.motion = { destination: route.destination, speed: e.controller === 'wander' ? 1 : 2 }; e.status = 'walking';
       return ok(`Walking ${a.distance!.toFixed(1)} metres.`);
     }
     if (a.action === 'say') {
       if (!this.module.manifest.vocabulary.includes(a.word!)) return fail('That word is not in your vocabulary.');
-      const recipients = this.entities.filter(other => other.id !== e.id && other.controller === 'agent' && distance(this.eye(e), this.eye(other)) <= 10 && this.voxels.clearLine(this.eye(e), this.eye(other)));
+      const recipients = this.entities.filter(other => other.id !== e.id && this.active(other) && other.controller === 'agent' && distance(this.eye(e), this.eye(other)) <= 10 && this.voxels.clearLine(this.eye(e), this.eye(other)));
       for (const other of recipients) {
         const inbox = this.inbox.get(other.id) ?? []; inbox.push({ from: e.name, word: a.word!, tick: this.tick });
         this.inbox.set(other.id, inbox.slice(-16));
@@ -157,7 +191,7 @@ export class Engine {
     const kind = this.voxels.get(target);
     if (a.action === 'remove') {
       if (!kind) return fail('There is no block there.');
-      if (this.entities.some(other => Math.floor(other.position[0]) === target[0] && Math.floor(other.position[2]) === target[2] && Math.abs(other.position[1] - (target[1] + 1)) < .05)) return fail('A creature is standing on that block.');
+      if (this.entities.some(other => this.active(other) && Math.floor(other.position[0]) === target[0] && Math.floor(other.position[2]) === target[2] && Math.abs(other.position[1] - (target[1] + 1)) < .05)) return fail('A creature is standing on that block.');
       const result = this.canHold(e, kind); if (!result.ok) return result;
       this.voxels.set(target, null); this.addInventory(e, kind); this.wakeBodies(); return ok(`Removed one ${kind}.`);
     }
@@ -165,7 +199,7 @@ export class Engine {
       if (!e.inventory) return fail('Your hands are empty.');
       if (this.module.manifest.materials[e.inventory.kind]?.vessel) return fail('This is a vessel; throw it gently to set it down.');
       if (kind) return fail('That cell is occupied.');
-      if (this.entities.some(other => Math.abs(other.position[0] - point[0]) < .8 && Math.abs(other.position[2] - point[2]) < .8 && target[1] < other.position[1] + other.height && target[1] + 1 > other.position[1])) return fail('A creature occupies that cell.');
+      if (this.entities.some(other => this.active(other) && Math.abs(other.position[0] - point[0]) < .8 && Math.abs(other.position[2] - point[2]) < .8 && target[1] < other.position[1] + other.height && target[1] + 1 > other.position[1])) return fail('A creature occupies that cell.');
       if (![[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]].some(d => this.voxels.solid(target.map((v,i) => v + d[i]) as Vec3))) return fail('A placed block needs an adjacent solid block.');
       const material = e.inventory.kind; this.voxels.set(target, material); this.consume(e); return ok(`Placed one ${material}.`);
     }
@@ -175,7 +209,7 @@ export class Engine {
       const transformed = this.module.transformHit(kind, a.impact);
       if (!transformed) return ok(`Hit ${kind}. It did not change.`);
       const result = this.canHold(e, transformed); if (!result.ok) return result;
-      if (this.entities.some(other => Math.floor(other.position[0]) === target[0] && Math.floor(other.position[2]) === target[2] && Math.abs(other.position[1] - (target[1] + 1)) < .05)) return fail('A creature is standing on that block.');
+      if (this.entities.some(other => this.active(other) && Math.floor(other.position[0]) === target[0] && Math.floor(other.position[2]) === target[2] && Math.abs(other.position[1] - (target[1] + 1)) < .05)) return fail('A creature is standing on that block.');
       this.voxels.set(target, null); this.addInventory(e, transformed); this.wakeBodies();
       this.event(e.id, 'discovery', `${kind} became ${transformed} after a centred impact.`, { target, impact: a.impact });
       return ok(`Your strike hollowed the ${kind} into a ${transformed}.`);
@@ -206,6 +240,7 @@ export class Engine {
     // Commands belong to this step, so a boundary snapshot cannot see future actions.
     beforePhysics?.();
     for (const e of this.entities) {
+      if (!this.active(e)) continue;
       if (e.speech && e.speech.until < this.time) delete e.speech;
       if (e.controller === 'wander' && !e.motion && this.tick % 60 === 0) {
         e.yaw = (this.tick * 13.37) % 360;

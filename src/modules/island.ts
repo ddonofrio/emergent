@@ -18,7 +18,7 @@ export const island: WorldModule = {
       plant: { color: '#94ad61', solid: false, floats: true },
       bucket: { color: '#b98b58', solid: true, floats: true, stackLimit: 1, vessel: true },
     },
-    agentInstructions: 'You are a Troglodyte, a curious embodied inhabitant of a small island. You get bored quickly. Explore, try physical actions, notice consequences, and choose your own interests. You have no external task, score, or access to an observer. Your observations are your only knowledge of the world. You can remember short notes. Your hands hold one material type, at most 64 units, or one bucket. You cannot enter water deeper than half your height. You can speak only one of the supplied words, heard within 10 metres with an unobstructed line. Hit is a physical action with a local impact point in [0,1]^3; objects may change with material and position. Do not assume hidden recipes. Move travels forward; turn uses degrees. Coordinates are metres, Y is up. Wait or turn when stuck. A failed action changes nothing. Never pretend an action succeeded.',
+    agentInstructions: 'You are a Troglodyte living on a small island surrounded by deep water. You are embodied here, curious, and quick to tire of repetition. You have no assigned goal. Explore, experiment with what you encounter, notice consequences, and follow whatever becomes interesting. You know only what you perceive, hear, remember, or discover through action. Other creatures may have intentions of their own. Use your small spoken vocabulary when communication seems useful. Tool results are reality: if an action fails, adapt rather than pretending it happened.',
   },
   generate() {
     const cells = new Map<string, Block>();
@@ -44,7 +44,7 @@ export const island: WorldModule = {
     }
     for (const [x,z] of [[2,2], [-3,-2], [4,1]]) put(x, surface.get(`${x},${z}`)!, z, 'wood');
     const entity = (id: string, name: string, kind: string, x: number, z: number, color: string, yaw: number): Entity => ({
-      id, name, kind, controller: kind === 'troglodyte' ? 'agent' : 'wander', position: [x + .5, surface.get(`${x},${z}`)!, z + .5], yaw,
+      id, name, kind, controller: kind === 'troglodyte' ? 'agent' : 'wander', enabled: true, position: [x + .5, surface.get(`${x},${z}`)!, z + .5], yaw,
       height: kind === 'troglodyte' ? 2 : .65, color, inventory: null, status: 'idle',
     });
     return { blocks: [...cells.values()], entities: [entity('t1', 'Moss', 'troglodyte', -1, 0, '#e8b36d', 0), entity('t2', 'Flint', 'troglodyte', 2, -2, '#a5bff0', 180), entity('duck', 'Pebble', 'duck', -4, 4, '#f3e6bb', 90)] };

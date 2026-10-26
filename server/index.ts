@@ -7,6 +7,7 @@ import { Engine } from '../src/core/engine';
 import { loadModule } from '../src/modules';
 import { Store } from './store';
 import { AgentRuntime } from './agents/runtime';
+import { providersFromEnv } from './agents/providers';
 import { TurnClock } from './turn-clock';
 import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
 
@@ -16,14 +17,19 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT m
 const store = new Store(resolve(process.env.DATA_DIR ?? 'data', `${worldModule.manifest.id}.sqlite`), worldModule.manifest);
 const engine = new Engine(worldModule, store.hasWorld() ? store.stateAt(store.latestTick()) : undefined);
 engine.nextEvent = store.maxEventId() + 1;
-const positive = (value: string | undefined, fallback: number) => { const parsed = Number(value ?? fallback); return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback; };
-const agents = new AgentRuntime(engine, store, { apiKey: process.env.LLM_API_KEY, baseUrl: process.env.LLM_BASE_URL ?? 'https://api.deepseek.com', model: process.env.LLM_MODEL ?? 'deepseek-chat', maxTurns: positive(process.env.AGENT_MAX_TURNS, 250) });
+const optionalTurnLimit = (value: string | undefined) => {
+  if (!value?.trim()) return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error('AGENT_MAX_TURNS must be an optional positive integer.');
+  return parsed;
+};
+const agents = new AgentRuntime(engine, store, { providers: providersFromEnv(), maxTurns: optionalTurnLimit(process.env.AGENT_MAX_TURNS) });
 engine.event('world', 'session', `World ${store.hasWorld() ? 'resumed' : 'created'} in ${agents.mode === 'demo' ? 'scripted demo' : 'LLM'} mode.`);
 store.record(engine.frame(), engine.state(), agents.persistence());
 const clients = new Set<ServerResponse>();
 const production = process.argv.includes('--production');
 const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
-const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.mode === 'llm' ? agents.config.model : 'Scripted demo', agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
+const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.inference.label, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
 function broadcast(event: string, value: unknown) {
   const message = `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`;
   for (const client of clients) {
@@ -45,8 +51,18 @@ const server = createServer(async (req, res) => {
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 2048) { json(res, { error: 'Request too large.' }, 413); return; } }
         const data = JSON.parse(body);
-        if (typeof data.agentsEnabled !== 'boolean') { json(res, { error: 'agentsEnabled must be boolean.' }, 400); return; }
-        turnClock.setEnabled(data.agentsEnabled); json(res, metadata()); return;
+        if (typeof data.agentsEnabled === 'boolean') {
+          turnClock.setEnabled(data.agentsEnabled); json(res, metadata()); return;
+        }
+        if (typeof data.entityId === 'string' && typeof data.entityEnabled === 'boolean') {
+          const entity = engine.entities.find(candidate => candidate.id === data.entityId);
+          if (!entity) { json(res, { error: 'Unknown entity.' }, 404); return; }
+          if (engine.setEntityEnabled(entity.id, data.entityEnabled)) {
+            turnClock.entityChanged(); publishFrame(true);
+          }
+          json(res, { ...metadata(), entity: engine.entity(entity.id) }); return;
+        }
+        json(res, { error: 'Provide agentsEnabled or entityId with entityEnabled.' }, 400); return;
       }
       if (req.method !== 'GET') { json(res, { error: 'Method not allowed.' }, 405); return; }
       const requestedTick = Number(url.searchParams.get('tick') ?? engine.tick);
@@ -84,13 +100,16 @@ const server = createServer(async (req, res) => {
 let stopping = false;
 const turnClock = new TurnClock(engine, agents, {
   frame() {
-    const frame = engine.frame();
-    store.record(frame, engine.tick % 600 === 0 ? engine.state() : undefined, agents.persistence());
-    broadcast('frame', { frame, agentsEnabled: turnClock.status().enabled, runtime: turnClock.status() });
+    publishFrame(engine.tick % 600 === 0);
   },
   status() { broadcast('status', { runtime: turnClock.status() }); },
   fatal(error) { console.error('World storage or runtime failure:', error); void shutdown(1); },
 });
+function publishFrame(checkpoint = false) {
+  const frame = engine.frame();
+  store.record(frame, checkpoint ? engine.state() : undefined, agents.persistence());
+  broadcast('frame', { frame, agentsEnabled: turnClock.status().enabled, runtime: turnClock.status() });
+}
 if (process.env.WORLD_START_PAUSED === 'true') turnClock.setEnabled(false);
 const timer = setInterval(() => {
   try { turnClock.pump(); }

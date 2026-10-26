@@ -4,6 +4,7 @@ export interface Material { color: string; solid: boolean; floats: boolean; stac
 export interface Stack { kind: string; count: number; water?: boolean; }
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander'; position: Vec3; yaw: number;
+  enabled?: boolean;
   height: number; color: string; inventory: Stack | null;
   status: string; speech?: { word: string; until: number };
   motion?: { destination: Vec3; speed: number };
@@ -21,12 +22,15 @@ export interface ModuleManifest {
   agentInstructions: string;
 }
 export interface Action { action: 'move' | 'turn' | 'wait' | 'remove' | 'place' | 'throw' | 'pickup' | 'hit' | 'fill' | 'pour' | 'say'; distance?: number; angle?: number; target?: Vec3; impact?: Vec3; itemId?: string; word?: string; force?: number; }
-export interface ActionResult { ok: boolean; message: string; }
+export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: -45 | 0 | 45; clearance: number; }
+export interface NavigationReport { checkedDistance: number; paths: NavigationPath[]; blockedAfter?: number; }
+export interface ActionResult { ok: boolean; message: string; navigation?: NavigationReport; }
 export interface Observation {
   tick: number; time: number; self: Entity; blocks: Block[];
   entities: Pick<Entity, 'id' | 'name' | 'kind' | 'position'>[];
   items: Body[]; heard: { from: string; word: string; tick: number }[];
   surfaces: { kind: string; count: number; nearest: Vec3 }[];
+  navigation: NavigationReport;
   description: string; truncated: boolean;
 }
 export interface WorldModule {

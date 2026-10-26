@@ -122,7 +122,18 @@ export class WorldView {
   }
   private box(group: THREE.Group, size: Vec3, position: Vec3, color: string) {
     const mesh = new THREE.Mesh(this.cube, new THREE.MeshStandardMaterial({ color, roughness: .9 }));
+    mesh.material.userData.activeColor = color;
     mesh.scale.set(...size); mesh.position.set(...position); mesh.castShadow = true; mesh.receiveShadow = true; group.add(mesh); return mesh;
+  }
+  private styleEntity(group: THREE.Group, enabled: boolean) {
+    if (group.userData.enabled === enabled) return;
+    group.userData.enabled = enabled;
+    group.traverse(object => {
+      if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.MeshStandardMaterial)) return;
+      const material = object.material;
+      material.color.set(enabled ? material.userData.activeColor ?? '#ffffff' : '#777f7b');
+      material.transparent = !enabled; material.opacity = enabled ? 1 : .22; material.depthWrite = enabled;
+    });
   }
   private syncEntities(entities: Entity[]) {
     for (const entity of entities) {
@@ -156,14 +167,17 @@ export class WorldView {
     const alpha = Math.min(1,(now-this.received)/this.interpolationMs);
     if (this.current) {
       const visualTime = (this.prior?.time ?? this.current.time) + (this.current.time - (this.prior?.time ?? this.current.time)) * alpha;
+      this.ring.visible = false;
       for (const e of this.current.entities) {
         const group = this.creatures.get(e.id)!; const previous = this.prior?.entities.find(p => p.id === e.id) ?? e;
+        const enabled = e.enabled !== false;
         let held = this.held.get(e.id);
         if (e.inventory) {
-          if (!held) { held = new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial()); held.scale.setScalar(.42); held.position.set(.36,1,.38); held.castShadow=true; group.add(held); this.held.set(e.id,held); }
-          (held.material as THREE.MeshStandardMaterial).color.set(this.manifest!.materials[e.inventory.kind]?.color ?? '#ffffff');
+          if (!held) { held = new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial()); held.scale.setScalar(.42); held.position.set(.36,1,.38); held.castShadow=true; group.add(held); this.held.set(e.id,held); group.userData.enabled = undefined; }
+          const material = held.material as THREE.MeshStandardMaterial, color = this.manifest!.materials[e.inventory.kind]?.color ?? '#ffffff'; material.userData.activeColor = color; material.color.set(color); if (!enabled) group.userData.enabled = undefined;
           held.visible = true;
         } else if (held) held.visible = false;
+        this.styleEntity(group,enabled);
         group.position.set(...previous.position).lerp(new THREE.Vector3(...e.position),alpha);
         const turn = Math.atan2(Math.sin((e.yaw-previous.yaw)*Math.PI/180),Math.cos((e.yaw-previous.yaw)*Math.PI/180)); group.rotation.y = previous.yaw*Math.PI/180+turn*alpha;
         const walking = e.motion && distanceSquared(e.position,previous.position) > .00001;
@@ -171,8 +185,9 @@ export class WorldView {
         const label = this.labels.get(e.id)!; const projected = group.position.clone().add(new THREE.Vector3(0,e.height+.7,0)).project(this.camera);
         label.style.display = Math.abs(projected.x)>1 || Math.abs(projected.y)>1 || projected.z>1 ? 'none' : 'block';
         label.style.left = `${(projected.x*.5+.5)*this.container.clientWidth}px`; label.style.top = `${(-projected.y*.5+.5)*this.container.clientHeight}px`;
-        label.classList.toggle('selected',e.id === this.selected); label.textContent = e.speech ? `${e.name} · ${e.speech.word}` : e.name;
-        if (e.id === this.selected) {
+        label.classList.toggle('selected',e.id === this.selected); label.classList.toggle('disabled',!enabled); label.textContent = !enabled ? `${e.name} · disabled` : e.speech ? `${e.name} · ${e.speech.word}` : e.name;
+        if (e.id === this.selected && enabled) {
+          this.ring.visible = true;
           this.ring.position.copy(group.position).add(new THREE.Vector3(0,.06,0));
           if (this.following) { const next = group.position.clone().add(new THREE.Vector3(0,1,0)); const delta = next.clone().sub(this.controls.target); this.camera.position.add(delta); this.controls.target.copy(next); }
         }

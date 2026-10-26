@@ -23,8 +23,8 @@ export function worldTools(engine: Engine, id: string, memory: Memory): WorldToo
       } };
   };
   return [
-    tool('observe', 'Look at your current field of view. Occluded or distant objects are unknown. A fresh observation is also supplied before every turn.', { type: 'object', properties: {}, additionalProperties: false }, () => engine.observe(id)),
-    tool('act', 'Perform one embodied action. move: forward 0..8m; turn: relative degrees; remove/place/hit/fill/pour: integer target [x,y,z] within 3m. hit also needs impact in [0,1]^3. throw: force 1..12. pickup: itemId. say: one vocabulary word. Actions are checked against the current world.', {
+    tool('observe', 'Look at your current field of view. navigation reports collision-checked clearance forward and 45 degrees to either side. Its turn values are relative and must be performed before moving along that path. Occluded or distant objects are unknown. A fresh observation is also supplied before every turn.', { type: 'object', properties: {}, additionalProperties: false }, () => engine.observe(id)),
+    tool('act', 'Perform one embodied action. move: forward 0..8m; turn: relative degrees; remove/place/hit/fill/pour: integer target [x,y,z] within 3m. hit also needs impact in [0,1]^3. throw: force 1..12. pickup: itemId. say: one vocabulary word. Actions are checked against the current world. A rejected move returns local navigation alternatives; adapt instead of repeating it.', {
       type: 'object', required: ['action'], additionalProperties: false,
       properties: { action: { type: 'string', enum: ['move','turn','wait','remove','place','throw','pickup','hit','fill','pour','say'] }, distance: { type: 'number' }, angle: { type: 'number' }, target: vector, impact: vector, force: { type: 'number' }, itemId: { type: 'string' }, word: { type: 'string', enum: engine.module.manifest.vocabulary } },
     }, (args: Action) => engine.act(id, args)),

@@ -7,6 +7,7 @@ import { island } from '../src/modules/island';
 import type { Action, Block, Entity, Frame } from '../src/core/types';
 import { Store } from '../server/store';
 import { AgentRuntime } from '../server/agents/runtime';
+import { ProviderChain, type ProviderConfig } from '../server/agents/providers';
 import { TurnClock } from '../server/turn-clock';
 import { advancePlayback } from '../src/view/playback-clock';
 
@@ -40,8 +41,8 @@ async function until(predicate:()=>boolean) {
   while(!predicate() && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,5));
   assert.ok(predicate(),'The expected async state was not reached.');
 }
-function run(engine: Engine, store: Store, url: string) {
-  const runtime=new AgentRuntime(engine,store,{apiKey:'test-key',baseUrl:url,model:'stub-model',maxTurns:10,retryDelayMs:5});
+function run(engine: Engine, store: Store, url: string, maxTurns: number | null = 10) {
+  const runtime=new AgentRuntime(engine,store,{providers:[{id:'stub',name:'Stub provider',apiKey:'test-key',baseUrl:url,model:'stub-model'}],maxTurns,retryDelayMs:5});
   let wall=0; const frames: Frame[]=[], failures: unknown[]=[];
   const clock=new TurnClock(engine,runtime,{
     frame(){const frame=engine.frame();frames.push(frame);store.record(frame,undefined,runtime.persistence());},
@@ -67,13 +68,68 @@ test('both decisions share one instant; response order and 90 seconds of waiting
       assert.equal(engine.time,1); assert.equal(r.frames.length,10);
       assert.equal(engine.entity('t1').inventory?.kind,'wood'); assert.equal(engine.entity('t2').inventory,null);
       assert.ok(Math.abs(engine.entity('duck').position[2]-1.5)<1e-8);
-      assert.equal(store.loadPending(0,'t1','stub-model'),undefined);
+      assert.equal(store.loadPending(0,'t1','stub:stub-model'),undefined);
       assert.equal(store.eventsAt(0).length,0,'The initial snapshot must not contain a later decision.');
       assert.deepEqual(store.stateAt(20),engine.state()); assert.deepEqual(r.failures,[]);
       return engine.state();
     } finally {r.clock.close();store.close();p.close();}
   };
   assert.deepEqual(await simulate('t1'),await simulate('t2'));
+});
+
+test('a stalled primary provider yields to the local fallback without advancing world time',async()=>{
+  const primary=await provider(), local=await provider();
+  const providers: ProviderConfig[]=[
+    {id:'primary',name:'Primary',apiKey:'primary-key',baseUrl:primary.url,model:'primary-model',timeoutMs:25},
+    {id:'local',name:'Local',apiKey:'local-key',baseUrl:local.url,model:'local-model'},
+  ];
+  const chain=new ProviderChain(providers), attempted:string[]=[];
+  const pending=chain.complete({messages:[{role:'system',content:'Your name is t1.'}],tools:[],max_tokens:20},new AbortController().signal,provider=>attempted.push(provider.id));
+  try {
+    await until(()=>primary.requests.length===1);
+    await until(()=>local.requests.length===1);
+    respond(local.requests[0],{action:'wait'});
+    const result=await pending;
+    assert.deepEqual(attempted,['primary','local']);
+    assert.equal(result.provider,'local');
+    assert.equal(result.model,'local-model');
+  }finally{primary.close();local.close();}
+});
+
+test('unlimited agents continue beyond old counters and an explicit cap never freezes physics',async()=>{
+  const p=await provider();
+  const unlimitedEngine=world(), unlimitedStore=new Store(':memory:',unlimitedEngine.module.manifest), unlimited=run(unlimitedEngine,unlimitedStore,p.url,null);
+  let capped:ReturnType<typeof run>|undefined, cappedStore:Store|undefined;
+  try {
+    for(const mind of unlimited.runtime.minds.values()) mind.modelTurns=250;
+    unlimited.clock.pump();await until(()=>p.requests.length===2);
+    for(const request of p.requests)respond(request,{action:'wait'});
+    await until(()=>unlimited.clock.status().phase==='advancing');unlimited.advance(1000);
+    assert.equal(unlimited.runtime.minds.get('t1')!.modelTurns,251);
+
+    const cappedEngine=world();cappedStore=new Store(':memory:',cappedEngine.module.manifest);capped=run(cappedEngine,cappedStore,p.url,1);
+    for(const mind of capped.runtime.minds.values()) mind.modelTurns=1;
+    const duckStart=cappedEngine.entity('duck').position[2];
+    capped.clock.pump();await until(()=>capped!.clock.status().phase==='advancing');
+    assert.equal(p.requests.length,2,'Capped agents must not request another decision.');
+    capped.advance(1000);
+    assert.ok(cappedEngine.entity('duck').position[2]>duckStart,'Autonomous physics must continue after an optional agent cap.');
+  }finally{
+    unlimited.clock.close();unlimitedStore.close();capped?.clock.close();cappedStore?.close();p.close();
+  }
+});
+
+test('disabled agents request and consume no model turns',async()=>{
+  const p=await provider(), engine=world(), store=new Store(':memory:',engine.module.manifest), r=run(engine,store,p.url,null);
+  try {
+    engine.setEntityEnabled('t2',false);
+    r.clock.pump();await until(()=>p.requests.length===1);
+    assert.equal(p.requests[0].id,'t1');
+    respond(p.requests[0],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(r.runtime.minds.get('t1')!.modelTurns,1);
+    assert.equal(r.runtime.minds.get('t2')!.modelTurns,0);
+    assert.equal(engine.entity('t2').status,'disabled');
+  }finally{r.clock.close();store.close();p.close();}
 });
 
 test('long motion takes two world turns and results enter the next model context',async()=>{

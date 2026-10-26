@@ -20,6 +20,7 @@ test('half-height water boundary and swept movement refuse a deep intermediate c
   assert.equal(island.canEnter(e,[0,-1.01,0]).ok,false);
   const engine = fixture();
   engine.voxels.set([0,0,1],null); engine.voxels.set([0,-2,1],'sand');
+  assert.ok(engine.observe('t1').navigation.paths.find(path => path.turn === 0)!.clearance < 1);
   const before = engine.state();
   assert.equal(engine.act('t1',{action:'move',distance:3}).ok,false);
   assert.deepEqual(engine.entities,before.entities);
@@ -33,6 +34,20 @@ test('movement continues without decisions and cannot walk through a newly place
   for(let i=0;i<80;i++) engine.step();
   assert.ok(engine.entity('t1').position[2] < 2);
   assert.equal(engine.entity('t1').motion,undefined);
+});
+test('navigation exposes visible local clearance and a rejected move returns alternatives', () => {
+  const engine = fixture([[0,1,2,'stone'],[0,2,2,'stone'],[0,3,2,'stone']]);
+  const navigation = engine.observe('t1').navigation;
+  assert.deepEqual(navigation.paths.map(path => path.turn),[-45,0,45]);
+  assert.ok(navigation.paths.find(path => path.turn === 0)!.clearance < 1.5);
+  assert.ok(navigation.paths.find(path => path.turn === -45)!.clearance > 2);
+  const before = [...engine.entity('t1').position];
+  const result = engine.act('t1',{action:'move',distance:3});
+  assert.equal(result.ok,false);
+  assert.deepEqual(engine.entity('t1').position,before);
+  assert.ok(result.navigation);
+  assert.ok(result.navigation.blockedAfter! < 1.5);
+  assert.equal(result.navigation.paths.length,3);
 });
 test('inventory conserves finite blocks and rejects mixed materials and overflow', () => {
   const engine = fixture([[1,1,0,'wood'],[-1,1,0,'dirt']]);
@@ -83,6 +98,22 @@ test('observations do not reveal creatures behind solid walls or behind the obse
   assert.equal(engine.observe('t1').entities.length,0);
   engine.voxels.set([0,2,2],null); engine.entity('t1').yaw=180;
   assert.equal(engine.observe('t1').entities.length,0);
+});
+test('disabled entities are invisible, non-physical, inert and persist across resume', () => {
+  const duck: Entity = { ...entity('duck',3.5,3.5), name:'Pebble', kind:'duck', controller:'wander', height:.65, motion:{destination:[3.5,1,6.5],speed:1} };
+  const engine = fixture([], [entity(),entity('t2',.5,2.5),duck]);
+  assert.equal(engine.setEntityEnabled('t2',false),true);
+  assert.equal(engine.setEntityEnabled('duck',false),true);
+  assert.equal(engine.entity('t2').status,'disabled');
+  assert.equal(engine.observe('t1').entities.length,0);
+  assert.equal(engine.act('t2',{action:'wait'}).ok,false);
+  assert.equal(engine.act('t1',{action:'move',distance:3}).ok,true,'A disabled creature must not block movement.');
+  const duckPosition=[...engine.entity('duck').position];
+  for(let i=0;i<30;i++) engine.step();
+  assert.deepEqual(engine.entity('duck').position,duckPosition);
+  const resumed=new Engine(engine.module,engine.state());
+  assert.equal(resumed.entity('t2').enabled,false);
+  assert.equal(resumed.entity('duck').enabled,false);
 });
 test('flat terrain is visible by its exposed faces, rather than its buried block centres', () => {
   const engine = fixture();
