@@ -5,7 +5,7 @@ import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, type TurnStatus } fr
 import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from './core/types';
 import { knowledgeDescription } from './core/knowledge';
 
-interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; parallelRequests: boolean; agentsEnabled: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
+interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -30,7 +30,7 @@ app.innerHTML = `
       </section>
     </section>
     <aside class="inspector" aria-label="World inspector">
-      <div class="experiment"><div class="experiment-heading"><span class="eyebrow">EXPERIMENT 001</span><span class="seed">SEED 731</span></div><div id="runtime-mode" class="runtime-mode">Connecting to runtime</div><label class="request-setting" title="Changes apply from the next turn."><input id="parallel-requests" type="checkbox" checked disabled>Parallel requests</label><p id="turn-status" role="status">One turn = one world second</p><button id="agent-toggle" class="agent-toggle">Pause world <span>Ⅱ</span></button></div>
+      <details id="experiment-panel" class="experiment"><summary class="experiment-heading"><span class="experiment-heading-text"><span class="eyebrow">EXPERIMENT 001</span><span class="seed">SEED 731</span></span><span class="experiment-collapse-mark" aria-hidden="true">+</span></summary><div class="experiment-content"><div id="runtime-mode" class="runtime-mode">Connecting to runtime</div><label class="request-setting" title="Changes apply from the next turn."><input id="parallel-requests" type="checkbox" checked disabled>Parallel requests</label><p id="turn-status" role="status">One turn = one world second</p></div></details>
       <div class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">03</span></div><div id="entity-list"></div></div>
       <div class="inspector-tabs" role="tablist"><button id="journal-tab" role="tab" aria-selected="true" class="active">Journal</button><button id="details-tab" role="tab" aria-selected="false">In focus</button><span id="event-count">0</span></div>
       <div id="journal" class="journal" role="tabpanel"><p class="empty">Waiting for the first trace.</p></div>
@@ -38,7 +38,7 @@ app.innerHTML = `
       <div class="inspector-footer"><span class="status-dot"></span><span id="persistence">Local persistent recording</span><span id="lost">0 lost</span></div>
     </aside>
   </main>
-  <dialog id="guide"><button id="close-guide" class="dialog-close" aria-label="Close field guide">×</button><span class="eyebrow">EMERGENT / FIELD GUIDE</span><h2>Observe. Rewind. Discover.</h2><p>Two Troglodytes share a finite island with a wandering duck. There is no assigned objective. Each shared turn advances one world second after all model decisions arrive. The world waits for unavailable models; your camera and recorded history remain usable.</p><dl><dt>Move the camera</dt><dd>Drag to orbit, right-drag to pan, scroll to zoom. Focus the world and use WASD + Q/E to fly. Shift moves faster. Select a name, then use Follow.</dd><dt>Read the past</dt><dd>Drag the timeline to any recorded moment, choose a day, or pause and play at up to 8×. Live returns to the present. Observer playback never rewinds the actual experiment.</dd><dt>Run a model</dt><dd>Copy <code>.env.example</code> to <code>.env</code>, then configure OpenRouter and/or a local OpenAI-compatible provider. Without either provider, the clearly labelled scripted demo exercises the same actions. Agent decisions are unlimited unless an explicit optional cap is configured.</dd><dt>Keep an experiment</dt><dd>The server records physics at 10 Hz, events and private notes in SQLite, with checkpoints every 30 seconds. Reopening resumes the world. Export downloads the complete history.</dd><dt>Physical limits</dt><dd>One material stack, up to 64 blocks. Three-metre reach. Speech uses seven words, travels at most 10 metres and cannot pass through solid blocks. Water deeper than half a Troglodyte is refused. Sinking items beyond the lower boundary are permanently lost.</dd></dl><p class="guide-note">MVP: voxel terrain stays fixed until edited; thrown items use gravity, collisions and buoyancy. Poured water disperses. Inference waiting has no duration in world history. At 1×, one recorded turn takes one real second. Long actions continue across turns at their normal speed.</p></dialog>`;
+  <dialog id="guide"><button id="close-guide" class="dialog-close" aria-label="Close field guide">×</button><span class="eyebrow">EMERGENT / FIELD GUIDE</span><h2>Observe. Rewind. Discover.</h2><p>Two Troglodytes share a finite island with a wandering duck. There is no assigned objective. Each shared turn advances one world second after all model decisions arrive. The world waits for unavailable models; your camera and recorded history remain usable.</p><dl><dt>Move the camera</dt><dd>Drag to orbit, right-drag to pan, scroll to zoom. Focus the world and use WASD + Q/E to fly. Shift moves faster. Select a name, then use Follow.</dd><dt>Read the past</dt><dd>Drag the timeline to any recorded moment, choose a day, or pause and play at up to 8×. Live returns to the present. Observer playback never rewinds the actual experiment.</dd><dt>Run a model</dt><dd>Copy <code>.env.example</code> to <code>.env</code>, then configure OpenRouter and/or a local OpenAI-compatible provider. Without either provider, the clearly labelled scripted demo exercises the same actions. Agent decisions are unlimited unless an explicit optional cap is configured.</dd><dt>Keep an experiment</dt><dd>The server records physics at 10 Hz, events and private notes in SQLite, with checkpoints every 30 seconds. Reopening resumes the world. Export downloads the complete history.</dd><dt>Physical limits</dt><dd>Ten different item stacks, up to 64 identical items each. Buckets stack by contents. Three-metre reach. Speech uses seven words, travels at most 10 metres and cannot pass through solid blocks. Water deeper than half a Troglodyte is refused. Sinking items beyond the lower boundary are permanently lost.</dd></dl><p class="guide-note">MVP: voxel terrain stays fixed until edited; thrown items use gravity, collisions and buoyancy. Poured water disperses. Inference waiting has no duration in world history. At 1×, one recorded turn takes one real second. Long actions continue across turns at their normal speed.</p></dialog>`;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 let view: WorldView;
@@ -83,13 +83,13 @@ stream.addEventListener('settings',event=>{
 });
 stream.addEventListener('status', event => {
   if (!meta) return;
-  meta.runtime = JSON.parse((event as MessageEvent).data).runtime; meta.agentsEnabled = meta.runtime.enabled;
+  meta.runtime = JSON.parse((event as MessageEvent).data).runtime;
   renderTimeline(); renderInspector();
 });
 stream.addEventListener('frame', event => {
-  const packet = JSON.parse((event as MessageEvent).data) as { frame: Frame; agentsEnabled: boolean; runtime: TurnStatus }, frame = packet.frame;
+  const packet = JSON.parse((event as MessageEvent).data) as { frame: Frame; runtime: TurnStatus }, frame = packet.frame;
   if (!meta) return;
-  latest = frame.tick; meta.agentsEnabled = packet.agentsEnabled; meta.runtime = packet.runtime; liveDynamic = frame;
+  latest = frame.tick; meta.runtime = packet.runtime; liveDynamic = frame;
   for (const [k,kind] of frame.changes) { if (kind) liveCells.set(k,kind); else liveCells.delete(k); }
   liveEvents = [...liveEvents,...frame.events].slice(-200);
   if (isLive) {
@@ -163,7 +163,6 @@ function renderTimeline() {
   const count = dayOf(latest);
   if (count !== dayCount) { const day = $<HTMLSelectElement>('day'); day.replaceChildren(); for (let i = 1;i<=count;i++) { const option = new Option(`Day ${String(i).padStart(3,'0')}`,String(i)); day.add(option); } dayCount = count; }
   $<HTMLSelectElement>('day').value = String(dayOf(cursor));
-  $('agent-toggle').textContent = meta.agentsEnabled ? 'Pause world  Ⅱ' : meta.runtime.phase === 'advancing' ? 'Pausing after this turn' : 'Resume world  ▶';
   const waiting = Object.entries(meta.runtime.agents).filter(([,s]) => s.state === 'thinking' || s.state === 'waiting').map(([id]) => shown?.entities.find(e=>e.id===id)?.name ?? id);
   $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
   $('record-status').textContent = isLive ? '1 turn = 1 world second' : playing && cursor >= latest ? 'Waiting for the next recorded turn' : 'World time · inference waits omitted';
@@ -232,20 +231,40 @@ function renderDetails() {
 }
 function renderJournal() {
   const journal = $('journal'), wasAtTop = journal.scrollTop < 20; journal.replaceChildren();
-  const visible = events.filter(e => e.type !== 'observation' && e.type !== 'tool-result').slice(-70).reverse(); $('event-count').textContent = String(visible.length);
+  const visible = events.filter(e => !['observation','tool-result','decision','turn'].includes(e.type)).reverse(); $('event-count').textContent = String(visible.length);
   for (const event of visible) {
     const row = document.createElement('article'); row.className = `journal-entry ${event.type}`;
     const time = document.createElement('button'); time.className = 'event-time'; time.textContent = formatWorldDuration(event.tick); time.title = 'Jump to this recorded moment'; time.onclick = () => void seek(event.tick);
     const content = document.createElement('div'); const header = document.createElement('div'); header.className = 'event-heading';
     const actor = document.createElement('strong'); actor.textContent = shown?.entities.find(e => e.id === event.actor)?.name ?? 'World';
-    const type = document.createElement('span'); type.textContent = event.type; header.append(actor,type);
-    const message = document.createElement('p'); message.textContent = event.message; content.append(header,message);
+    const type = document.createElement('span'); type.textContent = journalEventLabel(event); header.append(actor,type);
+    const message = document.createElement('p'); message.textContent = journalEventMessage(event); content.append(header,message);
     if (event.data) { const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Trace'; const pre = document.createElement('pre'); pre.textContent = JSON.stringify(event.data,null,2); details.append(summary,pre); content.append(details); }
     row.append(time,content); journal.append(row);
   }
   if (!visible.length) { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'No events at this point in the recording.'; journal.append(empty); }
   if (wasAtTop) journal.scrollTop = 0;
 }
+function journalEventLabel(event:WorldEvent) {
+  if(event.type==='action'||event.type==='rejected'){
+    const action=(event.data as {action?:{action?:string}}|undefined)?.action?.action??'action';
+    const labels:Record<string,string>={walk:'Walking',run:'Running',jump:'Jumping',turn:'Turning',wait:'Waiting',hit:'Striking a block',dig:'Digging with a shovel',strike_held:'Crafting with wood',join:'Joining door halves',place:'Placing an item',throw:'Throwing an item',pickup:'Picking up an item',hold:'Taking an item in hand',store:'Putting an item away',fill:'Filling a bucket',empty:'Emptying a bucket',say:'Speaking',follow:'Following',stop_follow:'Stopping following'};
+    const label=labels[action]??'Action';return event.type==='rejected'?`${label} failed`:label;
+  }
+  const labels:Record<string,string>={damage:'Block damaged',discovery:'Learned',memory:'Journal note',arrived:'Movement complete',blocked:'Movement blocked',collision:'Collision',settled:'Block settled',lost:'Item lost',speech:'Speech',encounter:'Encounter',collapse:'Tree collapse',reflection:'Reflection','journal-compaction':'Journal condensed','agent-error':'Agent paused','entity-control':'Entity control','knowledge-correction':'Knowledge update','follow-ended':'Follow ended','follow-blocked':'Follow blocked',splash:'Water splashed'};
+  return labels[event.type]??event.type.replaceAll('-',' ');
+}
+function journalEventMessage(event:WorldEvent) {
+  if(event.type==='action'||event.type==='rejected'){
+    const result=(event.data as {result?:{message?:string}}|undefined)?.result;
+    if(result?.message)return result.message;
+  }
+  return event.message;
+}
+$<HTMLDetailsElement>('experiment-panel').addEventListener('toggle',event=>{
+  const panel=event.currentTarget as HTMLDetailsElement;
+  panel.querySelector('.experiment-collapse-mark')!.textContent=panel.open?'−':'+';
+});
 $('live').onclick = goLive;
 $('play').onclick = () => {
   if (!meta || seeking) return;
@@ -261,10 +280,6 @@ $<HTMLInputElement>('seek').oninput = event => {
 };
 $<HTMLSelectElement>('day').onchange = event => void seek((Number((event.target as HTMLSelectElement).value)-1)*WORLD_DAY_SECONDS*20);
 $('overview').onclick = () => view.overview(); $('top-down').onclick = () => view.topDown(); $('follow').onclick = () => view.focus(selected);
-$('agent-toggle').onclick = async () => {
-  try { const response = await fetch('/api/control',{ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentsEnabled: !meta.agentsEnabled }) }); if (!response.ok) throw new Error(); meta = await response.json(); renderTimeline(); }
-  catch { toast('Could not change agent state. Check the connection.'); }
-};
 $<HTMLInputElement>('parallel-requests').onchange=async event=>{
   if(!meta)return;
   const input=event.target as HTMLInputElement,parallelRequests=input.checked;input.disabled=true;

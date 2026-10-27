@@ -3,14 +3,14 @@ export type Block = [number, number, number, string];
 export interface Material { color: string; solid: boolean; floats: boolean; stackLimit?: number; vessel?: boolean; }
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
-export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; }
+export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander'; position: Vec3; yaw: number;
   enabled?: boolean;
-  height: number; color: string; inventory: Inventory | null;
+  height: number; hitbox?: { radius: number; height: number }; color: string; inventory: Inventory | null;
   status: string; speech?: { word: string; until: number };
   following?: { entityId: string; blocked?: MovementIssue };
-  motion?: { kind?: 'walk' | 'run' | 'jump'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; stopIssue?: MovementIssue; requestedDistance?: number };
+  motion?: { kind?: 'walk' | 'run' | 'jump' | 'bounce'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; stopIssue?: MovementIssue; requestedDistance?: number };
   lastAction?: ActionResult;
 }
 export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; }
@@ -27,7 +27,7 @@ export interface ModuleManifest {
   perception: { range: number; fieldOfView: number; maxBlocks: number };
   agentInstructions: string;
 }
-export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'place' | 'throw' | 'pickup' | 'hit' | 'strike_held' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; target?: Vec3; impact?: Vec3; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
+export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
 export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: number; clearance: number; approach?: { distance:number; angle:number }; jump?: { distance:number; angle:number }; }
 export interface NavigationReport { checkedDistance: number; paths: (NavigationPath & { issue?: MovementIssue; options?: string[] })[]; blockedAfter?: number; }
 export interface ActionResult { ok: boolean; message: string; navigation?: NavigationReport; feedback?: Record<string, unknown>; }
@@ -45,6 +45,7 @@ export interface Observation {
   entities: Pick<Entity, 'id' | 'name' | 'kind' | 'position'>[];
   items: Body[]; heard: HeardVoice[];
   following?: { entityId: string; name: string; metres?: number; direction?: string; message: string };
+  beingFollowed?: { id: string; name: string; message: string }[];
   encounters: (EncounterNotice & {canSpeakNow:boolean})[];
   surfaces: { kind: string; count: number; nearest: Vec3 }[];
   navigation: NavigationReport;
@@ -54,8 +55,9 @@ export interface Observation {
 export interface WorldModule {
   manifest: ModuleManifest;
   generate(): { blocks: Block[]; entities: Entity[] };
-  transformHit(kind: string, impact: Vec3): string | null;
+  transformHit(kind: string, impact: Vec3, orientation?: 'up' | 'down'): string | null;
   canEnter(entity: Entity, feet: Vec3): ActionResult;
+  movementSpeed?(entity:Entity,feet:Vec3,speed:number):number;
   describeObstacle?(issue: MovementIssue): string | undefined;
   encounterMessage?(observer:Entity,other:Entity,metres:number):string|undefined;
   agentHints?(observation:Observation,learned:ReadonlySet<string>):string[];

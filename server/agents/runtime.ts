@@ -8,13 +8,15 @@ import type { Store } from '../store';
 import { ProviderChain, type ProviderConfig, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
 import { compactView, inventoryContext, recentActions, relevantKnowledge, rounded } from './context';
+import { compactJournal } from './journal-compaction';
+import { journalReminder } from './journal';
 
 interface Message { role: 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
 interface Mind extends Memory {
-  turns: number; modelTurns: number; cycles: Message[][]; lastResult?: unknown;
+  turns: number; modelTurns: number; lastResult?: unknown;
   carriedMoves?: number; carryingReminder?: string; emptyHandMoves?: number;
   knownDiscoveries?: string[]; lastEncounters?: Record<string,number>; lastSpoken?: Record<string,number>;
-  lastReflectionTurn?: number;
+  nextJournalPromptTurn?: number; lastJournalEntryTurn?: number;
 }
 export interface PreparedDecision {
   id: string;
@@ -28,10 +30,11 @@ export interface PreparedDecision {
   model: string;
   reminder?: string;
   hints?: string[];
-  reflection?: {turn:number;note:string|null};
+  journalReminder?: string;
+  journalEntries?: string[];
+  journalCompactions?: {before:string[];after:string[];incoming:string}[];
   stopFollowing?: boolean;
   viewAngle?: number;
-  cycle: Message[];
   usage?: unknown;
 }
 export interface PreparedTurn { tick: number; decisions: PreparedDecision[]; }
@@ -49,8 +52,11 @@ export class AgentRuntime {
     this.inference = new ProviderChain(config.providers);
     this.mode = this.inference.enabled ? 'llm' : 'demo';
     for (const entity of engine.entities.filter(e => e.controller === 'agent')) {
-      const saved = store.loadMind<Mind>(entity.id);
-      this.minds.set(entity.id, saved ? { ...saved, notes:saved.notes.slice(-PRIVATE_NOTE_LIMIT), cycles:[[{role:'user',content:JSON.stringify({recent:recentActions(saved.cycles)})}]], modelTurns: saved.modelTurns ?? 0 } : { notes: [], turns: 0, modelTurns: 0, cycles: [] });
+      const saved = store.loadMind<Mind & {cycles?:Message[][]}>(entity.id);
+      if(saved){
+        const {cycles:_legacyCycles,...mind}=saved;
+        this.minds.set(entity.id,{...mind,notes:saved.notes.slice(-PRIVATE_NOTE_LIMIT),modelTurns:saved.modelTurns??0});
+      }else this.minds.set(entity.id,{notes:[],turns:0,modelTurns:0});
       if(engine.discoveries.get(entity.id)?.delete('unsafe-terrain-edge'))engine.event(entity.id,'knowledge-correction','Removed the generic terrain-edge discovery; only the deep-water island boundary is learned.',{removed:'unsafe-terrain-edge'});
       if (!engine.active(entity)) entity.status = 'disabled';
       else if (entity.following) entity.status = 'following';
@@ -76,7 +82,7 @@ export class AgentRuntime {
       const cached = this.store.loadPending<PreparedDecision>(tick, id, this.inference.cacheKey);
       if (cached) {
         cached.mind.notes=cached.mind.notes.slice(-PRIVATE_NOTE_LIMIT);
-        cached.mind.cycles=[[{role:'user',content:JSON.stringify({recent:recentActions(cached.mind.cycles)})}]];
+        delete (cached.mind as Mind & {cycles?:Message[][]}).cycles;
         report(id, { state: 'ready' }); return cached;
       }
       mind.turns++;
@@ -101,16 +107,25 @@ export class AgentRuntime {
   private demoDecision(id:string,mind:Mind,observation:Observation,tick:number):PreparedDecision{
     const action=demoAction(observation,mind.turns,id),name=action.action,args={...action} as Record<string,unknown>;delete args.action;
     const call={id:'demo-'+tick+'-'+id,type:'function' as const,function:{name,arguments:JSON.stringify(args)}};
-    const cycle:Message[]=[{role:'user',content:JSON.stringify({perception:observation.description,navigation:observation.navigation})},{role:'assistant',content:null,tool_calls:[call]}];
-    return{id,mind,observation,content:null,calls:[call],cycle,latencyMs:0,attempts:0,provider:'demo',model:'demo'};
+    return{id,mind,observation,content:null,calls:[call],latencyMs:0,attempts:0,provider:'demo',model:'demo'};
   }
   private async request(id: string, mind: Mind, observation: Observation, signal: AbortSignal, report: Report): Promise<PreparedDecision> {
     let following=!!observation.self.following,stopFollowing=false,viewAngle=0;
-    const reflectionDue=Math.floor(mind.turns/100)>Math.floor((mind.lastReflectionTurn??0)/100);
-    let reflectionPending=reflectionDue&&!following;
-    let reflection:PreparedDecision['reflection'];
     const started = Date.now();
-    let tools = worldTools(this.engine, id, mind,{reflection:reflectionPending,following});
+    const journalCompactions:NonNullable<PreparedDecision['journalCompactions']>=[];
+    const journalEntries:string[]=[];
+    let journalHint=following?undefined:journalReminder(mind);
+    let journalPromptUsed=journalHint;
+    const journalOptions={
+      compactJournal:async(notes:readonly string[],incoming:string)=>{
+        const after=await compactJournal({name:observation.self.name,notes,incoming,signal,retryDelayMs:this.config.retryDelayMs,
+          complete:async(request,abort)=>{const result=await this.inference.complete(request,abort,(candidate)=>report(id,{state:'thinking',message:`Compacting journal with ${candidate.name}; world time is held.`}));mind.modelTurns++;return result;},
+          waiting:message=>report(id,{state:'waiting',message})});
+        journalCompactions.push({before:[...notes],after,incoming});return after;
+      },
+      onJournalEntry:(note:string)=>{journalEntries.push(note);mind.lastJournalEntryTurn=mind.turns;mind.nextJournalPromptTurn=mind.turns+50;journalHint=undefined;},
+    };
+    let tools = worldTools(this.engine, id, mind,{following,...journalOptions});
     const discoveries=[...(this.engine.discoveries.get(id)??[])];
     const hints=this.engine.module.agentHints?.(observation,new Set(discoveries))??[];
     if(!following)mind.knownDiscoveries=discoveries;
@@ -118,11 +133,10 @@ export class AgentRuntime {
     for(const notice of observation.encounters)mind.lastEncounters[notice.otherId]=Math.max(mind.lastEncounters[notice.otherId]??0,notice.tick);
     const listeners=observation.interactions.speak.filter(other=>(mind.lastSpoken?.[other.id]??-1)<(mind.lastEncounters![other.id]??0));
     if(listeners.length)hints.push(`You can greet or reply to ${listeners.map(other=>other.name).join(', ')} with say.`);
-    const system = `${this.engine.module.manifest.agentInstructions}
-Your name is ${observation.self.name}.`;
+    const system = ()=>[this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),journalHint].filter(Boolean).join('\n');
     delete mind.carryingReminder;
     const held=observation.self.inventory?.selected===null||!observation.self.inventory?undefined:observation.self.inventory.stacks[observation.self.inventory.selected];
-    let reminder=held&&(mind.carriedMoves??0)>=10?carryingReminder(held.kind,held.contents):undefined;
+    let reminder=held&&(mind.carriedMoves??0)>=10?carryingReminder(held.kind,held.contents,observation.interactions.hit.length>0):undefined;
     if((mind.emptyHandMoves??0)>=10&&!held){
       const reachable=observation.interactions.hit;
       const wood=reachable.find(block=>block.kind==='wood');
@@ -131,22 +145,20 @@ Your name is ${observation.self.name}.`;
       else reminder='The blocks in this world look like they can be struck. You could look for one within arm\'s reach and try hit.';
     }
     if(reminder&&held?.kind==='wood')hints.splice(0,hints.length,...hints.filter(hint=>!hint.includes('shapeable')));
-    const reflectionQuestion='Pause to reflect: anything you want to keep in your journal? Save a note or choose remember=false.';
     const notes=()=>mind.notes.length?{notes:mind.notes}:{};
-    const recent=recentActions(mind.cycles),learned=relevantKnowledge(this.engine,observation);
+    const recent=recentActions(this.store.actionEventsAt(observation.tick,id,4)),learned=relevantKnowledge(this.engine,observation);
     const lastResult=observation.self.lastAction??mind.lastResult;
     const heard=observation.heard.length?{heard:observation.heard}:{};
     const {attention,...view}=compactView(observation);
-    const normalContext=()=>rounded({...(attention?{attention}:{}),...(lastResult?{lastResult:{ok:(lastResult as any).ok,message:(lastResult as any).message}}:{}),...view,body:{position:observation.self.position,yaw:observation.self.yaw},...heard,inventory:inventoryContext(observation),...notes(),...(learned.length?{learned}:{}),...(recent.length?{recent}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{})});
-    const reflectionContext=()=>({reflection:reflectionQuestion,...notes(),...(recent.length?{recent}:{} )});
-    const initial=following?{following:observation.following,...heard}:reflectionPending?reflectionContext():normalContext();
+    const normalContext=()=>rounded({...(attention?{attention}:{}),...(lastResult?{lastResult:{ok:(lastResult as any).ok,message:(lastResult as any).message}}:{}),...view,body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...notes(),...(learned.length?{learned}:{}),...(recent.length?{recent}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{})});
+    const initial=following?{following:observation.following,...heard}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
     let attempts=0,supporting=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
     const complete=async()=>{
       while(true){
         signal.throwIfAborted();attempts++;
         report(id,{state:attempts===1?'thinking':'waiting',attempts,message:'Waiting for an inference provider; world time is held.'});
-        try{return await this.inference.complete({messages:[{role:'system',content:system},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
+        try{return await this.inference.complete({messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
         catch(error){signal.throwIfAborted();report(id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});}
       }
     };
@@ -154,43 +166,33 @@ Your name is ${observation.self.name}.`;
       const answer=await complete();signal.throwIfAborted();mind.modelTurns++;provider=answer.provider;model=answer.model;usage=answer.usage;content=answer.content;
       cycle.push({role:'assistant',content:answer.content,...(answer.calls.length?{tool_calls:answer.calls}:{})});
       const physical:ToolCall[]=[];
-      const wasReflecting=reflectionPending;
       const wasFollowing=following;
       for(const call of answer.calls){
         const tool=tools.find(candidate=>candidate.name===call.function.name);let result:unknown;
         if(!tool)result={ok:false,message:'Unknown tool.'};
         else if(tool.physical){
           let errors:string[];
-          try{errors=validateJsonSchemaValue(tool.parameters,JSON.parse(call.function.arguments));}catch{errors=['Invalid JSON arguments.'];}
+          try{const args=JSON.parse(call.function.arguments);errors=validateJsonSchemaValue(tool.parameters,args);if(!errors.length){const problem=tool.validate?.(args);if(problem)errors.push(problem);}}catch{errors=['Invalid JSON arguments.'];}
           if(!errors.length){physical.push(call);continue;}
           result={ok:false,message:errors.join('; ')};
         }
-        else if(tool.name==='reflect'&&!reflectionPending)result={ok:false,message:'The reflection is already complete. Choose a physical action.'};
         else if(tool.name==='look'&&supporting++>=2)result={ok:false,message:'Use at most two look calls before acting. Journal remains freely available.'};
-        else{try{result=tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{result={ok:false,message:'Invalid tool arguments.'};}}
+        else{try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{signal.throwIfAborted();result={ok:false,message:'Invalid tool arguments.'};}}
         cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
         if(call.function.name==='look'&&typeof (result as {viewAngle?:number})?.viewAngle==='number'){
           viewAngle=(result as {viewAngle:number}).viewAngle;
-          tools=worldTools(this.engine,id,mind,{reflection:reflectionPending,following,viewAngle});
+          tools=worldTools(this.engine,id,mind,{following,viewAngle,...journalOptions});
         }
         if(call.function.name==='stop_follow'&&(result as {ok?:boolean})?.ok){
-          following=false;stopFollowing=true;reflectionPending=reflectionDue;
+          following=false;stopFollowing=true;journalHint=journalReminder(mind);journalPromptUsed??=journalHint;
           mind.knownDiscoveries=discoveries;
-          tools=worldTools(this.engine,id,mind,{reflection:reflectionPending,following:false,viewAngle});
-        }
-        if(reflectionPending&&['journal','reflect'].includes(call.function.name)&&(result as {ok?:boolean})?.ok){
-          const args=JSON.parse(call.function.arguments);
-          reflection={turn:mind.turns,note:call.function.name==='reflect'&&!args.remember?null:args.note.trim()};
-          reflectionPending=false;
-          mind.lastReflectionTurn=mind.turns;
-          tools=worldTools(this.engine,id,mind,{following,viewAngle});
+          tools=worldTools(this.engine,id,mind,{following:false,viewAngle,...journalOptions});
         }
       }
-      if(physical.length===1)return{id,mind,observation,content,calls:physical,cycle,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(reflection?{reflection}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
+      if(physical.length===1)return{id,mind,observation,content,calls:physical,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(journalPromptUsed?{journalReminder:journalPromptUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
       if(physical.length>1){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action.'})});}
-      if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(reflectionPending?reflectionContext():normalContext())});
-      else if(wasReflecting&&!reflectionPending)cycle.push({role:'user',content:JSON.stringify(normalContext())});
-      else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose follow or stop_follow.':reflectionPending?'Use reflect to save a note or decline.':'Choose one available action.'});
+      if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(normalContext())});
+      else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose follow or stop_follow.':'Choose one available action.'});
     }
   }
   commit(turn: PreparedTurn) {
@@ -206,13 +208,12 @@ Your name is ${observation.self.name}.`;
       if (!this.engine.active(this.engine.entity(id))) continue;
       const previousMind=this.minds.get(id)!,mind = clone(decision.mind);
       if (this.mode === 'llm') {
-        this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, attention:observation.following&&!decision.stopFollowing?null:compactView(observation).attention??null, reminder:decision.reminder??null, hints:decision.hints??[], reflection:decision.reflection??null, turn: mind.turns });
-        if(decision.reflection)this.engine.event(id,'reflection',decision.reflection.note?'Chose to save a private note during reflection.':'Chose not to add a private note during reflection.',decision.reflection);
+        this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, attention:observation.following&&!decision.stopFollowing?null:compactView(observation).attention??null, reminder:decision.reminder??null, hints:decision.hints??[], journalReminder:decision.journalReminder??null, turn: mind.turns });
+        for(const compaction of decision.journalCompactions??[])this.engine.event(id,'journal-compaction',`Condensed ${compaction.before.length} private notes into ${compaction.after.length} before saving a new note.`,compaction);
         this.engine.event(id, 'decision', content?.slice(0, 500) || `Requested ${calls.length} tool calls.`, {
           provider: decision.provider, model: decision.model, latencyMs: decision.latencyMs, attempts: decision.attempts, usage: decision.usage ?? null, toolCalls: calls,
         });
       }
-      const cycle:Message[]=clone(decision.cycle);
       if(decision.stopFollowing)this.engine.act(id,{action:'stop_follow'});
       const tools=worldTools(this.engine,id,mind,{viewAngle:decision.viewAngle,availableOnly:false});
       for (const call of calls) {
@@ -222,11 +223,10 @@ Your name is ${observation.self.name}.`;
           const args=JSON.parse(call.function.arguments);
           // Ready decisions from older recordings may still contain physical impact coordinates.
           result=call.function.name==='strike_held'&&args.impact&&!args.point
-            ?this.engine.act(id,{action:'strike_held',impact:args.impact})
+            ?this.engine.act(id,{action:'strike_held',impact:args.impact,orientation:args.orientation})
             :tool?tool.invoke(args):{ok:false,message:'That physical action is not currently available.'};
         } catch { result = { ok: false, message: 'Invalid tool arguments.' }; }
         if (this.mode === 'llm') this.engine.event(id, 'tool-result', call.function.name, { callId: call.id, result });
-        cycle.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
         mind.lastResult = result;
         this.engine.entity(id).lastAction=result as import('../../src/core/types').ActionResult;
         const held=observation.self.inventory?.selected===null||!observation.self.inventory?undefined:observation.self.inventory.stacks[observation.self.inventory.selected];
@@ -239,23 +239,23 @@ Your name is ${observation.self.name}.`;
           const moved=call.function.name==='walk'||call.function.name==='jump';
           if(call.function.name==='hit')mind.emptyHandMoves=0;
           else if(moved&&!held)mind.emptyHandMoves=Math.min(10,(mind.emptyHandMoves??0)+1);
-          const usedHeld=held&&['place','throw','strike_held','fill','empty','store'].includes(call.function.name);
+          const usedHeld=held&&['place','throw','strike_held','fill','empty','store','dig','join'].includes(call.function.name);
           if(moved&&held)mind.carriedMoves=Math.min(10,(mind.carriedMoves??0)+1);
           else if(usedHeld||!held||(mind.carriedMoves??0)<10)mind.carriedMoves=0;
         }
       }
       this.engine.acknowledgeEncounters(id,observation.encounters??[]);
       if (this.mode === 'llm') {
-        for(const note of mind.notes.filter(note=>!previousMind.notes.includes(note)))this.engine.event(id,'memory',note,{notes:mind.notes});
-        mind.cycles=[[{role:'user',content:JSON.stringify({recent:recentActions([...mind.cycles,cycle])})}]];
+        for(const note of decision.journalEntries??mind.notes.filter(note=>!previousMind.notes.includes(note)))this.engine.event(id,'memory',note,{notes:mind.notes});
       }
       this.minds.set(id, mind);
     }
   }
 }
 
-function carryingReminder(kind:string,contents?:string) {
+function carryingReminder(kind:string,contents?:string,canDig=false) {
   if(kind==='wood')return 'You are still holding a wood block; try shaping it with strike_held.';
+  if(kind==='shovel')return canDig?'Your shovel can remove the reachable soil with dig.':'You are holding a shovel. Look for reachable soil to dig.';
   if(kind==='bucket')return contents?`Your bucket holds ${contents}; you can empty it.`:'Your empty bucket can carry material when fill is available.';
   return `You are still holding ${kind}; you could place or throw it.`;
 }

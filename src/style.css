@@ -8,3 +8,11 @@
 @media(min-width:1600px){main{grid-template-columns:minmax(0,1fr) 360px}.app-header{padding:0 34px}.observation-area{padding-left:32px;padding-right:28px}.world-toolbar{height:103px}.experiment{padding:30px 26px 22px}.inhabitants{padding:22px 19px 16px}.journal-entry{padding:18px 0}.journal-entry p{font-size:11px}.entity-status{font-size:9px}.timeline{height:145px;padding-top:23px}}
 @media(max-width:1050px){.header-middle{display:none}.world-stats span:nth-child(2){display:none}.world-stats{gap:10px;font-size:8px}main{grid-template-columns:minmax(0,1fr) 285px}.observation-area{padding:0 14px}.camera-hint{display:none}.timeline-labels>span:nth-child(2){display:none}#record-status{display:none}.version{display:none}.experiment-title{font-size:16px}}
 @media(max-width:700px){.app-header{height:58px;padding:0 16px}.brand{font-size:22px}.header-actions{gap:14px}.quiet{font-size:10px}main{height:auto;min-height:calc(100dvh - 58px);display:flex;flex-direction:column}.world-toolbar{height:76px}.world{height:57dvh;min-height:340px;flex:none}.timeline{height:120px}.inspector{border-left:0;border-top:1px solid var(--line);display:grid;grid-template-columns:1fr 1fr}.experiment{padding:20px 16px}.inhabitants{padding:20px 10px 12px}.inspector-tabs,.journal,.details,.inspector-footer{grid-column:1/-1}.journal,.details{height:340px}.world-stats span:last-child{display:none}.world-top{left:14px;right:14px}.glass-tag{font-size:8px;padding:8px}.world-bottom{left:14px;right:14px}.scale{font-size:7px}.entity-label{font-size:9px}.timeline-right{gap:5px}.playback-controls{gap:8px}dialog{padding:25px}}
+.experiment-heading{display:flex;align-items:center;justify-content:space-between;width:100%;margin:0;padding:0;border:0;background:none;color:inherit;text-align:left;cursor:pointer;list-style:none}
+.experiment-heading::-webkit-details-marker{display:none}
+.experiment-heading-text{display:flex;flex-direction:column;gap:4px}
+.experiment-heading .seed{margin:0}
+.experiment-collapse-mark{font:16px var(--mono);color:var(--muted)}
+.experiment-content{margin-top:14px}
+.experiment-heading:hover .experiment-collapse-mark{color:var(--lime)}
+.experiment-heading:focus-visible{outline:2px solid var(--lime);outline-offset:4px}

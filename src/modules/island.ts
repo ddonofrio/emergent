@@ -17,12 +17,18 @@ export const island: WorldModule = {
       wood: { color: '#886147', solid: true, floats: true },
       leaves: { color: '#477b51', solid: true, floats: true },
       plant: { color: '#94ad61', solid: false, floats: true },
-      bucket: { color: '#b98b58', solid: true, floats: true, stackLimit: 1, vessel: true },
+      bucket: { color: '#b98b58', solid: true, floats: true, stackLimit: 64, vessel: true },
+      plank: { color: '#a17a55', solid: true, floats: true },
       spear: { color: '#9b714d', solid: true, floats: true },
       knife: { color: '#a77a52', solid: true, floats: true },
+      // Older recordings can contain arrows; no current recipe produces them.
       arrow: { color: '#ad8057', solid: true, floats: true },
+      shovel: { color: '#aa8055', solid: true, floats: true, stackLimit: 64 },
+      door_half_up: { color: '#9b704b', solid: true, floats: true },
+      door_half_down: { color: '#9b704b', solid: true, floats: true },
+      door: { color: '#895e3c', solid: true, floats: true, stackLimit: 64 },
     },
-    agentInstructions: 'You are a curious Troglodyte living on an island, with no assigned task. Changes catch your attention: follow them to see what happens. You get bored when nothing new happens. Choose one available action. Trust the reported results; failed actions did not happen.',
+    agentInstructions: 'You are {name}, a curious Troglodyte living on an island. Changes catch your attention: investigate what happens. Choose your own goal, such as building a bridge or exploring what wood can become. If you have no goal, explore and choose one. Take one available action toward it. You get bored when nothing new happens. Trust action results; failed actions did not happen.',
   },
   generate() {
     const cells = new Map<string, Block>();
@@ -50,14 +56,16 @@ export const island: WorldModule = {
     for (const [x,z] of [[2,2], [-3,-2], [4,1]]) put(x, surface.get(`${x},${z}`)!, z, 'wood');
     const entity = (id: string, name: string, kind: string, x: number, z: number, color: string, yaw: number): Entity => ({
       id, name, kind, controller: kind === 'troglodyte' ? 'agent' : 'wander', enabled: true, position: [x + .5, surface.get(`${x},${z}`)!, z + .5], yaw,
-      height: kind === 'troglodyte' ? 2 : .65, color, inventory: null, status: 'idle',
+      height: kind === 'troglodyte' ? 2 : .65, hitbox: { radius: kind === 'troglodyte' ? .36 : .24, height: kind === 'troglodyte' ? 2 : .65 }, color, inventory: null, status: 'idle',
     });
     return { blocks: [...cells.values()], entities: [entity('t1', 'Moss', 'troglodyte', -1, 0, '#e8b36d', 0), entity('t2', 'Flint', 'troglodyte', 2, -2, '#a5bff0', 180), entity('duck', 'Pebble', 'duck', -4, 4, '#f3e6bb', 90)] };
   },
-  transformHit(kind, impact) {
+  transformHit(kind, impact, orientation) {
     if(kind!=='wood')return null;
     const [x,y,z]=impact,mid=(v:number)=>v>=.32&&v<=.68,edge=(v:number)=>v<=.18||v>=.82;
-    if(edge(x)&&edge(y)&&edge(z))return 'arrow';
+    if(edge(x)&&edge(y)&&edge(z))return 'shovel';
+    if(edge(x)&&mid(y)&&edge(z))return orientation==='up'?'door_half_up':orientation==='down'?'door_half_down':null;
+    if(y<=.18&&mid(x)&&mid(z))return 'plank';
     if(y>=.82&&mid(x)&&mid(z))return 'bucket';
     if(z>=.82&&mid(x)&&mid(y))return 'spear';
     if(edge(x)&&mid(y)&&mid(z))return 'knife';
@@ -77,11 +85,12 @@ export const island: WorldModule = {
   relevantKnowledge(observation,knowledge){
     const inventory=observation.self.inventory,held=inventory?.selected===null||!inventory?undefined:inventory.stacks[inventory.selected];
     const nearWater=observation.self.position[1]<=waterLevel+1||observation.navigation.paths.some(path=>path.issue?.kind==='water');
-    if(knowledge==='blocks-break-after-three-hits')return observation.interactions.hit.length>0;
+    if(knowledge==='blocks-break-after-three-hits')return !held&&observation.interactions.hit.length>0;
     if(knowledge==='deep-water-limit')return nearWater;
     if(knowledge==='thrown-blocks-settle')return !!held&&['dirt','grass','sand','stone','wood','leaves','plant'].includes(held.kind);
     if(knowledge==='nonfloating-objects-sink')return nearWater&&!!held;
-    if(knowledge.startsWith('wood-shape:'))return !!inventory?.stacks.some(stack=>stack.kind==='wood')||observation.surfaces.some(surface=>surface.kind==='wood');
+    if(knowledge==='wood-shape:door')return !!inventory?.stacks.some(stack=>stack.kind==='door_half_up'||stack.kind==='door_half_down');
+    if(knowledge.startsWith('wood-shape:'))return held?.kind==='wood';
     return false;
   },
   respondToSpeech(listener){
@@ -91,5 +100,8 @@ export const island: WorldModule = {
     return waterLevel - feet[1] > entity.height / 2
       ? { ok: false, message: 'Refused: the water would rise above half my height.' }
       : { ok: true, message: 'Safe depth.' };
+  },
+  movementSpeed(entity,feet,speed){
+    return waterLevel-feet[1]>=entity.height/2?speed/2:speed;
   },
 };

@@ -20,6 +20,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS checkpoints (tick INTEGER PRIMARY KEY, data BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, tick INTEGER NOT NULL, actor TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_tick ON events(tick);
+      CREATE INDEX IF NOT EXISTS events_actor_type_id ON events(actor, type, id);
       CREATE TABLE IF NOT EXISTS minds (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pending_decisions (tick INTEGER NOT NULL, actor TEXT NOT NULL, model TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tick, actor));`);
     const clock = this.db.prepare('SELECT value FROM meta WHERE key = ?').get('clock') as { value: string } | undefined;
@@ -28,7 +29,7 @@ export class Store {
     }
     this.db.prepare('INSERT OR IGNORE INTO meta VALUES (?, ?)').run('clock', CLOCK_VERSION);
     const previous = this.db.prepare('SELECT value FROM meta WHERE key = ?').get('module') as { value: string } | undefined;
-    if (previous && !compatibleManifest(previous.value,manifest)) throw new Error('Module configuration changed. Use a new DATA_DIR to preserve the existing recording.');
+    if (previous && !compatibleManifest(previous.value,manifest)) { this.db.close();throw new Error('Module configuration changed. Use a new DATA_DIR to preserve the existing recording.'); }
     this.db.prepare('INSERT OR IGNORE INTO meta VALUES (?, ?)').run('module', JSON.stringify(manifest));
   }
   latestTick() { return (this.db.prepare('SELECT MAX(tick) AS tick FROM frames').get() as { tick: number | null }).tick ?? 0; }
@@ -73,6 +74,13 @@ export class Store {
     const rows = (actor ? this.db.prepare('SELECT data FROM events WHERE tick <= ? AND actor = ? ORDER BY id DESC LIMIT ?').all(tick, actor, limit) : this.db.prepare('SELECT data FROM events WHERE tick <= ? ORDER BY id DESC LIMIT ?').all(tick, limit)) as { data: string }[];
     return rows.map(r => JSON.parse(r.data)).reverse();
   }
+  actionEventsAt(tick:number,actor:string,limit=4):WorldEvent[]{
+    const rows=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type IN ('action','rejected') ORDER BY id DESC LIMIT ?").all(tick,actor,limit) as {data:string}[];
+    const actions=rows.map(row=>JSON.parse(row.data) as WorldEvent).reverse();
+    if(!actions.length)return [];
+    const outcomes=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND id > ? AND type IN ('arrived','blocked','follow-ended','follow-blocked') ORDER BY id").all(tick,actor,actions[0].id) as {data:string}[];
+    return [...actions,...outcomes.map(row=>JSON.parse(row.data) as WorldEvent)].sort((a,b)=>a.id-b.id);
+  }
   memoryAt(tick:number,actor:string,limit=PRIVATE_NOTE_LIMIT) {
     const rows=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type = 'memory' ORDER BY id DESC LIMIT ?").all(tick,actor,limit) as {data:string}[];
     const latest=rows[0]?JSON.parse(rows[0].data) as WorldEvent:undefined;
@@ -100,6 +108,11 @@ function compatibleManifest(recorded: string, current: ModuleManifest) {
     previous.daySeconds=current.daySeconds;
     // Agent wording does not change recorded geometry or replay compatibility.
     previous.agentInstructions=current.agentInstructions;
+    // Inventory capacity changes affect future actions, not recorded terrain or replay.
+    for(const [kind,material] of Object.entries(previous.materials))if(current.materials[kind])material.stackLimit=current.materials[kind].stackLimit;
+    // New products may extend the catalog; existing material behavior must match.
+    if(Object.entries(previous.materials).some(([kind,material])=>JSON.stringify(material)!==JSON.stringify(current.materials[kind])))return false;
+    previous.materials=current.materials;
     return JSON.stringify(previous)===JSON.stringify(current);
   } catch { return false; }
 }

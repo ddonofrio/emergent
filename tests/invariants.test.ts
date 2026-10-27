@@ -1,12 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Engine } from '../src/core/engine';
 import { island } from '../src/modules/island';
 import type { Block, Entity, WorldModule } from '../src/core/types';
 import { Store } from '../server/store';
 import { worldTools } from '../server/agents/tools';
 import { apply } from '../server/agents/harness-plugin';
-import { compactView, inventoryContext, relevantKnowledge } from '../server/agents/context';
+import { compactView, inventoryContext, recentActions, relevantKnowledge } from '../server/agents/context';
+import { exchangeInventory } from '../src/core/inventory';
 
 const entity = (id = 't1', x = .5, z = .5): Entity => ({ id, name: id, kind: 'troglodyte', controller: 'agent', position: [x,1,z], height: 2, yaw: 0, inventory: null, color: '#ffffff', status: 'idle' });
 function fixture(blocks: Block[] = [], entities = [entity()]): Engine {
@@ -32,6 +36,44 @@ test('follow is offered only for visible active entities within twenty metres, i
   assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,true);
   assert.deepEqual(worldTools(engine,'t1',memory).map(tool=>tool.name),['follow','stop_follow']);
   assert.equal(engine.act('t1',{action:'walk',distance:1}).ok,false);
+});
+
+test('being followed removes follow, reports the follower, and prevents mutual follow loops at commit time',()=>{
+  const first=entity('t1',.5,.5),second=entity('t2',2.5,.5),third=entity('t3',4.5,.5),engine=fixture([],[first,second,third]);
+  engine.entity('t1').yaw=90;engine.entity('t2').yaw=90;engine.entity('t3').yaw=270;
+  assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,true);
+  const observed=engine.observe('t2');
+  assert.deepEqual(observed.interactions.follow,[]);
+  assert.match(observed.beingFollowed![0].message,/t1 is following you/);
+  assert.equal(worldTools(engine,'t2',{notes:[]}).some(tool=>tool.name==='follow'),false);
+  assert.match(engine.act('t2',{action:'follow',entityId:'t1'}).message,/being followed/);
+  assert.equal(engine.entity('t2').following,undefined);
+
+  engine.act('t1',{action:'stop_follow'});
+  assert.equal(engine.act('t2',{action:'follow',entityId:'t3'}).ok,true);
+  assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,true);
+  assert.equal(engine.entity('t2').following,undefined,'A creature stops its own follow as soon as another creature follows it.');
+  assert.ok(engine.entity('t1').following);
+});
+
+test('entity hitboxes prevent pass-through and produce a recorded safe rebound',()=>{
+  const engine=fixture([],[entity('t1',.5,.5),entity('t2',.5,2.5)]),walker=engine.entity('t1'),other=engine.entity('t2');
+  walker.yaw=0;
+  assert.equal(engine.act('t1',{action:'walk',distance:5}).ok,true);
+  let closest=Infinity,sawBounce=false;
+  for(let tick=0;tick<80;tick++){
+    engine.step();
+    const gap=Math.hypot(walker.position[0]-other.position[0],walker.position[2]-other.position[2]);
+    closest=Math.min(closest,gap);
+    assert.ok(gap>=(walker.hitbox!.radius+other.hitbox!.radius)-.001,'Hitboxes must never overlap.');
+    assert.equal(engine.module.canEnter(walker,walker.position).ok,true,'A rebound must remain in permitted terrain.');
+    assert.ok([-.23,.23].some(dx=>[-.23,.23].some(dz=>engine.voxels.solid([walker.position[0]+dx,walker.position[1]-.01,walker.position[2]+dz]))),'A rebound must retain safe ground beneath the character.');
+    if(walker.motion?.kind==='bounce'||other.motion?.kind==='bounce')sawBounce=true;
+  }
+  assert.ok(sawBounce);assert.ok(closest<1);
+  assert.match(walker.lastAction!.message,/collide.*bounce back safely/i);
+  assert.ok(engine.recentEvents.some(event=>event.type==='collision'&&event.actor==='t1'));
+  assert.ok(other.position[2]>2.5,'The struck character also rebounds instead of being passed through.');
 });
 
 test('following parks at one metre, resumes when the target moves, and replays without decisions',()=>{
@@ -110,14 +152,14 @@ test('a visible trunk face can be struck even when its centre is hidden by the u
 test('full inventories omit pickup, storing only frees hands, and arguments select real local items and stacks',()=>{
   const engine=fixture(),actor=engine.entity('t1'),memory={notes:[]};
   engine.bodies.push({id:'near-arrow',kind:'arrow',position:[.5,1.2,1.5],velocity:[0,0,0],resting:true});
-  actor.inventory={stacks:[{kind:'wood',count:63},{kind:'sand',count:1}],selected:0,capacity:64};
+  actor.inventory={stacks:['wood','sand','stone','grass','dirt','leaves','plant','plank','knife','spear'].map(kind=>({kind,count:64})),selected:0,capacity:640};
   assert.equal((worldTools(engine,'t1',memory).find(tool=>tool.name==='store')!.invoke({}) as any).ok,true);
   const inventory=inventoryContext(engine.observe('t1'));
-  assert.equal(inventory.used,64);assert.equal(inventory.free,0);assert.equal(inventory.hand,null);
+  assert.equal(inventory.stackSlots,10);assert.equal(inventory.freeStackSlots,0);assert.equal(inventory.maxPerStack,64);assert.equal(inventory.hand,null);
   assert.equal(worldTools(engine,'t1',memory).some(tool=>tool.name==='pickup'),false);
   const hold=worldTools(engine,'t1',memory).find(tool=>tool.name==='hold')!;
   assert.equal((hold.invoke({stack:99}) as any).ok,false);assert.equal((hold.invoke({stack:1}) as any).ok,true);
-  assert.deepEqual(worldTools(engine,'t1',memory).find(tool=>tool.name==='hold')!.parameters.properties!.stack.enum,[0]);
+  assert.deepEqual(worldTools(engine,'t1',memory).find(tool=>tool.name==='hold')!.parameters.properties!.stack.enum,[0,2,3,4,5,6,7,8,9]);
   actor.inventory=null;
   const pickup=worldTools(engine,'t1',memory).find(tool=>tool.name==='pickup')!;
   assert.equal((pickup.invoke({itemId:'arrow'}) as any).ok,false);
@@ -146,7 +188,7 @@ test('context selects relevant learned facts without forgetting authoritative di
   const facts=['deep-water-limit','thrown-blocks-settle','wood-shape:bucket'];engine.discoveries.set('t1',new Set(facts));
   assert.deepEqual(relevantKnowledge(engine,engine.observe('t1')),[]);
   engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
-  assert.deepEqual(relevantKnowledge(engine,engine.observe('t1')),['Thrown blocks settle and become part of the terrain.','Wood can be shaped into a bucket.']);
+  assert.deepEqual(relevantKnowledge(engine,engine.observe('t1')),['Thrown blocks settle and become part of the terrain.','Strike wood at top_center to make a bucket.']);
   assert.deepEqual([...engine.discoveries.get('t1')!],facts);
 });
 
@@ -210,6 +252,23 @@ test('half-height water boundary and swept movement refuse a deep intermediate c
   assert.ok(engine.entity('t1').position[2]>before.entities[0].position[2]);
   assert.ok(engine.entity('t1').position[2]<1.24,'The rear of the footprint can still be supported at the edge.');
   assert.match(engine.entity('t1').lastAction!.message,/water|drops away/i);
+});
+
+test('walking and running are half speed when one block of water reaches half the body',()=>{
+  for(const [action,distance,speed] of [['walk',3,1],['run',3,2]] as const){
+    const engine=fixture(),actor=engine.entity('t1');
+    for(let x=-1;x<=1;x++)for(let z=-1;z<=8;z++){
+      engine.voxels.set([x,0,z],null);
+      engine.voxels.set([x,-2,z],'stone');
+    }
+    actor.position=[.5,-1,.5];
+    assert.equal(island.manifest.waterLevel-actor.position[1],actor.height/2,'One water block reaches exactly half the Troglodyte height.');
+    assert.equal(island.canEnter(actor,actor.position).ok,true);
+    assert.equal(island.movementSpeed!(actor,actor.position,speed*2),speed);
+    assert.equal(engine.act('t1',{action,distance}).ok,true);
+    for(let tick=0;tick<20;tick++)engine.step();
+    assert.ok(Math.abs(actor.position[2]-(.5+speed))<1e-8,`${action} should travel ${speed} m in one second at this depth.`);
+  }
 });
 test('movement continues without decisions and cannot walk through a newly placed obstacle', () => {
   const engine = fixture();
@@ -306,7 +365,7 @@ test('one-block rises are jumpable, two-block walls are not, and feedback names 
   const wall=two.act('t1',{action:'walk',distance:2});assert.equal(wall.ok,false);assert.match(wall.message,/2-block stone wall/);assert.equal(wall.navigation!.paths[1].options!.includes('jump'),false);
   assert.equal(two.act('t1',{action:'jump',distance:2}).ok,false);
 });
-test('a creature can jump while carrying a raw block but still cannot run or hit',()=>{
+test('a creature can jump while carrying a raw block and sees why run, hit, and pickup are disabled',()=>{
   const engine=fixture();
   engine.entity('t1').inventory={stacks:[{kind:'stone',count:1}],selected:0,capacity:64};
   assert.equal(engine.act('t1',{action:'jump',distance:2}).ok,true);
@@ -315,7 +374,11 @@ test('a creature can jump while carrying a raw block but still cannot run or hit
   assert.equal(engine.act('t1',{action:'run',distance:2}).ok,false);
   assert.equal(engine.act('t1',{action:'hit',target:[0,0,3]}).ok,false);
   const names=worldTools(engine,'t1',{notes:[]}).map(tool=>tool.name);
-  assert.ok(names.includes('jump'));assert.equal(names.includes('run'),false);assert.equal(names.includes('hit'),false);
+  assert.ok(names.includes('jump'));assert.ok(names.includes('run'));
+  for(const action of ['run','hit','pickup']){
+    const disabled=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name===action)!;
+    assert.equal(disabled.physical,false);assert.match(disabled.description,/Disabled while you hold stone/);
+  }
 });
 test('a placed arrow remains a loose grounded object instead of becoming a voxel',()=>{
   const engine=fixture();
@@ -368,17 +431,140 @@ test('held wood can be discovered as a bucket, filled with water and emptied', (
   assert.equal(engine.act('t1',{action:'empty',target:[1,-1,0]}).ok,true);
   assert.equal(engine.held(engine.entity('t1'))!.contents,undefined);
 });
-test('buckets are independent inventory units and dirt filling conserves a world block',()=>{
+test('wood shaping makes five thin planks and a shovel with its one-strike tool behavior',()=>{
+  const planks=fixture();planks.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+  assert.equal(planks.act('t1',{action:'strike_held',impact:[.5,0,.5]}).ok,true);
+  assert.deepEqual(planks.held(planks.entity('t1')),{kind:'plank',count:5});
+  assert.match(planks.recentEvents.find(event=>event.type==='discovery')!.message,/five planks/);
+
+  const shovel=fixture([[0,1,1,'sand']]);shovel.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+  assert.equal(shovel.act('t1',{action:'strike_held',impact:[0,1,1]}).ok,true);
+  assert.equal(shovel.held(shovel.entity('t1'))?.kind,'shovel');
+  const dig=worldTools(shovel,'t1',{notes:[]}).find(tool=>tool.name==='dig')!;
+  assert.match(dig.description,/sand, dirt, or grass with one shovel strike/);
+  const disabledHit=worldTools(shovel,'t1',{notes:[]}).find(tool=>tool.name==='hit')!;
+  assert.equal(disabledHit.physical,false);assert.match(disabledHit.description,/Use dig.*sand, dirt, or grass/i);
+  assert.equal((dig.invoke({target:[0,1,1]}) as {ok:boolean}).ok,true);
+  assert.equal(shovel.voxels.get([0,1,1]),undefined);
+  assert.equal(shovel.held(shovel.entity('t1'))?.kind,'shovel');
+  assert.equal(shovel.discoveries.get('t1')?.has('blocks-break-after-three-hits'),false);
+});
+test('shovel prompts consistently expose dig and omit bare-hand advice',()=>{
+  const engine=fixture([[0,1,1,'dirt']]),actor=engine.entity('t1');
+  actor.inventory={stacks:[{kind:'shovel',count:1}],selected:0,capacity:64};
+  engine.blockDamage.set('0,1,1',2);engine.discoveries.set('t1',new Set(['blocks-break-after-three-hits']));
+  const observation=engine.observe('t1'),view=compactView(observation);
+  assert.ok(view.interactions.dig);assert.equal(view.interactions.hit,undefined);
+  assert.match(view.attention!,/Use dig/);assert.doesNotMatch(view.attention!,/Try hit/);
+  assert.deepEqual(relevantKnowledge(engine,observation),[]);
+  assert.ok(observation.navigation.paths.find(path=>path.turn===0)?.options?.includes('dig'));
+  const tool=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='dig')!;
+  assert.equal((tool.invoke({target:[0,1,1]}) as {ok:boolean}).ok,true);
+  assert.equal(recentActions(engine.recentEvents).at(-1)!.action,'dig');
+});
+test('wood transformation preserves resources when five output pieces do not fit',()=>{
+  const engine=fixture(),actor=engine.entity('t1');
+  actor.inventory={stacks:[{kind:'wood',count:1},{kind:'plank',count:60}],selected:0,capacity:640};
+  const before=structuredClone(actor.inventory);
+  assert.equal(engine.act('t1',{action:'strike_held',impact:[.5,0,.5]}).ok,false);
+  assert.deepEqual(actor.inventory,before);assert.equal(engine.discoveries.get('t1'),undefined);
+  actor.inventory!.stacks[1].count=59;
+  assert.equal(engine.act('t1',{action:'strike_held',impact:[.5,0,.5]}).ok,true);
+  assert.equal(actor.inventory!.stacks.reduce((sum,stack)=>sum+stack.count,0),64);
+  assert.equal(engine.held(actor)?.count,64);
+});
+test('recorded action context uses final movement outcomes and callable shaping arguments',()=>{
+  const engine=fixture(),store=new Store(':memory:',engine.module.manifest);
+  try{
+    for(let index=0;index<4;index++)engine.act('t1',{action:'wait'});
+    engine.act('t1',{action:'walk',distance:2});
+    for(let tick=0;tick<20;tick++)engine.step();
+    store.record(engine.frame(),engine.state());
+    const started=recentActions(store.actionEventsAt(0,'t1')),completed=recentActions(store.actionEventsAt(20,'t1'));
+    assert.equal(completed.length,4);assert.match(started.at(-1)!.result.message,/start walking/);
+    assert.match(completed.at(-1)!.result.message,/finish walking/);assert.deepEqual(completed.at(-1)!.args,{distance:2});
+    assert.deepEqual(store.actionEventsAt(20,'someone-else'),[]);
+    engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+    engine.act('t1',{action:'strike_held',impact:[.5,1,.5]});store.record(engine.frame());
+    const shaping=recentActions(store.actionEventsAt(20,'t1')).at(-1)!;
+    assert.deepEqual(shaping.args,{point:'top_center'});assert.equal(shaping.action,'strike_held');
+  }finally{store.close();}
+});
+test('front-edge wood strikes make chosen door halves which join into one rustic door',()=>{
+  const engine=fixture();engine.entity('t1').inventory={stacks:[{kind:'wood',count:2}],selected:0,capacity:64};
+  assert.equal(engine.act('t1',{action:'strike_held',impact:[0,.5,1]}).ok,false);
+  assert.match(engine.act('t1',{action:'strike_held',impact:[0,.5,1],orientation:'up'}).message,/upper/);
+  const woodIndex=engine.entity('t1').inventory!.stacks.findIndex(stack=>stack.kind==='wood');
+  assert.equal(engine.act('t1',{action:'hold',stack:woodIndex}).ok,true);
+  assert.match(engine.act('t1',{action:'strike_held',impact:[0,.5,1],orientation:'down'}).message,/lower/);
+  const join=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='join');assert.ok(join);
+  assert.equal(engine.act('t1',{action:'join'}).ok,true);
+  assert.equal(engine.held(engine.entity('t1'))?.kind,'door');
+});
+test('bucket stacks split and merge by contents while dirt filling conserves one world block',()=>{
   const engine=fixture([[1,1,0,'dirt']]);
-  engine.entity('t1').inventory={stacks:[{kind:'bucket',count:1},{kind:'bucket',count:1}],selected:0,capacity:64};
+  engine.entity('t1').inventory={stacks:[{kind:'bucket',count:64}],selected:0,capacity:640};
   const before=engine.voxels.cells.size;
   assert.equal(engine.act('t1',{action:'fill',target:[1,1,0]}).ok,true);
   assert.equal(engine.voxels.cells.size,before-1);
-  assert.equal(engine.entity('t1').inventory!.stacks[0].contents,'dirt');
-  assert.equal(engine.entity('t1').inventory!.stacks[1].contents,undefined);
+  assert.deepEqual(engine.entity('t1').inventory!.stacks,[{kind:'bucket',count:63},{kind:'bucket',count:1,contents:'dirt'}]);
+  assert.equal(engine.held(engine.entity('t1'))?.contents,'dirt');
   assert.equal(engine.act('t1',{action:'empty',target:[1,1,0]}).ok,true);
   assert.equal(engine.voxels.cells.size,before);
+  assert.deepEqual(engine.entity('t1').inventory!.stacks,[{kind:'bucket',count:64}]);
 });
+test('ten distinct stacks admit matching items up to sixty-four and reject an eleventh kind',()=>{
+  const kinds=['grass','dirt','sand','stone','wood','leaves','plant','bucket','plank','spear'];
+  const inventory={stacks:kinds.map(kind=>({kind,count:64})),selected:null,capacity:640};
+  assert.equal(exchangeInventory(inventory,[],[{kind:'knife',count:1}]),undefined);
+  assert.equal(exchangeInventory(inventory,[],[{kind:'wood',count:1}]),undefined);
+  inventory.stacks[4].count=63;
+  const toppedUp=exchangeInventory(inventory,[],[{kind:'wood',count:1}]);
+  assert.equal(toppedUp?.stacks.length,10);assert.equal(toppedUp?.stacks[4].count,64);
+  assert.equal(inventory.stacks[4].count,63,'Capacity planning never mutates the source.');
+  assert.equal(exchangeInventory({stacks:[{kind:'wood',count:64}],selected:0,capacity:640},[],[{kind:'wood',count:1}]),undefined,'A full kind cannot spill into a second stack.');
+});
+
+test('full inventory rejects bucket splitting and crafting atomically but permits slot reuse',()=>{
+  const engine=fixture([[1,1,0,'sand']]),actor=engine.entity('t1');
+  const other=['grass','dirt','stone','wood','leaves','plant','plank','spear','knife'].map(kind=>({kind,count:2}));
+  actor.inventory={stacks:[{kind:'bucket',count:2},...other],selected:0,capacity:640};
+  const before=structuredClone(actor.inventory);
+  assert.equal(engine.act('t1',{action:'fill',target:[1,1,0]}).ok,false);
+  assert.deepEqual(actor.inventory,before);assert.equal(engine.voxels.get([1,1,0]),'sand');
+  assert.deepEqual(engine.observe('t1').interactions.fill,[]);
+  actor.inventory!.stacks[0].count=1;
+  assert.equal(engine.act('t1',{action:'fill',target:[1,1,0]}).ok,true);
+  assert.equal(actor.inventory!.stacks.length,10);assert.equal(engine.held(actor)?.contents,'sand');
+  actor.inventory!.selected=actor.inventory!.stacks.findIndex(stack=>stack.kind==='wood');
+  const unchanged=structuredClone(actor.inventory);
+  assert.equal(engine.act('t1',{action:'strike_held',impact:[.5,1,.5]}).ok,false);
+  assert.deepEqual(actor.inventory,unchanged);
+  actor.inventory!.stacks[actor.inventory!.selected!].count=1;
+  assert.equal(engine.act('t1',{action:'strike_held',impact:[.5,1,.5]}).ok,true);
+  assert.equal(actor.inventory!.stacks.length,10);assert.equal(engine.held(actor)?.contents,undefined);
+});
+
+test('bucket emptying and door joining preserve resources when their result cannot fit',()=>{
+  const engine=fixture(),actor=engine.entity('t1');
+  const other=['grass','dirt','stone','wood','leaves','plant','plank','spear','knife'].map(kind=>({kind,count:2}));
+  actor.inventory={stacks:[{kind:'bucket',count:2,contents:'sand'},...other],selected:0,capacity:640};
+  const before=structuredClone(actor.inventory);
+  assert.equal(engine.act('t1',{action:'empty',target:[1,1,0]}).ok,false);
+  assert.deepEqual(actor.inventory,before);assert.equal(engine.voxels.get([1,1,0]),undefined);
+  actor.inventory={stacks:[{kind:'door_half_up',count:2},{kind:'door_half_down',count:2},...other.slice(0,8)],selected:0,capacity:640};
+  const halves=structuredClone(actor.inventory);
+  assert.equal(engine.act('t1',{action:'join'}).ok,false);assert.deepEqual(actor.inventory,halves);
+  actor.inventory.stacks[0].count=1;
+  assert.equal(engine.act('t1',{action:'join'}).ok,true);assert.equal(engine.held(actor)?.kind,'door');
+});
+
+test('resuming merges legacy bucket stacks by contents and preserves the selected kind',()=>{
+  const actor=entity();actor.inventory={stacks:[{kind:'bucket',count:1},{kind:'bucket',count:2,water:true},{kind:'bucket',count:3},{kind:'bucket',count:1,contents:'water'}],selected:3,capacity:64};
+  const engine=fixture([],[actor]);
+  assert.deepEqual(engine.entity('t1').inventory,{stacks:[{kind:'bucket',count:4},{kind:'bucket',count:3,contents:'water'}],selected:1,capacity:640});
+});
+
 test('supporting blocks reject damage with a clear creature-specific error',()=>{
   const engine=fixture([], [entity(),entity('t2',1.5,.5)]);
   const result=engine.act('t1',{action:'hit',target:[1,0,0]});assert.equal(result.ok,false);assert.match(result.message,/t2 is standing on it/);assert.equal(engine.blockDamage.size,0);
@@ -489,23 +675,48 @@ test('SQLite replays exact edits, dynamics and events, including same-tick resta
   assert.ok(store.eventsAt(4).length>=3);
   store.close();
 });
+test('new materials and inventory limits can extend a recording without changing its physical rules',()=>{
+  const directory=mkdtempSync(join(tmpdir(),'emergent-material-test-')),path=join(directory,'test.sqlite');
+  try{
+    const previous=structuredClone(island.manifest);
+    previous.materials.bucket.stackLimit=1;
+    for(const kind of ['plank','shovel','door_half_up','door_half_down','door'])delete previous.materials[kind];
+    new Store(path,previous).close();
+    new Store(path,island.manifest).close();
+    const incompatible=structuredClone(island.manifest);incompatible.materials.wood.floats=false;
+    assert.throws(()=>new Store(path,incompatible),/Module configuration changed/);
+  }finally{rmSync(directory,{recursive:true,force:true});}
+});
 test('SQLite reconstructs the last ten private memory notes at a recorded instant',()=>{
   const engine=fixture(),store=new Store(':memory:',engine.module.manifest);store.record(engine.frame(),engine.state());
   for(let index=0;index<22;index++)engine.event('t1','memory',`memory ${index}`);store.record(engine.frame());
   assert.deepEqual(store.memoryAt(0,'t1'),Array.from({length:10},(_,index)=>`memory ${index+12}`));store.close();
+});
+test('running is disabled only while a raw block is in hand, not while stored',()=>{
+  const engine=fixture(),memory={notes:[]};
+  let run=worldTools(engine,'t1',memory).find(tool=>tool.name==='run')!;assert.equal(run.physical,true);
+  engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:null,capacity:64};
+  run=worldTools(engine,'t1',memory).find(tool=>tool.name==='run')!;assert.equal(run.physical,true);
+  engine.entity('t1').inventory!.selected=0;
+  run=worldTools(engine,'t1',memory).find(tool=>tool.name==='run')!;assert.equal(run.physical,false);assert.match(run.description,/Disabled.*hold wood/i);
+  const tick=engine.tick,result=run.invoke({distance:4}) as {ok:boolean;message:string};
+  assert.equal(result.ok,false);assert.match(result.message,/store, place, or throw/i);assert.equal(engine.tick,tick);
 });
 test('the Harness schema guard validates contextual embodied tools', async () => {
   const engine = fixture([[1,1,0,'wood']]), memory = {notes:[] as string[]}, tools=worldTools(engine,'t1',memory);
   assert.deepEqual(tools.map(t=>t.name),['look','walk','turn','run','jump','hit','wait','journal']);
   const invalid = await tools.find(tool=>tool.name==='walk')!.execute({distance:'8'}) as {ok:boolean};
   assert.equal(invalid.ok,false);
-  const journal=tools.find(tool=>tool.name==='journal')!;for(let i=0;i<23;i++)await journal.execute({note:`note ${i}`});
-  assert.deepEqual(memory.notes,Array.from({length:10},(_,index)=>`note ${index+13}`));
-  await journal.execute({note:'note 22'});assert.equal(memory.notes.length,10,'Duplicate private notes must not be stored twice.');
+  const journal=tools.find(tool=>tool.name==='journal')!;for(let i=0;i<10;i++)await journal.execute({note:`note ${i}`});
+  const before=[...memory.notes];
+  assert.equal((await journal.execute({note:'new goal'}) as {ok:boolean}).ok,false);
+  assert.deepEqual(memory.notes,before,'Without a compactor, existing notes must never be silently dropped.');
+  await journal.execute({note:'note 9'});assert.equal(memory.notes.length,10,'Duplicate private notes must not be stored twice.');
   engine.discoveries.set('t1',new Set(['thrown-blocks-settle']));await journal.execute({note:'Thrown blocks settle and become part of the terrain.'});assert.equal(memory.notes.length,10,'Learned knowledge must not be duplicated as a private note.');
   let registered=0; apply({tools:{register(tool){assert.equal(typeof tool.output.render,'function');registered++;return()=>{};}}},{engine,entityId:'t1',memory});
   assert.equal(registered,tools.length);
   for(let hit=0;hit<3;hit++)engine.act('t1',{action:'hit',target:[1,1,0]});
   const carrying=worldTools(engine,'t1',memory).map(tool=>tool.name);
-  assert.ok(carrying.includes('strike_held'));assert.equal(carrying.includes('hit'),false);assert.equal(carrying.includes('run'),false);
+  assert.ok(carrying.includes('strike_held'));assert.ok(carrying.includes('hit'));assert.ok(carrying.includes('pickup'));assert.ok(carrying.includes('run'));
+  for(const action of ['run','hit','pickup'])assert.equal(worldTools(engine,'t1',memory).find(tool=>tool.name===action)!.physical,false);
 });

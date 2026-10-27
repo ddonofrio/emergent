@@ -1,23 +1,14 @@
 import { Voxels } from './voxels';
 import { TICKS_PER_SECOND } from './time';
+import { exchangeInventory, normalizeInventory } from './inventory';
 import { knowledgeDescription } from './knowledge';
-import { clone, distance, key, type Action, type ActionResult, type Body, type EncounterNotice, type Entity, type Frame, type HeardVoice, type Inventory, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
+import { clone, distance, key, type Action, type ActionResult, type Body, type EncounterNotice, type Entity, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
 
 const ok = (message: string): ActionResult => ({ ok: true, message });
 const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
 const center = (p: Vec3): Vec3 => p.map(v => v + .5) as Vec3;
 const faces: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
-const rawBlock = (kind: string) => !['bucket','spear','knife','arrow'].includes(kind);
-const normalizeInventory = (value: unknown): Inventory | null => {
-  if (!value) return null;
-  if (typeof value === 'object' && value && Array.isArray((value as Inventory).stacks)) {
-    const inventory = clone(value as Inventory);
-    for (const stack of inventory.stacks) if (stack.water && !stack.contents) stack.contents = 'water';
-    return { stacks: inventory.stacks, selected: inventory.selected ?? null, capacity: inventory.capacity ?? 64 };
-  }
-  const old = clone(value as Stack); if (old.water && !old.contents) old.contents = 'water'; delete old.water;
-  return { stacks: [old], selected: 0, capacity: 64 };
-};
+const rawBlock = (kind: string) => ['grass','dirt','sand','stone','wood','leaves','plant'].includes(kind);
 
 export class Engine {
   readonly voxels: Voxels;
@@ -37,7 +28,7 @@ export class Engine {
   constructor(readonly module: WorldModule, state?: WorldState) {
     const initial = state ?? module.generate();
     this.voxels = new Voxels(module.manifest.materials, initial.blocks);
-    this.entities = clone(initial.entities).map(entity => ({ ...entity, enabled: entity.enabled !== false, inventory: normalizeInventory(entity.inventory) }));
+    this.entities = clone(initial.entities).map(entity => ({ ...entity, enabled: entity.enabled !== false, hitbox: entity.hitbox ?? { radius: entity.kind === 'duck' ? .24 : .36, height: entity.height }, inventory: normalizeInventory(entity.inventory) }));
     for (const [voxel, damage] of Object.entries((state as WorldState | undefined)?.blockDamage ?? {})) this.blockDamage.set(voxel, damage);
     for (const [actor, learned] of Object.entries((state as WorldState | undefined)?.discoveries ?? {})) this.discoveries.set(actor,new Set(learned));
     if (state) {
@@ -46,11 +37,17 @@ export class Engine {
       for(const [id,contacts] of Object.entries(state.contacts??{}))this.contacts.set(id,new Set(contacts));
       for(const [id,notices] of Object.entries(state.encounterNotices??{}))this.encounterNotices.set(id,clone(notices));
     }
+    // Old recordings may contain follow chains. Repair them without creating a new replay event during load.
+    for(const entity of [...this.entities].sort((a,b)=>a.id.localeCompare(b.id)))if(entity.following&&this.followersOf(entity).length){
+      const followers=this.followersOf(entity),names=followers.map(follower=>follower.name).join(', ');
+      delete entity.following;delete entity.motion;entity.status='idle';entity.lastAction={ok:false,message:`${names} ${followers.length===1?'is':'are'} following you, so you stop following and choose your own actions.`};
+    }
   }
   get time() { return this.tick / TICKS_PER_SECOND; }
   get day() { return Math.floor(this.time / this.module.manifest.daySeconds) + 1; }
   entity(id: string) { const entity = this.entities.find(e => e.id === id); if (!entity) throw new Error('Unknown entity.'); return entity; }
   active(entity: Entity) { return entity.enabled !== false; }
+  followersOf(entity:Entity){return this.entities.filter(other=>this.active(other)&&other.id!==entity.id&&other.following?.entityId===entity.id);}
   setEntityEnabled(id: string, enabled: boolean) {
     const entity = this.entity(id);
     if (this.active(entity) === enabled) return false;
@@ -114,8 +111,9 @@ export class Engine {
       const clear=!kind&&distance(eye,point)<=3&&this.visible(e,point);
       if(clear&&!held.contents&&!this.cellOccupied(target)&&this.hasSupport(target,!rawBlock(held.kind)))place.push(target);
       if(held.kind!=='bucket')continue;
-      if(!held.contents&&((clear&&point[1]<this.module.manifest.waterLevel)||((kind==='sand'||kind==='dirt')&&!this.standingOn(target)&&this.blockInReach(e,target)&&this.blockSurfaces(target,eye).some(p=>this.visible(e,p)))))fill.push(target);
-      if(held.contents&&clear&&(held.contents==='water'||(!this.cellOccupied(target)&&this.hasSupport(target))))empty.push(target);
+      const canChangeContents=(contents?:string)=>!!exchangeInventory(e.inventory,[{index:e.inventory!.selected!,count:1}],[{kind:'bucket',count:1,...(contents?{contents}:{})}],true);
+      if(!held.contents&&((clear&&point[1]<this.module.manifest.waterLevel)||((kind==='sand'||kind==='dirt')&&!this.standingOn(target)&&this.blockInReach(e,target)&&this.blockSurfaces(target,eye).some(p=>this.visible(e,p))))&&canChangeContents(kind??'water'))fill.push(target);
+      if(held.contents&&clear&&(held.contents==='water'||(!this.cellOccupied(target)&&this.hasSupport(target)))&&canChangeContents())empty.push(target);
     }
     const nearest=(targets:Vec3[])=>targets.sort((a,b)=>distance(eye,center(a))-distance(eye,center(b))).slice(0,3);
     return {place:nearest(place),fill:nearest(fill),empty:nearest(empty)};
@@ -136,14 +134,14 @@ export class Engine {
     const navigation = this.navigationReport(e);
     const items = clone(this.bodies.filter(b => this.visible(e, b.position)).sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)));
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
-    const emptyHands=!this.held(e);
+    const held=this.held(e),emptyHands=!held,hasShovel=held?.kind==='shovel';
     const interactions = {
-      hit: emptyHands ? blocks.filter(block=>{
+      hit: emptyHands||hasShovel ? blocks.filter(block=>{
         const target=block.slice(0,3) as Vec3;
-        return this.blockInReach(e,target)&&!this.standingOn(target);
+        return this.blockInReach(e,target)&&!this.standingOn(target)&&(!hasShovel||['sand','dirt','grass'].includes(block[3]));
       }).sort((a,b)=>(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0)||Number(b[3]==='wood')-Number(a[3]==='wood'))
         .slice(0,2).map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
-      pickup: emptyHands ? items.filter(item=>distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents).ok)
+      pickup: emptyHands ? items.filter(item=>distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
         .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).slice(0,3).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
       speak: entities.filter(other=>this.canSpeakTo(e,this.entity(other.id))).map(({id,name})=>({id,name})),
       follow: entities.filter(other=>this.canFollow(e,this.entity(other.id))).map(({id,name,position})=>({id,name,metres:Math.round(distance(e.position,position)*10)/10})),
@@ -152,12 +150,14 @@ export class Engine {
     const followed=e.following&&this.entities.find(other=>other.id===e.following!.entityId);
     const tracking=followed&&this.active(followed)&&distance(e.position,followed.position)<=20&&this.voxels.clearLine(eye,this.eye(followed));
     const following=followed?{entityId:followed.id,name:followed.name,...(tracking?{metres:Math.round(distance(e.position,followed.position)*10)/10,direction:this.direction(e,followed.position)}:{}),message:!tracking?'Direct contact has been lost. Stop following to choose another action.':e.following!.blocked?`${e.following!.blocked.message} Stop following to choose another action.`:'Automatically following, stopping one metre away. Choose follow to continue or stop_follow to stop and act immediately.'}:undefined;
+    const beingFollowed=this.followersOf(e).map(follower=>({id:follower.id,name:follower.name,message:`${follower.name} is following you. You cannot follow another creature while they follow you; continue choosing your own actions.`}));
     return { tick: this.tick, time: this.time, self: clone(e), blocks: [...samples.values()].slice(0,maxBlocks), surfaces: [...surfaces.values()], entities,
       items, heard: clone((this.inbox.get(id) ?? []).filter(m => this.tick - m.tick < 1200)),
       encounters:clone((this.encounterNotices.get(id)??[]).map(notice=>({...notice,canSpeakNow:this.canSpeakTo(e,this.entity(notice.otherId))}))),
       navigation,
       interactions,
       ...(following?{following}:{}),
+      ...(beingFollowed.length?{beingFollowed}:{}),
       description, truncated: blocks.length > maxBlocks };
   }
   acknowledgeEncounters(id:string,notices:EncounterNotice[]){
@@ -165,7 +165,7 @@ export class Engine {
     if(seen.size)this.encounterNotices.set(id,(this.encounterNotices.get(id)??[]).filter(notice=>!seen.has(notice.eventId)));
   }
   private canSpeakTo(speaker:Entity,listener:Entity){return speaker.id!==listener.id&&this.active(speaker)&&this.active(listener)&&distance(this.eye(speaker),this.eye(listener))<=10&&this.voxels.clearLine(this.eye(speaker),this.eye(listener));}
-  canFollow(follower:Entity,target:Entity,viewAngle=0){return follower.id!==target.id&&this.active(follower)&&this.active(target)&&distance(follower.position,target.position)<=20&&this.visible({...follower,yaw:follower.yaw+viewAngle},this.eye(target),false,20);}
+  canFollow(follower:Entity,target:Entity,viewAngle=0){return follower.id!==target.id&&this.active(follower)&&this.active(target)&&!this.followersOf(follower).length&&distance(follower.position,target.position)<=20&&this.visible({...follower,yaw:follower.yaw+viewAngle},this.eye(target),false,20);}
   private speak(speaker:Entity,word:string,respond=true):Entity[]{
     const recipients=this.entities.filter(other=>this.canSpeakTo(speaker,other));
     speaker.speech={word,until:this.time+4};
@@ -254,6 +254,15 @@ export class Engine {
       if (this.voxels.solid([x+dx,feet+dy,z+dz])) return [Math.floor(x+dx),Math.floor(feet+dy),Math.floor(z+dz)];
     }
   }
+  private collidingEntity(e:Entity,point:Vec3){
+    const hitbox=e.hitbox??{radius:.36,height:e.height};
+    return this.entities.find(other=>{
+      if(other.id===e.id||!this.active(other))return false;
+      const otherHitbox=other.hitbox??{radius:other.kind==='duck'?.24:.36,height:other.height};
+      const vertical=point[1]<other.position[1]+otherHitbox.height-.01&&point[1]+hitbox.height>other.position[1]+.01;
+      return vertical&&Math.hypot(other.position[0]-point[0],other.position[2]-point[2])<hitbox.radius+otherHitbox.radius;
+    });
+  }
   private movementPoint(e: Entity, x: number, z: number, from: number, maxRise = 0): { point?: Vec3; issue?: MovementIssue } {
     if (!this.inside([x, from, z])) return { issue: { kind:'boundary',message:'The boundary of the world blocks that direction.' } };
     const point = this.footAt(x, z, from, e.height, maxRise,1,true);
@@ -276,8 +285,8 @@ export class Engine {
     }
     const allowed = this.module.canEnter(e, point);
     if (!allowed.ok) return { issue: { kind:'water',target:[Math.floor(x),Math.floor(point[1]),Math.floor(z)],message:allowed.message } };
-    const other = this.entities.find(other => other.id !== e.id && this.active(other) && Math.hypot(other.position[0] - x, other.position[2] - z) < .55 && Math.abs(other.position[1] - point[1]) < 1);
-    if (other) return { issue: { kind:'entity',entity:other.name,message:`${other.name} is blocking your path.` } };
+    const other = this.collidingEntity(e,point);
+    if (other) return { issue: { kind:'entity',entity:other.name,entityId:other.id,message:`${other.name}'s body blocks your path.` } };
     return { point };
   }
   private traceMovement(e: Entity, yaw: number, requestedDistance: number): { destination?: Vec3; clearance: number; issue?: MovementIssue } {
@@ -300,8 +309,8 @@ export class Engine {
     if(!landing)return {issue,message:'There is no safe landing within one block of your current height.'};
     const allowed=this.module.canEnter(e,landing);
     if(!allowed.ok)return {issue:{kind:'water',target:[Math.floor(x),Math.floor(landing[1]),Math.floor(z)],message:allowed.message},message:'The landing would put you in dangerously deep water.'};
-    const other=this.entities.find(other=>other.id!==e.id&&this.active(other)&&Math.hypot(other.position[0]-x,other.position[2]-z)<.7);
-    if(other)return {issue:{kind:'entity',entity:other.name,message:`${other.name} occupies the landing point.`},message:`${other.name} occupies the landing point.`};
+    const other=this.collidingEntity(e,landing);
+    if(other)return {issue:{kind:'entity',entity:other.name,entityId:other.id,message:`${other.name} occupies the landing point.`},message:`${other.name} occupies the landing point.`};
     return {landing};
   }
   private movementResponses(e:Entity,issue?:MovementIssue,clearance=0,yaw=e.yaw){
@@ -314,10 +323,10 @@ export class Engine {
       if(candidate){jump={distance:candidate,angle};options.push('jump');}
     }
     if(issue?.target&&['rise','wall'].includes(issue.kind)){
-      if(this.held(e))options.push('store');
-      else{
-        if(!this.standingOn(issue.target)&&this.blockInReach(e,issue.target)&&this.blockSurfaces(issue.target,this.eye(e)).some(point=>this.visible(e,point)))options.push('hit');
-      }
+      const held=this.held(e),reachable=!this.standingOn(issue.target)&&this.blockInReach(e,issue.target)&&this.blockSurfaces(issue.target,this.eye(e)).some(point=>this.visible(e,point));
+      if(held?.kind==='shovel'&&reachable&&['sand','dirt','grass'].includes(this.voxels.get(issue.target)!))options.push('dig');
+      else if(held)options.push('store');
+      else if(reachable)options.push('hit');
     }
     if(issue?.kind==='entity')options.push('wait','say');
     options.push('turn');
@@ -356,8 +365,10 @@ export class Engine {
     }
     if(a.action==='follow'){
       const id=a.entityId??e.following?.entityId,target=this.entities.find(other=>other.id===id);
+      if(this.followersOf(e).length){const followers=this.followersOf(e);return fail(`${followers.map(follower=>follower.name).join(', ')} ${followers.length===1?'is':'are'} following you. You cannot follow another creature while you are being followed.`);}
       if(!target||!this.canFollow(e,target,a.angle??0))return fail('Follow requires another visible living entity within 20 metres, with a clear line of sight.');
       if(e.motion&&!e.following)return fail('Wait until your movement finishes before following.');
+      if(target.following)this.endFollowing(target,`${e.name} started following you. You stop following and continue with your own actions.`);
       e.following={entityId:target.id};delete e.motion;e.status='following';e.yaw=((Math.atan2(target.position[0]-e.position[0],target.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
       return ok(`You follow ${target.name}, stopping one metre away. Each turn choose follow to continue or stop_follow to stop and take another action immediately.`);
     }
@@ -377,7 +388,7 @@ export class Engine {
       e.inventory!.selected = null; return ok('Your hands are empty. Inventory space is unchanged.');
     }
     if (a.action === 'walk' || a.action === 'run') {
-      const held=this.held(e), running=a.action==='run', maximum=running?24:16;
+      const held=this.held(e), running=a.action==='run', maximum=running?24:32;
       if (running && held && rawBlock(held.kind)) return fail('You cannot run while carrying a raw block.');
       if (!Number.isFinite(a.distance) || a.distance! <= 0 || a.distance! > maximum) return fail(`${running?'Run':'Walk'} distance must be greater than zero and at most ${maximum} metres.`);
       if (a.angle !== undefined) {
@@ -423,7 +434,7 @@ export class Engine {
         return fail('That item is no longer loose here. Use look and the current interactions.pickup item IDs; raw loose blocks can settle into terrain.');
       }
       if (distance(this.eye(e), body.position) > 3 || !this.voxels.clearLine(this.eye(e), body.position)) return fail('The loose item is not within clear arm reach (3 metres). Use look for current interactions.pickup targets.');
-      const result = this.canHold(e, body.kind,body.contents);
+      const result = this.canHold(e, body.kind,body.contents??(body.water?'water':undefined));
       if (!result.ok) return result;
       this.addInventory(e, body.kind, body.contents??(body.water?'water':undefined),true); this.bodies = this.bodies.filter(b => b !== body);
       return ok(`Picked up ${body.kind}.`);
@@ -441,16 +452,31 @@ export class Engine {
     if(a.action==='strike_held'){
       const held=this.held(e);if(!held||held.kind!=='wood')return fail('Only a raw wood block can be worked this way.');
       if(!a.impact||a.impact.length!==3||!a.impact.every(v=>Number.isFinite(v)&&v>=0&&v<=1))return fail('Impact must be a local surface point in [0,1]^3.');
-      const made=this.module.transformHit(held.kind,a.impact);
+      if(a.impact[0]<=.18&&a.impact[1]>=.32&&a.impact[1]<=.68&&a.impact[2]>=.82&&!a.orientation)return fail('Choose orientation up or down for this strike.');
+      const made=this.module.transformHit(held.kind,a.impact,a.orientation);
       if(!made)return ok('The strike leaves a notch in the wood, but its form does not change.');
-      this.consume(e);this.addInventory(e,made,undefined,true);this.discover(e.id,`wood-shape:${made}`,`Discovered how to shape wood into a ${made}.`,{source:'wood',product:made,impact:a.impact});
-      return ok(`The wood changes shape under the strike. You now hold a wooden ${made}.`);
+      const count=made==='plank'?5:1;
+      if(!this.replaceHeld(e,{kind:made,count}))return fail('No space for the result: at most 10 different stacks, 64 identical items each. Put something down first.');
+      const discovery=made==='plank'?'Discovered that a centered strike on the bottom of wood makes five planks, each 0.20 metres thick.':made==='shovel'?'Discovered a wooden shovel that removes sand, dirt, and grass with one strike.':`Discovered how to shape wood into a ${made.replaceAll('_',' ')}.`;
+      this.discover(e.id,`wood-shape:${made}`,discovery,{source:'wood',product:made,impact:a.impact,...(a.orientation?{orientation:a.orientation}:{})});
+      if(made==='plank')return ok('The wood splits into five wooden planks, each 0.20 metres thick.');
+      if(made==='door_half_up'||made==='door_half_down')return ok(`The wood changes shape. You now hold the ${made==='door_half_up'?'upper':'lower'} half of a rustic wooden door.`);
+      return ok(`The wood changes shape under the strike. You now hold a wooden ${made.replaceAll('_',' ')}.`);
+    }
+    if(a.action==='join'){
+      const inventory=e.inventory;if(!inventory)return fail('You have no wooden door halves to join.');
+      const upper=inventory.stacks.findIndex(stack=>stack.kind==='door_half_up'&&stack.count>0),lower=inventory.stacks.findIndex(stack=>stack.kind==='door_half_down'&&stack.count>0);
+      if(upper<0||lower<0)return fail('You need one upper and one lower wooden door half to join them.');
+      const joined=exchangeInventory(inventory,[{index:upper,count:1},{index:lower,count:1}],[{kind:'door',count:1}],true);
+      if(!joined)return fail('No inventory space for the joined door. Put something down first.');
+      e.inventory=joined;this.discover(e.id,'wood-shape:door','Discovered that an upper and lower wooden door half join into a rustic door.',{source:'wood',product:'door'});
+      return ok('You join the upper and lower wooden halves into a rustic plank door.');
     }
     const target = a.target;
     if (!Array.isArray(target) || target.length !== 3 || !target.every(Number.isInteger) || !this.inside(target)) return fail('Target must be an integer voxel coordinate inside the world.');
     const point = center(target);
     const kind = this.voxels.get(target);
-    const surfaceAction=!!kind&&(a.action==='hit'||a.action==='fill');
+    const surfaceAction=!!kind&&(a.action==='hit'||a.action==='dig'||a.action==='fill');
     if(surfaceAction){
       if(!this.blockInReach(e,target)){
         const nearest=target.map((v,i)=>Math.max(v,Math.min(v+1,this.eye(e)[i]))) as Vec3;
@@ -467,55 +493,72 @@ export class Engine {
       if (this.cellOccupied(target)) return fail('A creature occupies that cell.');
       if(!rawBlock(held.kind)){
         if(!this.voxels.solid([target[0]+.5,target[1]-.01,target[2]+.5]))return fail('A placed object needs solid ground directly beneath it.');
-        const placed=held.kind;this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:placed,position:[point[0],target[1]+.09,point[2]],velocity:[0,0,0],resting:true});this.consume(e);
+        const placed=held.kind,placedY=placed==='door_half_down'?target[1]+.45:placed==='door_half_up'?target[1]+1.35:placed==='door'?target[1]+.95:target[1]+.09;this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:placed,position:[point[0],placedY,point[2]],velocity:[0,0,0],resting:true});this.consume(e);
         return ok(`You set the ${placed} down on the ground. It remains a loose object that can be picked up.`);
       }
       if (![[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]].some(d => this.voxels.solid(target.map((v,i) => v + d[i]) as Vec3))) return fail('A placed block needs an adjacent solid block.');
       const material = held.kind; this.voxels.set(target, material); this.consume(e); return ok(`Placed one ${material}.`);
     }
-    if (a.action === 'hit') {
-      if(this.held(e))return fail('You cannot strike the world while holding an object. Store, place, or throw it first.');
+    if (a.action === 'hit'||a.action==='dig') {
+      const held=this.held(e),usingShovel=held?.kind==='shovel';
+      if(a.action==='dig'&&!usingShovel)return fail('Hold a shovel before digging.');
+      if(held&&!usingShovel)return fail('You cannot strike the world while holding an object. Store, place, or throw it first.');
       if (!kind) return fail('There is nothing to hit.');
+      if(usingShovel&&!['sand','dirt','grass'].includes(kind))return fail('The wooden shovel can remove only sand, dirt, or grass in one strike.');
       const supported=this.standingOn(target);
       if(supported)return fail(`You cannot strike that block because ${supported.name} is standing on it.`);
       const voxel=key(target),damage=(this.blockDamage.get(voxel)??0)+1;
-      if(damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`);}
-      this.blockDamage.delete(voxel);this.voxels.set(target,null);const sawCollapse=this.collapseUnsupportedTree(target,e);this.wakeBodies();this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
+      if(!usingShovel&&damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`);}
+      this.blockDamage.delete(voxel);this.voxels.set(target,null);const sawCollapse=this.collapseUnsupportedTree(target,e);this.wakeBodies();if(!usingShovel)this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
       const heldResult=this.canHold(e,kind);
-      if(heldResult.ok)this.addInventory(e,kind,undefined,true);
+      if(heldResult.ok)this.addInventory(e,kind,undefined,!usingShovel);
       else this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind,position:center(target),velocity:[0,0,0],resting:false});
-      const result=heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`;
+      const result=usingShovel
+        ?heldResult.ok?`The wooden shovel removes the ${kind} block in one strike. You pick it up.`:`The wooden shovel removes the ${kind}, but it falls loose because your inventory is full.`
+        :heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`;
       return ok(result+(sawCollapse?' The unsupported part of the tree falls into loose blocks.':''));
     }
     if (a.action === 'fill') {
       const held=this.held(e);if(!held||held.kind!=='bucket'||held.contents)return fail('You need to hold an empty bucket.');
-      if(!kind&&point[1]<this.module.manifest.waterLevel){held.contents='water';return ok('You lower the bucket into the water and lift it full.');}
+      if(!kind&&point[1]<this.module.manifest.waterLevel){
+        if(!this.replaceHeld(e,{kind:'bucket',count:1,contents:'water'}))return fail('No stack space for a water-filled bucket. Put something down first.');
+        return ok('You fill one bucket with water and hold it. The other buckets keep their contents.');
+      }
       if(kind!=='dirt'&&kind!=='sand')return fail('The bucket can currently be filled from water, dirt, or sand.');
       const supported=this.standingOn(target);
       if(supported)return fail(`You cannot take that ${kind}; ${supported.name} is standing on it.`);
-      this.voxels.set(target,null);this.blockDamage.delete(key(target));held.contents=kind;return ok(`You fill the bucket with one block of ${kind}.`);
+      if(!this.replaceHeld(e,{kind:'bucket',count:1,contents:kind}))return fail(`No stack space for a ${kind}-filled bucket. Put something down first.`);
+      this.voxels.set(target,null);this.blockDamage.delete(key(target));return ok(`You fill one bucket with one block of ${kind} and hold it. The other buckets keep their contents.`);
     }
     if (a.action === 'empty') {
       const held=this.held(e);if(!held||held.kind!=='bucket'||!held.contents)return fail('You need to hold a non-empty bucket.');
-      if(held.contents==='water'){held.contents=undefined;this.event(e.id,'splash','Emptied a bucket of water.',{position:point});return ok('You empty the water. It splashes and disperses.');}
+      if(held.contents==='water'){
+        if(!this.replaceHeld(e,{kind:'bucket',count:1}))return fail('No stack space for an empty bucket. Put something down first.');
+        this.event(e.id,'splash','Emptied a bucket of water.',{position:point});return ok('You empty one bucket and hold it. The water splashes and disperses.');
+      }
       if(kind)return fail('That cell is occupied.');
       if(this.cellOccupied(target))return fail('A creature occupies that cell.');
       if(!faces.some(d=>this.voxels.solid(target.map((v,i)=>v+d[i]) as Vec3)))return fail('The emptied material needs adjacent support.');
-      const contents=held.contents;this.voxels.set(target,contents);held.contents=undefined;return ok(`You empty the bucket, placing one ${contents} block.`);
+      const contents=held.contents;
+      if(!this.replaceHeld(e,{kind:'bucket',count:1}))return fail('No stack space for an empty bucket. Put something down first.');
+      this.voxels.set(target,contents);return ok(`You empty one bucket, placing one ${contents} block, and hold the empty bucket.`);
     }
     return fail('Unknown action.');
   }
   private canHold(e: Entity, kind: string, contents?: string) {
-    const inventory=e.inventory,total=inventory?.stacks.reduce((sum,stack)=>sum+stack.count,0)??0;
-    if(total>=(inventory?.capacity??64))return fail('Your inventory is full.');
+    if(!exchangeInventory(e.inventory,[],[{kind,count:1,...(contents?{contents}:{})}]))return fail('No room for this item: at most 10 different stacks, 64 identical items each. Buckets stack only with matching contents.');
     return ok('Space available.');
   }
   private addInventory(e: Entity, kind: string, contents?: string, select=false) {
-    if(!e.inventory)e.inventory={stacks:[],selected:null,capacity:64};
-    const limit=this.module.manifest.materials[kind]?.stackLimit??64;
-    let index=e.inventory.stacks.findIndex(stack=>stack.kind===kind&&stack.contents===contents&&stack.count<limit);
-    if(index<0){index=e.inventory.stacks.length;e.inventory.stacks.push({kind,count:1,...(contents?{contents}:{})});}else e.inventory.stacks[index].count++;
-    if(select||e.inventory.selected===null)e.inventory.selected=index;
+    const inventory=exchangeInventory(e.inventory,[],[{kind,count:1,...(contents?{contents}:{})}],select);
+    if(!inventory)throw new Error('Inventory capacity must be checked before adding resources.');
+    e.inventory=inventory;
+  }
+  private replaceHeld(e:Entity,product:Stack) {
+    if(!e.inventory||e.inventory.selected===null)return false;
+    const inventory=exchangeInventory(e.inventory,[{index:e.inventory.selected,count:1}],[product],true);
+    if(!inventory)return false;
+    e.inventory=inventory;return true;
   }
   private consume(e: Entity) {
     if(!e.inventory||e.inventory.selected===null)return;
@@ -548,20 +591,61 @@ export class Engine {
     delete e.following;delete e.motion;e.status='idle';e.lastAction={ok:false,message};
     this.event(e.id,'follow-ended',message);
   }
+  private bounceEntity(e:Entity,other:Entity,actionOrigin:Vec3){
+    const dx=e.position[0]-other.position[0],dz=e.position[2]-other.position[2],separation=Math.hypot(dx,dz);
+    const base=separation>.001?Math.atan2(dx,dz):((e.yaw+180)*Math.PI/180);
+    const own=e.hitbox?.radius??.36,theirs=other.hitbox?.radius??.36;
+    const push=Math.max(.16,own+theirs+.08-separation);
+    let destination:Vec3|undefined;
+    // Every candidate passes the normal terrain, water, bounds, body and support checks.
+    for(const scale of [1,.65,.35]){
+      for(const offset of [0,-35,35,-70,70]){
+        const angle=base+offset*Math.PI/180;
+        const candidate=this.movementPoint(e,e.position[0]+Math.sin(angle)*push*scale,e.position[2]+Math.cos(angle)*push*scale,e.position[1]);
+        if(candidate.point){destination=candidate.point;break;}
+      }
+      if(destination)break;
+    }
+    const issue:MovementIssue={kind:'entity',entity:other.name,entityId:other.id,message:`You collide with ${other.name}.`};
+    if(e.following)e.following.blocked=issue;
+    if(destination)e.motion={kind:'bounce',origin:clone(e.position),destination,speed:2.4};
+    else delete e.motion;
+    e.status=destination?'bouncing':e.following?'following':'idle';
+    e.lastAction={ok:false,message:destination?`You collide with ${other.name} and bounce back safely.`:`You collide with ${other.name} and stop; there is no safe place to rebound.`,feedback:{outcome:'collision',from:actionOrigin,to:clone(e.position),otherId:other.id,other:other.name,rebound:destination??null,distanceTravelled:distance(actionOrigin,e.position)}};
+    this.event(e.id,'collision',e.lastAction.message,e.lastAction.feedback);
+  }
+  private collide(e:Entity,issue:MovementIssue){
+    const other=issue.entityId?this.entities.find(candidate=>candidate.id===issue.entityId):undefined;
+    if(!other){delete e.motion;e.status=e.following?'following':'idle';return;}
+    const origin=e.motion?.origin??clone(e.position),otherOrigin=other.motion?.origin??clone(other.position);
+    this.bounceEntity(e,other,origin);
+    if(other.motion?.kind!=='bounce')this.bounceEntity(other,e,otherOrigin);
+  }
+  private advanceBounce(e:Entity){
+    const motion=e.motion!,dx=motion.destination[0]-e.position[0],dz=motion.destination[2]-e.position[2],metres=Math.hypot(dx,dz);
+    const step=Math.min(metres,motion.speed/TICKS_PER_SECOND);
+    if(metres>.001){
+      const next=this.movementPoint(e,e.position[0]+dx/metres*step,e.position[2]+dz/metres*step,e.position[1]);
+      if(next.point)e.position=next.point;
+      else{delete e.motion;e.status=e.following?'following':'idle';return;}
+    }
+    if(metres<=step+.001){e.position=clone(motion.destination);delete e.motion;e.status=e.following?'following':'idle';}
+  }
   private advanceFollowing(e:Entity){
     const following=e.following!,target=this.entities.find(other=>other.id===following.entityId);
     if(!target||!this.active(target)||distance(e.position,target.position)>20||!this.voxels.clearLine(this.eye(e),this.eye(target))){this.endFollowing(e,'You lose direct contact with the entity you were following. Choose another action.');return;}
     const dx=target.position[0]-e.position[0],dz=target.position[2]-e.position[2],metres=Math.hypot(dx,dz);
     e.yaw=((Math.atan2(dx,dz)*180/Math.PI)%360+360)%360;
     if(metres<=1.0001||following.blocked){delete e.motion;e.status='following';return;}
-    const step=Math.min(2/TICKS_PER_SECOND,metres-1),next=this.movementPoint(e,e.position[0]+dx/metres*step,e.position[2]+dz/metres*step,e.position[1]);
+    const speed=this.module.movementSpeed?.(e,e.position,2)??2;
+    const step=Math.min(speed/TICKS_PER_SECOND,metres-1),next=this.movementPoint(e,e.position[0]+dx/metres*step,e.position[2]+dz/metres*step,e.position[1]);
     if(!next.point){
-      following.blocked=next.issue;delete e.motion;this.learnMovementIssue(e,next.issue!);
+      following.blocked=next.issue;if(next.issue?.kind==='entity'){this.collide(e,next.issue);return;}delete e.motion;this.learnMovementIssue(e,next.issue!);
       e.lastAction={ok:false,message:`You stop following the path. ${next.issue!.message} Use stop_follow to choose another action.`,feedback:{issue:next.issue}};
       this.event(e.id,'follow-blocked',e.lastAction.message,e.lastAction.feedback);return;
     }
     const origin=clone(e.position);e.position=next.point;e.status='following';
-    e.motion={kind:'walk',origin,destination:clone(next.point),speed:2};
+    e.motion={kind:'walk',origin,destination:clone(next.point),speed};
   }
   step(beforePhysics?: () => void) {
     this.tick++;
@@ -570,6 +654,7 @@ export class Engine {
     for (const e of this.entities) {
       if (!this.active(e)) continue;
       if (e.speech && e.speech.until < this.time) delete e.speech;
+      if(e.motion?.kind==='bounce'){this.advanceBounce(e);continue;}
       if(e.following){this.advanceFollowing(e);continue;}
       if (e.controller === 'wander' && !e.motion && this.tick % 60 === 0) {
         e.yaw = (this.tick * 13.37) % 360;
@@ -579,15 +664,18 @@ export class Engine {
       if (!e.motion) continue;
       if(e.motion.kind==='jump'){
         const motion=e.motion,origin=motion.origin!,duration=motion.duration!,progress=Math.min(1,(motion.progress??0)+1/20/duration);motion.progress=progress;
-        e.position=[origin[0]+(motion.destination[0]-origin[0])*progress,origin[1]+(motion.destination[1]-origin[1])*progress+Math.sin(progress*Math.PI)*1.15,origin[2]+(motion.destination[2]-origin[2])*progress];
+        const candidate=[origin[0]+(motion.destination[0]-origin[0])*progress,origin[1]+(motion.destination[1]-origin[1])*progress+Math.sin(progress*Math.PI)*1.15,origin[2]+(motion.destination[2]-origin[2])*progress] as Vec3;
+        const other=this.collidingEntity(e,candidate);
+        if(other){this.collide(e,{kind:'entity',entity:other.name,entityId:other.id,message:`You collide with ${other.name}.`});continue;}
+        e.position=candidate;
         if(progress>=1){e.position=clone(motion.destination);delete e.motion;e.status='idle';e.lastAction={ok:true,message:`You land safely after jumping ${distance(origin,e.position).toFixed(1)} metres.`,feedback:{outcome:'arrived',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position)}};this.event(e.id,'arrived',e.lastAction.message,e.lastAction.feedback);}
         continue;
       }
-      const [x, , z] = e.position, dest = e.motion.destination, d = Math.hypot(dest[0] - x, dest[2] - z), step = Math.min(d, e.motion.speed / 20);
+      const [x, , z] = e.position, dest = e.motion.destination, d = Math.hypot(dest[0] - x, dest[2] - z), speed=this.module.movementSpeed?.(e,e.position,e.motion.speed)??e.motion.speed, step = Math.min(d, speed / 20);
       const next = this.movementPoint(e, x + (dest[0] - x) * step / Math.max(d, .0001), z + (dest[2] - z) * step / Math.max(d, .0001), e.position[1]);
-      if (!next.point) { const origin=e.motion.origin??clone(e.position),issue=next.issue!;delete e.motion;e.status='idle';this.learnMovementIssue(e,issue);e.lastAction={ok:false,message:`You stop after ${distance(origin,e.position).toFixed(1)} metres. ${issue.message}`,feedback:{outcome:'blocked',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position),issue,availableResponses:this.options(e,issue)}};this.event(e.id,'blocked',e.lastAction.message,e.lastAction.feedback);continue; }
+      if (!next.point) { const origin=e.motion.origin??clone(e.position),issue=next.issue!;if(issue.kind==='entity'){this.collide(e,issue);continue;}delete e.motion;e.status='idle';this.learnMovementIssue(e,issue);e.lastAction={ok:false,message:`You stop after ${distance(origin,e.position).toFixed(1)} metres. ${issue.message}`,feedback:{outcome:'blocked',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position),issue,availableResponses:this.options(e,issue)}};this.event(e.id,'blocked',e.lastAction.message,e.lastAction.feedback);continue; }
       e.position = next.point;
-      if (d <= step + .001) { const origin=e.motion.origin??clone(e.position),kind=e.motion.kind??'walk',issue=e.motion.stopIssue;delete e.motion;e.status='idle';if(issue)this.learnMovementIssue(e,issue);e.lastAction=issue?{ok:false,message:`You stop after travelling ${distance(origin,e.position).toFixed(1)} metres. ${issue.message}`,feedback:{outcome:'blocked',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position),issue,availableResponses:this.options(e,issue)}}:{ok:true,message:`You finish ${kind==='run'?'running':'walking'} after travelling ${distance(origin,e.position).toFixed(1)} metres.`,feedback:{outcome:'arrived',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position)}};if(e.controller==='agent')this.event(e.id,issue?'blocked':'arrived',e.lastAction.message,e.lastAction.feedback); }
+      if (d <= step + .001) { const origin=e.motion.origin??clone(e.position),kind=e.motion.kind??'walk',issue=e.motion.stopIssue;if(issue?.kind==='entity'){this.collide(e,issue);continue;}delete e.motion;e.status='idle';if(issue)this.learnMovementIssue(e,issue);e.lastAction=issue?{ok:false,message:`You stop after travelling ${distance(origin,e.position).toFixed(1)} metres. ${issue.message}`,feedback:{outcome:'blocked',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position),issue,availableResponses:this.options(e,issue)}}:{ok:true,message:`You finish ${kind==='run'?'running':'walking'} after travelling ${distance(origin,e.position).toFixed(1)} metres.`,feedback:{outcome:'arrived',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position)}};if(e.controller==='agent')this.event(e.id,issue?'blocked':'arrived',e.lastAction.message,e.lastAction.feedback); }
     }
     for (const body of this.bodies) {
       if (body.resting) continue;

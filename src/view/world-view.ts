@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { key, unkey, type Body, type Entity, type Frame, type ModuleManifest, type Vec3, type WorldState } from '../core/types';
 
 const neighbors: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
@@ -132,6 +133,27 @@ export class WorldView {
     mesh.material.userData.activeColor = color;
     mesh.scale.set(...size); mesh.position.set(...position); mesh.castShadow = true; mesh.receiveShadow = true; group.add(mesh); return mesh;
   }
+  private triangle(group:THREE.Group,vertices:[Vec3,Vec3,Vec3],color:string){
+    const geometry=new THREE.BufferGeometry();
+    geometry.setAttribute('position',new THREE.Float32BufferAttribute(vertices.flat(),3));geometry.computeVertexNormals();
+    const material=new THREE.MeshStandardMaterial({color,roughness:.94,side:THREE.DoubleSide});material.userData.activeColor=color;
+    const mesh=new THREE.Mesh(geometry,material);mesh.castShadow=true;mesh.receiveShadow=true;group.add(mesh);return mesh;
+  }
+  private arm(group:THREE.Group,name:string,side:-1|1,skinColor:string){
+    const arm=new THREE.Group();arm.name=name;arm.position.set(side*.39,1.25,0);
+    this.box(arm,[.16,.46,.20],[0,-.23,0],skinColor);
+    this.box(arm,[.075,.05,.10],[0,-.465,0],skinColor);
+    // Resting palms face the thighs: thickness along X, fingers spread along Z.
+    this.box(arm,[.065,.12,.148],[0,-.54,0],skinColor);
+    const fingerLengths=[.078,.09,.084,.062],palmBottom=-.60;
+    for(let finger=0;finger<fingerLengths.length;finger++){
+      const length=fingerLengths[finger];
+      this.box(arm,[.055,length,.032],[0,palmBottom-length/2+.002,.054-finger*.036],skinColor);
+    }
+    const thumb=new THREE.Group();thumb.position.set(-side*.014,-.515,.067);thumb.rotation.x=-.18;
+    this.box(thumb,[.045,.072,.045],[0,-.03,0],skinColor);arm.add(thumb);
+    group.add(arm);return arm;
+  }
   private styleEntity(group: THREE.Group, enabled: boolean) {
     if (group.userData.enabled === enabled) return;
     group.userData.enabled = enabled;
@@ -142,13 +164,27 @@ export class WorldView {
       material.transparent = !enabled; material.opacity = enabled ? 1 : .22; material.depthWrite = enabled;
     });
   }
-  private heldVisual(kind: string, color: string) {
-    const visual=new THREE.Group();visual.userData.kind=kind;visual.position.set(.36,1,.38);
+  private heldVisual(kind: string, color: string, inHand=true) {
+    const visual=new THREE.Group();visual.userData.kind=kind;
+    if(inHand){if(kind==='spear')visual.position.set(0,-.54,.4);else visual.position.set(.36,1,.38);}
     const material=(value:string)=>{const result=new THREE.MeshStandardMaterial({color:value,roughness:.86});result.userData.activeColor=value;return result;};
-    if(kind==='arrow'){
-      const shaft=new THREE.Mesh(new THREE.CylinderGeometry(.025,.025,.9,8),material(color));shaft.rotation.x=Math.PI/2;shaft.castShadow=true;visual.add(shaft);
-      const tip=new THREE.Mesh(new THREE.ConeGeometry(.075,.18,8),material('#6f756f'));tip.rotation.x=Math.PI/2;tip.position.z=.53;tip.castShadow=true;visual.add(tip);
+    if(kind==='arrow'||kind==='spear'){
+      const length=kind==='spear' ? .85 : .9,radius=kind==='spear' ? .045 : .025;
+      const shaft=new THREE.Mesh(new THREE.CylinderGeometry(radius,radius,length,8),material(color));shaft.rotation.x=Math.PI/2;shaft.castShadow=true;visual.add(shaft);
+      const tip=new THREE.Mesh(new THREE.ConeGeometry(kind==='spear' ? .09 : .075,kind==='spear' ? .27 : .18,8),material(color));tip.rotation.x=Math.PI/2;tip.position.z=kind==='spear' ? .52 : .53;tip.castShadow=true;visual.add(tip);
+      if(kind==='arrow'){
       const fletching=this.box(visual,[.16,.035,.18],[0,0,-.42],'#d8c7a0');fletching.rotation.z=Math.PI/4;
+      }
+    }else if(kind==='shovel'){
+      const handle=new THREE.Mesh(new THREE.CylinderGeometry(.035,.045,.62,7),material(color));handle.rotation.x=.35;handle.position.set(0,.02,0);handle.castShadow=true;visual.add(handle);
+      this.box(visual,[.28,.32,.07],[0,-.3,.12],color);
+    }else if(kind==='plank'){
+      const board=new THREE.Mesh(this.cube,material(color));board.scale.set(inHand ? .46 : 1,inHand ? .09 : .2,inHand ? .46 : 1);board.castShadow=true;visual.add(board);
+    }else if(kind==='door_half_up'||kind==='door_half_down'||kind==='door'){
+      const full=kind==='door',height=full ? 1.9 : .9,width=full ? .86 : .8,base=-height/2;
+      this.box(visual,[.07,height,.07],[-width/2+.04,base+height/2,0],color);this.box(visual,[.07,height,.07],[width/2-.04,base+height/2,0],color);
+      this.box(visual,[width,.07,.07],[0,base+height-.04,0],color);this.box(visual,[width,.07,.07],[0,base+.04,0],color);
+      for(let y=base+.16;y<base+height-.1;y+=.2)this.box(visual,[width-.12,.09,.045],[0,y,0],color);
     }else{
       const item=new THREE.Mesh(this.cube,material(color));item.scale.setScalar(.42);item.castShadow=true;visual.add(item);
     }
@@ -166,13 +202,37 @@ export class WorldView {
         this.box(group,[.55,.4,.8],[0,.3,0],'#eee5c5'); this.box(group,[.35,.4,.35],[0,.55,.35],'#f7efd3');
         this.box(group,[.28,.12,.3],[0,.48,.6],'#d59a43'); this.box(group,[.07,.07,.08],[-.18,.63,.48],'#263a31'); this.box(group,[.07,.07,.08],[.18,.63,.48],'#263a31');
       } else {
-        this.box(group,[.58,.66,.35],[0,.93,0],entity.color); this.box(group,[.44,.45,.42],[0,1.52,0],'#d9b98d');
-        this.box(group,[.47,.16,.44],[0,1.76,-.02],'#514d3e');
+        const hairColor='#514d3e',invertedHide=entity.id==='t2',hideColor=invertedHide?'#493326':'#b8874d',spotColor=invertedHide?'#b8874d':'#493326',skinColor='#d9b98d';
+        this.box(group,[.58,.66,.35],[0,.93,0],skinColor);
+        const head=new THREE.Mesh(new RoundedBoxGeometry(.44,.45,.42,3,.025),new THREE.MeshStandardMaterial({color:skinColor,roughness:.9}));
+        head.material.userData.activeColor=skinColor;head.position.set(0,1.52,0);head.castShadow=true;head.receiveShadow=true;group.add(head);
+        this.box(group,[.47,.16,.44],[0,1.76,-.02],hairColor);
         this.box(group,[.07,.07,.03],[-.11,1.55,.22],'#25392d'); this.box(group,[.07,.07,.03],[.11,1.55,.22],'#25392d');
-        const left = this.box(group,[.2,.57,.24],[-.17,.29,0],'#566552'); left.name = 'leg-left';
-        const right = this.box(group,[.2,.57,.24],[.17,.29,0],'#566552'); right.name = 'leg-right';
-        this.box(group,[.16,.6,.22],[-.39,.95,0],'#d9b98d');
-        const rightArm=new THREE.Group();rightArm.name='arm-right';rightArm.position.set(.39,1.25,0);this.box(rightArm,[.16,.6,.22],[0,-.3,0],'#d9b98d');group.add(rightArm);
+        this.box(group,[.36,.22,.055],[0,1.38,.235],hairColor);
+        this.box(group,[.25,.13,.07],[0,1.235,.22],hairColor);
+        const left = this.box(group,[.2,.57,.24],[-.17,.29,0],skinColor); left.name = 'leg-left';
+        const right = this.box(group,[.2,.57,.24],[.17,.29,0],skinColor); right.name = 'leg-right';
+        this.arm(group,'arm-left',-1,skinColor);
+        this.arm(group,'arm-right',1,skinColor);
+        const shoulder=entity.id==='t2'?-1:1;
+        this.triangle(group,[[shoulder*.32,1.3,.19],[-shoulder*.3,.59,.19],[shoulder*.3,.59,.19]],hideColor);
+        this.triangle(group,[[shoulder*.22,1.16,.197],[shoulder*.1,1.03,.197],[shoulder*.25,.98,.197]],spotColor);
+        this.triangle(group,[[-shoulder*.04,.9,.197],[-shoulder*.13,.76,.197],[shoulder*.05,.75,.197]],spotColor);
+        this.triangle(group,[[shoulder*.32,1.3,-.19],[shoulder*.3,.59,-.19],[-shoulder*.3,.59,-.19]],hideColor);
+        this.triangle(group,[[shoulder*.22,1.16,-.197],[shoulder*.25,.98,-.197],[shoulder*.1,1.03,-.197]],spotColor);
+        this.triangle(group,[[-shoulder*.04,.9,-.197],[shoulder*.05,.75,-.197],[-shoulder*.13,.76,-.197]],spotColor);
+        this.box(group,[.18,.12,.42],[shoulder*.25,1.23,0],hideColor);
+        const skirtHeight=.46,skirtWidth=.63,skirtDepth=.4,skirtY=.5,skirtX=skirtWidth/2-.02,skirtZ=skirtDepth/2-.02;
+        this.box(group,[skirtWidth,skirtHeight,.04],[0,skirtY,skirtZ],hideColor);
+        this.box(group,[skirtWidth,skirtHeight,.04],[0,skirtY,-skirtZ],hideColor);
+        this.box(group,[.04,skirtHeight,skirtDepth],[skirtX,skirtY,0],hideColor);
+        this.box(group,[.04,skirtHeight,skirtDepth],[-skirtX,skirtY,0],hideColor);
+        this.triangle(group,[[-.18,.55,.202],[-.08,.55,.202],[-.13,.48,.202]],spotColor);
+        this.triangle(group,[[.06,.45,.202],[.16,.46,.202],[.11,.38,.202]],spotColor);
+        this.triangle(group,[[-.05,.34,.202],[.05,.34,.202],[0,.285,.202]],spotColor);
+        this.triangle(group,[[.18,.55,-.202],[.13,.48,-.202],[.08,.55,-.202]],spotColor);
+        this.triangle(group,[[-.06,.45,-.202],[-.11,.38,-.202],[-.16,.46,-.202]],spotColor);
+        this.triangle(group,[[.05,.34,-.202],[0,.285,-.202],[-.05,.34,-.202]],spotColor);
       }
       this.creatures.set(entity.id,group); this.scene.add(group);
       const label = document.createElement('button'); label.className = 'entity-label'; label.textContent = entity.name; label.addEventListener('click', () => this.onSelect(entity.id)); this.container.append(label); this.labels.set(entity.id,label);
@@ -199,16 +259,18 @@ export class WorldView {
         const carried=e.inventory?.selected===null||!e.inventory?undefined:e.inventory.stacks[e.inventory.selected];
         if (carried) {
           const color=this.manifest!.materials[carried.kind]?.color??'#ffffff';
-          if (!held || held.userData.kind!==carried.kind) { if(held)this.disposeItemVisual(held);held=this.heldVisual(carried.kind,color);group.add(held);this.held.set(e.id,held);group.userData.enabled=undefined; }
+          if (!held || held.userData.kind!==carried.kind) { if(held)this.disposeItemVisual(held);held=this.heldVisual(carried.kind,color);const hand=carried.kind==='spear'?group.getObjectByName('arm-right'):undefined;(hand??group).add(held);this.held.set(e.id,held);group.userData.enabled=undefined; }
           held.visible = true;
         } else if (held) held.visible = false;
         this.styleEntity(group,enabled);
         group.position.set(...previous.position).lerp(new THREE.Vector3(...e.position),alpha);
         const turn = Math.atan2(Math.sin((e.yaw-previous.yaw)*Math.PI/180),Math.cos((e.yaw-previous.yaw)*Math.PI/180)); group.rotation.y = previous.yaw*Math.PI/180+turn*alpha;
         const walking = e.motion && distanceSquared(e.position,previous.position) > .00001;
-        for (const name of ['leg-left','leg-right']) { const leg = group.getObjectByName(name); if (leg) leg.rotation.x = walking ? Math.sin(visualTime*9)*(name === 'leg-left' ? .32 : -.32) : 0; }
-        const rightArm=group.getObjectByName('arm-right'),punch=this.punches.get(e.id);
-        if(rightArm){if(punch&&visualTime<=punch.until){const phase=Math.max(0,Math.min(1,(visualTime-punch.start)/(punch.until-punch.start)));rightArm.rotation.x=-Math.sin(Math.PI*phase)*1.8;}else{rightArm.rotation.x=0;if(punch)this.punches.delete(e.id);}}
+        const gait=Math.sin(visualTime*9);
+        for (const name of ['leg-left','leg-right']) { const leg = group.getObjectByName(name); if (leg) leg.rotation.x = walking ? gait*(name === 'leg-left' ? .32 : -.32) : 0; }
+        const leftArm=group.getObjectByName('arm-left'),rightArm=group.getObjectByName('arm-right'),punch=this.punches.get(e.id);
+        if(leftArm)leftArm.rotation.x=walking?-gait*.3:0;
+        if(rightArm){if(punch&&visualTime<=punch.until){const phase=Math.max(0,Math.min(1,(visualTime-punch.start)/(punch.until-punch.start)));rightArm.rotation.x=-Math.sin(Math.PI*phase)*1.8;}else{rightArm.rotation.x=walking?gait*.3:0;if(punch)this.punches.delete(e.id);}}
         const label = this.labels.get(e.id)!; const projected = group.position.clone().add(new THREE.Vector3(0,e.height+.7,0)).project(this.camera);
         label.style.display = Math.abs(projected.x)>1 || Math.abs(projected.y)>1 || projected.z>1 ? 'none' : 'block';
         label.style.left = `${(projected.x*.5+.5)*this.container.clientWidth}px`; label.style.top = `${(-projected.y*.5+.5)*this.container.clientHeight}px`;
@@ -225,7 +287,7 @@ export class WorldView {
         let object = this.objects.get(b.id);
         if (!object) {
           const color=this.manifest!.materials[b.kind]?.color??'#ffffff';
-          if(b.kind==='arrow'){object=this.heldVisual(b.kind,color);object.position.set(0,0,0);}else{const mesh=new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial({color}));mesh.scale.setScalar(.56);mesh.castShadow=true;object=mesh;}
+          if(['arrow','spear','shovel','plank','door_half_up','door_half_down','door'].includes(b.kind))object=this.heldVisual(b.kind,color,false);else{const mesh=new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial({color}));mesh.scale.setScalar(.56);mesh.castShadow=true;object=mesh;}
           this.scene.add(object);this.objects.set(b.id,object);
         }
         const previous = this.prior?.bodies.find(p => p.id === b.id) ?? b; object.position.set(...previous.position).lerp(new THREE.Vector3(...b.position),alpha);
