@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { compactJournal } from '../server/agents/journal-compaction';
-import { journalReminder, type JournalSchedule } from '../server/agents/journal';
 import type { CompletionResult } from '../server/agents/providers';
 
 const notes=Array.from({length:10},(_,i)=>`Goal ${i}: return to the shore.`);
@@ -39,17 +38,4 @@ test('unavailable journal compaction is cancellable and retains all notes',async
   await assert.rejects(compactJournal({name:'Moss',notes:source,incoming:'Build a shelter.',signal:controller.signal,retryDelayMs:1,
     waiting(){if(++attempts===3)controller.abort();},async complete(){throw new Error('Offline');}}),{name:'AbortError'});
   assert.deepEqual(source,notes);assert.equal(attempts,3);
-});
-
-test('empty journal reminders span ten to twenty decisions; populated journals use fifty',()=>{
-  for(const [random,interval] of [[0,10],[.999,20]]){
-    const mind:JournalSchedule={notes:[],turns:1};assert.equal(journalReminder(mind,()=>random),undefined);
-    assert.equal(mind.nextJournalPromptTurn,interval);
-    mind.turns=interval-1;assert.equal(journalReminder(mind,()=>random),undefined);
-    mind.turns++;assert.match(journalReminder(mind,()=>random)!,/keep exploring/);
-    assert.equal(mind.nextJournalPromptTurn,interval*2);
-    mind.notes=['Build a shelter.'];mind.turns=interval*2;
-    assert.match(journalReminder(mind,()=>random)!,/skip it if nothing meaningful changed/);
-    assert.equal(mind.nextJournalPromptTurn,mind.turns+50);
-  }
 });

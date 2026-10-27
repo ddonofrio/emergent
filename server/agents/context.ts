@@ -34,6 +34,7 @@ export function compactResult(result:ActionResult) {
   if(outcome==='blocked'&&from&&to&&distance(from,to)>.001)outcome='partial';
   return rounded({ok:result.ok,outcome,message:result.message,...(from?{from}:{}),...(to?{to}:{}),
     ...(outcome==='started'&&feedback.destination?{destination:feedback.destination}:{}),
+    ...(Array.isArray(feedback.materials)?{materials:feedback.materials}:{}),
     ...(typeof feedback.facing==='number'?{facing:feedback.facing}:{}),
   });
 }
@@ -53,10 +54,10 @@ export function recentActions(events:WorldEvent[]) {
       }
       continue;
     }
-    if(['arrived','blocked','collision','rebound-ended','follow-ended','follow-blocked'].includes(event.type)){
+    if(['arrived','blocked','collision','rebound-ended','follow-ended','follow-blocked','scanned'].includes(event.type)){
       if(movement){
-        const outcome=event.type==='arrived'?'completed':event.type==='rebound-ended'?'collision':event.type==='follow-ended'?'stopped':event.type==='follow-blocked'?'blocked':event.type;
-        movement.result=compactResult({ok:event.type==='arrived',message:event.message,feedback:{from:movement.result.from,facing:movement.result.facing,...(event.data as Record<string,unknown>??{}),outcome}});
+        const outcome=['arrived','scanned'].includes(event.type)?'completed':event.type==='rebound-ended'?'collision':event.type==='follow-ended'?'stopped':event.type==='follow-blocked'?'blocked':event.type;
+        movement.result=compactResult({ok:['arrived','scanned'].includes(event.type),message:event.message,feedback:{from:movement.result.from,facing:movement.result.facing,...(event.data as Record<string,unknown>??{}),outcome}});
         if(event.type!=='collision')moving.delete(event.actor);
       }
       continue;
@@ -74,7 +75,7 @@ export function recentActions(events:WorldEvent[]) {
       if(point){delete entry.args.impact;entry.args.point=point;}
     }
     recent.push(entry);
-    if(entry.result.ok){if(['walk','run','jump','follow'].includes(name))moving.set(event.actor,entry);else moving.delete(event.actor);}
+    if(entry.result.ok){if(['walk','run','jump','follow','find_material'].includes(name))moving.set(event.actor,entry);else moving.delete(event.actor);}
   }
   return rounded(recent.slice(-RECENT_ACTION_LIMIT));
 }

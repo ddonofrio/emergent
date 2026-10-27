@@ -247,6 +247,23 @@ export class Engine {
     }
     finally { entity.yaw = yaw; }
   }
+  materialsAround(id:string) {
+    const entity=this.entity(id),yaw=entity.yaw,nearest=new Map<string,Vec3>();
+    try{
+      for(const offset of [0,120,240]){
+        entity.yaw=(yaw+offset)%360;
+        for(const surface of this.observe(id).surfaces){
+          const current=nearest.get(surface.kind);
+          if(!current||distance(entity.position,center(surface.nearest))<distance(entity.position,center(current)))nearest.set(surface.kind,clone(surface.nearest));
+        }
+      }
+    }finally{entity.yaw=yaw;}
+    return [...nearest.entries()].map(([material,target])=>{
+      const point=center(target),dx=point[0]-entity.position[0],dz=point[2]-entity.position[2],horizontal=Math.hypot(dx,dz);
+      const absolute=Math.atan2(dx,dz)*180/Math.PI,angle=((absolute-yaw+540)%360)-180;
+      return {material,distance:Math.round(distance(entity.position,point)*10)/10,directionXZ:{x:Math.round(dx/Math.max(horizontal,.0001)*100)/100,z:Math.round(dz/Math.max(horizontal,.0001)*100)/100},bodyRelativeDegrees:Math.round(angle)};
+    }).sort((a,b)=>a.distance-b.distance||a.material.localeCompare(b.material));
+  }
   private direction(e: Entity, point: Vec3) {
     const angle = Math.atan2(point[0]-e.position[0],point[2]-e.position[2]) * 180 / Math.PI;
     const relative = ((angle-e.yaw+540)%360)-180;
@@ -418,6 +435,11 @@ export class Engine {
     if(e.following)return fail('While following, choose follow or stop_follow. Stopping lets you act immediately.');
     if (e.motion) return fail('Wait until your movement finishes.');
     if (a.action === 'wait') { e.status = 'idle'; return ok('Waiting and watching.'); }
+    if(a.action==='find_material'){
+      const materials=this.materialsAround(e.id);
+      e.motion={kind:'scan',destination:clone(e.position),speed:0,origin:clone(e.position),progress:0,duration:1,startYaw:e.yaw};e.status='scanning';
+      return {ok:true,message:materials.length?`You scan all around and find ${materials.map(item=>item.material).join(', ')}.`:'You scan all around but find no visible block materials.',feedback:{outcome:'started',materials}};
+    }
     if (a.action === 'turn') {
       if (!Number.isFinite(a.angle) || Math.abs(a.angle!) > 360) return fail('Turn angle must be between -360 and 360 degrees.');
       e.yaw = ((e.yaw + a.angle!) % 360 + 360) % 360; return ok(`Turned to ${Math.round(e.yaw)} degrees.`);
@@ -713,6 +735,12 @@ export class Engine {
         this.execute(e, { action: 'walk', distance: 1.5 });
       }
       if (!e.motion) continue;
+      if(e.motion.kind==='scan'){
+        const motion=e.motion,progress=Math.min(1,(motion.progress??0)+1/20/(motion.duration??1));motion.progress=progress;
+        e.yaw=((motion.startYaw??e.yaw)+360*progress)%360;
+        if(progress>=1){e.yaw=motion.startYaw??e.yaw;delete e.motion;e.status='idle';e.lastAction={ok:true,message:e.lastAction?.message??'You finish scanning all around.',feedback:{...e.lastAction?.feedback,outcome:'completed',facing:e.yaw}};this.event(e.id,'scanned',e.lastAction.message,e.lastAction.feedback);}
+        continue;
+      }
       if(e.motion.kind==='jump'){
         const motion=e.motion,origin=motion.origin!,duration=motion.duration!,progress=Math.min(1,(motion.progress??0)+1/20/duration);motion.progress=progress;
         const candidate=[origin[0]+(motion.destination[0]-origin[0])*progress,origin[1]+(motion.destination[1]-origin[1])*progress+Math.sin(progress*Math.PI)*1.15,origin[2]+(motion.destination[2]-origin[2])*progress] as Vec3;

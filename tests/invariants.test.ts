@@ -804,7 +804,10 @@ test('running is disabled only while a raw block is in hand, not while stored',(
 });
 test('the Harness schema guard validates contextual embodied tools', async () => {
   const engine = fixture([[1,1,0,'wood']]), memory = {notes:[] as string[]}, tools=worldTools(engine,'t1',memory);
-  assert.deepEqual(tools.map(t=>t.name),['look','walk','turn','run','jump','hit','wait','journal']);
+  assert.deepEqual(tools.map(t=>t.name),['look','find_material','walk','turn','run','jump','hit','wait','journal']);
+  const scan=tools.find(tool=>tool.name==='find_material')!.invoke({}) as any;
+  assert.equal(scan.ok,true);assert.ok(scan.feedback.materials.some((item:any)=>item.material==='wood'&&Number.isFinite(item.bodyRelativeDegrees)&&Number.isFinite(item.directionXZ.x)&&Number.isFinite(item.directionXZ.z)));
+  assert.equal(engine.entity('t1').motion?.kind,'scan');for(let tick=0;tick<20;tick++)engine.step();assert.equal(engine.entity('t1').motion,undefined);
   const invalid = await tools.find(tool=>tool.name==='walk')!.execute({distance:'8'}) as {ok:boolean};
   assert.equal(invalid.ok,false);
   const journal=tools.find(tool=>tool.name==='journal')!;for(let i=0;i<10;i++)await journal.execute({note:`note ${i}`});

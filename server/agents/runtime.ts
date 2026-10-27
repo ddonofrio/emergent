@@ -2,14 +2,13 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Engine } from '../../src/core/engine';
 import { clone, distance, type Action, type ActionResult, type AgentPlan, type Observation } from '../../src/core/types';
 import { validateJsonSchemaValue } from '../../vendor/deepseek-harness/json-schema';
-import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
+import { PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import type { Store } from '../store';
 import { ProviderChain, type ProviderConfig, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
 import { compactResult, compactView, inventoryContext, recentActions, relevantKnowledge, rounded } from './context';
 import { compactJournal } from './journal-compaction';
-import { journalReminder } from './journal';
 import { needsPlanReview, planDecision } from './planning';
 
 interface Message { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
@@ -18,7 +17,7 @@ interface Mind extends Memory {
   turns: number; modelTurns: number; lastResult?: unknown;
   carriedMoves?: number; carryingReminder?: string; emptyHandMoves?: number;
   knownDiscoveries?: string[]; lastEncounters?: Record<string,number>; lastSpoken?: Record<string,number>;
-  nextJournalPromptTurn?: number; lastJournalEntryTurn?: number;
+  journalOffer?: string;
 }
 export interface PreparedDecision {
   id: string;
@@ -32,7 +31,7 @@ export interface PreparedDecision {
   model: string;
   reminder?: string;
   hints?: string[];
-  journalReminder?: string;
+  journalOffer?: string;
   journalEntries?: string[];
   planEvents?: AgentPlan[];
   journalCompactions?: {before:string[];after:string[];incoming:string}[];
@@ -89,7 +88,7 @@ export class AgentRuntime {
       while(true){
         signal.throwIfAborted();attempts++;report(input.id,{state:attempts===1?'thinking':'waiting',attempts,message:'Considering speech heard during movement; world time is held.'});
         try{
-          const answer=await this.inference.complete({messages,tools,max_tokens:300},signal,(candidate,index)=>report(input.id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));
+          const answer=await this.inference.complete({messages,tools,max_tokens:300,reasoning:'minimum'},signal,(candidate,index)=>report(input.id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));
           input.mind.modelTurns++;provider=answer.provider;model=answer.model;usage=answer.usage;content=answer.content;
           const calls=answer.calls.filter(call=>call.function.name==='continue_moving'||call.function.name==='stop_moving');
           if(calls.length===1){
@@ -162,12 +161,11 @@ export class AgentRuntime {
     const actor=`plan:${id}`,cached=this.store.loadPending<StagedPlan>(observation.tick,actor,this.inference.cacheKey);
     const staged:StagedPlan=cached??{plan:mind.plan!,events:[],modelCalls:0};
     if(!cached||staged.plan.status!=='active'){
-      const context=rounded({body:{position:observation.self.position,yaw:observation.self.yaw},...compactView(observation),
-        inventory:inventoryContext(observation),learned:relevantKnowledge(this.engine,observation),notes:mind.notes,
-        ...(observation.self.lastAction?{lastResult:compactResult(observation.self.lastAction)}:{}),
-        ...(observation.heard.length?{heard:observation.heard.map(({tick,direction,distance,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND,directionWhenHeard:direction,distanceWhenHeard:distance}))}:{}),
-        recent:recentActions(this.store.actionEventsAt(observation.tick,id)),...(observation.following?{following:observation.following}:{}),
-      });
+      const capabilities=worldTools(this.engine,id,mind,{following:!!observation.following})
+        .filter(tool=>tool.name!=='journal'&&!tool.description.startsWith('Disabled'))
+        .map(tool=>tool.name);
+      const context=abstractPlanningContext(this.engine,observation,mind,capabilities,
+        recentActions(this.store.actionEventsAt(observation.tick,id)).slice(-PLAN_REVIEW_INTERVAL));
       staged.plan=await planDecision({name:observation.self.name,turn:mind.turns,plan:cached?.plan??mind.plan,context,signal,retryDelayMs:this.config.retryDelayMs,
         complete:async(request,abort)=>{
           report(id,{state:'thinking',message:'Planning a goal and reviewing steps; world time is held.'});
@@ -185,10 +183,13 @@ export class AgentRuntime {
     let following=!!observation.self.following,stopFollowing=false,viewAngle=0,speechMenu=false;
     const started = Date.now();
     const planEvents=await this.preparePlan(id,mind,observation,signal,report);
+    const completedGoal=[...planEvents].reverse().find(plan=>plan.status==='completed');
+    if(completedGoal)mind.journalOffer=goalLearningOffer(completedGoal);
     const journalCompactions:NonNullable<PreparedDecision['journalCompactions']>=[];
     const journalEntries:string[]=[];
-    let journalHint=following?undefined:journalReminder(mind);
-    let journalPromptUsed=journalHint;
+    let journalHint=following?undefined:mind.journalOffer;
+    if(journalHint)delete mind.journalOffer;
+    let journalOfferUsed=journalHint;
     const journalOptions={
       compactJournal:async(notes:readonly string[],incoming:string)=>{
         const after=await compactJournal({name:observation.self.name,notes,incoming,signal,retryDelayMs:this.config.retryDelayMs,
@@ -196,7 +197,7 @@ export class AgentRuntime {
           waiting:message=>report(id,{state:'waiting',message})});
         journalCompactions.push({before:[...notes],after,incoming});return after;
       },
-      onJournalEntry:(note:string)=>{journalEntries.push(note);mind.lastJournalEntryTurn=mind.turns;mind.nextJournalPromptTurn=mind.turns+50;journalHint=undefined;},
+      onJournalEntry:(note:string)=>{journalEntries.push(note);journalHint=undefined;},
     };
     let tools = worldTools(this.engine, id, mind,{following,speechMenu,...journalOptions});
     const discoveries=[...(this.engine.discoveries.get(id)??[])];
@@ -232,7 +233,8 @@ export class AgentRuntime {
     const lastResult=(observation.self.lastAction??mind.lastResult) as ActionResult|undefined;
     const heard=observation.heard.length?{heard:observation.heard.map(({tick,direction,distance,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND,directionWhenHeard:direction,distanceWhenHeard:distance}))}:{};
     const {attention,...view}=compactView(observation);
-    const planContext={goal:mind.plan!.goal,steps:mind.plan!.steps.filter(step=>step.status==='pending').map(step=>step.task),explanation:mind.plan!.explanation};
+    const pendingSteps=mind.plan!.steps.filter(step=>step.status==='pending').map(step=>step.task);
+    const planContext={goal:mind.plan!.goal,currentStep:pendingSteps[0],...(pendingSteps.length>1?{laterSteps:pendingSteps.slice(1)}:{})};
     const normalContext=()=>rounded({...(attention?{attention}:{}),...(lastResult?{lastResult:compactResult(lastResult)}:{}),plan:planContext,...notes(),...view,body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...(learned.length?{learned}:{}),...(recent.length?{recent}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{})});
     const initial=following?{following:observation.following,plan:planContext,...heard}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
@@ -241,7 +243,7 @@ export class AgentRuntime {
       while(true){
         signal.throwIfAborted();attempts++;
         report(id,{state:attempts===1?'thinking':'waiting',attempts,message:'Waiting for an inference provider; world time is held.'});
-        try{return await this.inference.complete({messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
+        try{return await this.inference.complete({messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'minimum'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
         catch(error){signal.throwIfAborted();report(id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});}
       }
     };
@@ -278,12 +280,12 @@ export class AgentRuntime {
           tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
         }
         if(call.function.name==='stop_follow'&&(result as {ok?:boolean})?.ok){
-          following=false;stopFollowing=true;journalHint=journalReminder(mind);journalPromptUsed??=journalHint;
+          following=false;stopFollowing=true;journalHint=mind.journalOffer;delete mind.journalOffer;journalOfferUsed??=journalHint;
           mind.knownDiscoveries=discoveries;
           tools=worldTools(this.engine,id,mind,{following:false,viewAngle,speechMenu,...journalOptions});
         }
       }
-      if(physical.length===1)return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(journalPromptUsed?{journalReminder:journalPromptUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
+      if(physical.length===1)return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(journalOfferUsed?{journalOffer:journalOfferUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
       if(physical.length>1){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action.'})});}
       if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(normalContext())});
       else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose follow or stop_follow.':'Choose one available action.'});
@@ -304,7 +306,7 @@ export class AgentRuntime {
       if(mind.plan)this.engine.entity(id).plan=clone(mind.plan);
       if (this.mode === 'llm') {
         for(const plan of decision.planEvents??[])this.engine.event(id,'plan',`${plan.status==='active'?'Plan':plan.status==='completed'?'Goal completed':'Goal abandoned'}: ${plan.goal} ${plan.explanation}`,{plan});
-        this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, attention:observation.following&&!decision.stopFollowing?null:compactView(observation).attention??null, reminder:decision.reminder??null, hints:decision.hints??[], journalReminder:decision.journalReminder??null, turn: mind.turns });
+        this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, attention:observation.following&&!decision.stopFollowing?null:compactView(observation).attention??null, reminder:decision.reminder??null, hints:decision.hints??[], journalOffer:decision.journalOffer??null, turn: mind.turns });
         for(const compaction of decision.journalCompactions??[])this.engine.event(id,'journal-compaction',`Condensed ${compaction.before.length} private notes into ${compaction.after.length} before saving a new note.`,compaction);
         this.engine.event(id, 'decision', content?.slice(0, 500) || `Requested ${calls.length} tool calls.`, {
           provider: decision.provider, model: decision.model, latencyMs: decision.latencyMs, attempts: decision.attempts, usage: decision.usage ?? null, toolCalls: calls,
@@ -356,6 +358,42 @@ function carryingReminder(kind:string,contents?:string,canDig=false) {
   if(kind==='shovel')return canDig?'Your shovel can remove the reachable soil with dig.':'You are holding a shovel. Look for reachable soil to dig.';
   if(kind==='bucket')return contents?`Your bucket holds ${contents}; you can empty it.`:'Your empty bucket can carry material when fill is available.';
   return `You are still holding ${kind}; you could place or throw it.`;
+}
+
+function goalLearningOffer(plan:AgentPlan) {
+  return `You completed the goal "${plan.goal}". What memorable fact did you learn about the world? If you discovered a durable rule, useful method, important location, or surprising property, use journal now to preserve that lesson. Record the learned fact, not a recap of actions or merely that the goal is complete. Skip journal if nothing memorable was learned.`;
+}
+
+function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind,capabilities:string[],actions:ReturnType<typeof recentActions>) {
+  const kinds=(values:string[])=>[...new Set(values)];
+  const interactions=observation.interactions;
+  return rounded({
+    surroundings:{
+      terrain:observation.surfaces.map(({kind,count})=>({kind,count})),
+      creatures:observation.entities.map(({name,kind})=>({name,kind})),
+      obstacles:kinds(observation.navigation.paths.flatMap(path=>path.issue?[path.issue.message]:[])),
+      possibleInteractions:{
+        hit:kinds(interactions.hit.map(target=>target.kind)),
+        pickup:kinds(interactions.pickup.map(target=>target.kind)),
+        speak:interactions.speak.map(target=>target.name),
+        follow:interactions.follow.map(target=>target.name),
+        ...(interactions.place.length?{place:true}:{}),
+        ...(interactions.fill.length?{fill:true}:{}),
+        ...(interactions.empty.length?{empty:true}:{}),
+      },
+    },
+    capabilities,
+    inventory:inventoryContext(observation),
+    learned:relevantKnowledge(engine,observation),
+    notes:mind.notes,
+    ...(observation.heard.length?{heard:observation.heard.map(({tick,speakerId:_,direction:__,distance:___,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND}))}:{}),
+    actionsSinceLastReview:actions.map(({action,result,reaction})=>({action,result:{ok:result.ok,outcome:result.outcome,message:withoutCoordinates(result.message)},...(reaction?{reaction}:{})})),
+    ...(observation.following?{following:{name:observation.following.name}}:{}),
+  });
+}
+
+function withoutCoordinates(message:string) {
+  return message.replace(/\s+(?:at|from|to)\s+\[[^\]]+\]/gi,'').replace(/\[[^\]]+\]/g,'the reported location');
 }
 
 function woodProductName(kind:string) {

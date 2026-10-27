@@ -30,7 +30,7 @@ export async function compactJournal(options: {
     try {
       const answer = await options.complete({ messages: [...messages, ...(correction ? [{ role: 'user', content: correction }] : [])],
         tools: [{ type: 'function', function: { name: 'submit_journal', description: 'Merge redundant information into at most nine faithful notes, oldest to newest. Use fewer whenever possible.',
-          parameters: { type: 'object', properties: { notes: { type: 'array', items: { type: 'string' }, maxItems: PRIVATE_NOTE_LIMIT } }, required: ['notes'], additionalProperties: false } } }], max_tokens: 2000 }, signal);
+          parameters: { type: 'object', properties: { notes: { type: 'array', items: { type: 'string' }, maxItems: PRIVATE_NOTE_LIMIT } }, required: ['notes'], additionalProperties: false } } }], max_tokens: 2000, reasoning:'maximum' }, signal);
       signal.throwIfAborted();
       let notes: unknown;
       if (answer.calls.length === 1 && answer.calls[0].function.name === 'submit_journal') {

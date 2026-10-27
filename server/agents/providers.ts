@@ -9,10 +9,12 @@ export interface ProviderConfig {
   model: string;
   displayModel?: string;
   modelDiscovery?: 'lm-studio';
+  reasoningOptions?: ReasoningEffort[];
   timeoutMs?: number;
   headers?: Record<string, string>;
 }
-export interface CompletionRequest { messages: unknown[]; tools: unknown[]; max_tokens: number; }
+export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high';
+export interface CompletionRequest { messages: unknown[]; tools: unknown[]; max_tokens: number; reasoning?: 'minimum' | 'maximum'; }
 export interface CompletionResult {
   provider: string;
   providerName: string;
@@ -103,18 +105,21 @@ export class ProviderChain {
     if (!instance.id?.trim()) throw new Error(`${provider.name} returned a loaded model without an instance identifier.`);
     provider.model = instance.id.trim();
     provider.displayModel = preferred.selected_variant?.trim() || preferred.key?.trim() || preferred.display_name?.trim() || provider.model;
+    provider.reasoningOptions = normalizeReasoningOptions(preferred.capabilities?.reasoning?.allowed_options);
   }
 
   private async request(provider: ProviderConfig, request: CompletionRequest, signal: AbortSignal): Promise<CompletionResult> {
     const timeout = provider.timeoutMs ? AbortSignal.timeout(provider.timeoutMs) : undefined;
     const requestSignal = timeout ? AbortSignal.any([signal, timeout]) : signal;
     let response: Response;
+    const {reasoning,...completion}=request;
+    const reasoningEffort=reasoning&&provider.reasoningOptions?.length?selectReasoningEffort(provider.reasoningOptions,reasoning):undefined;
     try {
       response = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${provider.apiKey}`, 'Content-Type': 'application/json', ...provider.headers },
         signal: requestSignal,
-        body: JSON.stringify({ ...request, model: provider.model }),
+        body: JSON.stringify({ ...completion, model: provider.model, ...(reasoningEffort?{reasoning_effort:reasoningEffort}:{}) }),
       });
     } catch (error) {
       signal.throwIfAborted();
@@ -143,7 +148,25 @@ interface LmStudioModel {
   key?: string;
   display_name?: string;
   selected_variant?: string;
+  capabilities?: { reasoning?: { allowed_options?: string[]; default?: string } };
   loaded_instances?: { id?: string }[];
+}
+
+function normalizeReasoningOptions(options:string[]|undefined):ReasoningEffort[]|undefined {
+  if(!options?.length)return undefined;
+  const normalized=options.flatMap(value=>value==='off'?['none' as const]:value==='on'?['high' as const]:isReasoningEffort(value)?[value]:[]);
+  return [...new Set(normalized)];
+}
+
+function isReasoningEffort(value:string):value is ReasoningEffort {
+  return ['none','low','medium','high'].includes(value);
+}
+
+function selectReasoningEffort(options:ReasoningEffort[],profile:'minimum'|'maximum') {
+  const preference:ReasoningEffort[]=profile==='minimum'
+    ?['none','low','medium','high']
+    :['high','medium','low','none'];
+  return preference.find(value=>options.includes(value));
 }
 
 function matchesModel(model: LmStudioModel, configured: string) {

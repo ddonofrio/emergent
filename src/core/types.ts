@@ -11,6 +11,7 @@ export interface AgentPlan {
   explanation: string;
   createdTurn: number;
   reviewedTurn: number;
+  stalledReviews?: number;
 }
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander'; position: Vec3; yaw: number;
@@ -21,7 +22,7 @@ export interface Entity {
   movementPrompt?: { messages:{speakerId:string;speakerName:string;word:string;tick:number;direction:string;distance:number}[] };
   followInvitation?: { speakerId:string; speakerName:string; tick:number; untilTick:number };
   following?: { entityId: string; blocked?: MovementIssue };
-  motion?: { kind?: 'walk' | 'run' | 'jump' | 'bounce'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; stopIssue?: MovementIssue; requestedDistance?: number };
+  motion?: { kind?: 'walk' | 'run' | 'jump' | 'bounce' | 'scan'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number };
   lastAction?: ActionResult;
 }
 export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; }
@@ -38,7 +39,7 @@ export interface ModuleManifest {
   perception: { range: number; fieldOfView: number; maxBlocks: number };
   agentInstructions: string;
 }
-export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
+export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'find_material' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
 export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: number; clearance: number; approach?: { distance:number; angle:number }; jump?: { distance:number; angle:number }; }
 export interface NavigationReport { checkedDistance: number; paths: (NavigationPath & { issue?: MovementIssue; options?: string[] })[]; blockedAfter?: number; }
 export interface ActionResult { ok: boolean; message: string; navigation?: NavigationReport; feedback?: Record<string, unknown>; }
