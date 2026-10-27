@@ -78,7 +78,7 @@ export class Store {
     const rows=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type IN ('action','rejected') ORDER BY id DESC LIMIT ?").all(tick,actor,limit) as {data:string}[];
     const actions=rows.map(row=>JSON.parse(row.data) as WorldEvent).reverse();
     if(!actions.length)return [];
-    const outcomes=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND id > ? AND type IN ('arrived','blocked','collision','rebound-ended','follow-ended','follow-blocked','movement-response') ORDER BY id").all(tick,actor,actions[0].id) as {data:string}[];
+    const outcomes=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND id > ? AND type IN ('arrived','blocked','collision','rebound-ended','follow-ended','follow-blocked','movement-response','scanned') ORDER BY id").all(tick,actor,actions[0].id) as {data:string}[];
     return [...actions,...outcomes.map(row=>JSON.parse(row.data) as WorldEvent)].sort((a,b)=>a.id-b.id);
   }
   memoryAt(tick:number,actor:string,limit=PRIVATE_NOTE_LIMIT) {

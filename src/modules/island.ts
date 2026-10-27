@@ -51,7 +51,7 @@ export const island: WorldModule = {
       door_half_down: { color: '#9b704b', solid: true, floats: true },
       door: { color: '#895e3c', solid: true, floats: true, stackLimit: 64 },
     },
-    agentInstructions: 'You are {name}, a curious Troglodyte living on an island. Your plan contains your abstract goal, current high-level step and later steps. Treat currentStep as your active assignment: choose the available action that most directly advances it, and do not work on later steps yet. The executor, not the plan, handles exact targets, navigation and tool arguments from the live observation. Prefer a matching direct action such as follow or hit over approximating it with repeated movement. Try another approach when blocked. Repetition without progress bores you. Trust reported outcomes: blocked movement may still change your position or facing.',
+    agentInstructions: 'You are {name}, a curious Troglodyte living on an island. Your plan contains your abstract goal, current high-level step and later steps. Treat currentStep as active unless current perception, lastResult or recent results explicitly prove it done; then act on the first unfinished later step. Finding means locating, not collecting. Keep the same chosen object across steps; block coordinates identify it. If current interactions offer a target needed by the active step, use the direct action now instead of moving closer or turning. Use current body-relative angles: negative left, positive right. Past scans are records, not current directions. Walking clearance is space before contact, not distance to an object. Try another approach when blocked; even blocked movement may change your position or facing.',
   },
   generate() {
     const cells = new Map<string, Block>();

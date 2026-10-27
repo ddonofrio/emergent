@@ -164,7 +164,7 @@ function renderTimeline() {
   const count = dayOf(latest);
   if (count !== dayCount) { const day = $<HTMLSelectElement>('day'); day.replaceChildren(); for (let i = 1;i<=count;i++) { const option = new Option(`Day ${String(i).padStart(3,'0')}`,String(i)); day.add(option); } dayCount = count; }
   $<HTMLSelectElement>('day').value = String(dayOf(cursor));
-  const waiting = Object.entries(meta.runtime.agents).filter(([,s]) => s.state === 'thinking' || s.state === 'waiting').map(([id]) => shown?.entities.find(e=>e.id===id)?.name ?? id);
+  const waiting = Object.entries(meta.runtime.agents).filter(([,s]) => s.state === 'planning' || s.state === 'thinking' || s.state === 'waiting').map(([id]) => shown?.entities.find(e=>e.id===id)?.name ?? id);
   $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
   $('record-status').textContent = isLive ? '1 turn = 1 world second' : playing && cursor >= latest ? 'Waiting for the next recorded turn' : 'World time · inference waits omitted';
   const marks = $('event-marks'); marks.replaceChildren();
@@ -184,14 +184,14 @@ function renderInspector() {
       existing.classList.toggle('selected',e.id===selected); existing.classList.toggle('disabled',!enabled);
       const select = existing.querySelector('.inhabitant-select')!; select.setAttribute('aria-pressed',String(e.id===selected));
       const toggle = existing.querySelector<HTMLInputElement>('.entity-toggle')!; toggle.checked = enabled; toggle.disabled = !isLive;
-      const status = existing.querySelector('.entity-status')!; status.textContent=displayStatus; status.classList.toggle('thinking',displayStatus==='thinking' || displayStatus==='waiting'); continue;
+      const status = existing.querySelector('.entity-status')!; status.textContent=displayStatus; status.classList.toggle('thinking',displayStatus==='planning' || displayStatus==='thinking' || displayStatus==='waiting'); continue;
     }
     const row = document.createElement('div'); row.className = `inhabitant ${e.id === selected ? 'selected' : ''} ${enabled ? '' : 'disabled'}`; row.id = `entity-${e.id}`;
     const button = document.createElement('button'); button.className = 'inhabitant-select'; button.setAttribute('aria-pressed',String(e.id === selected));
     const avatar = document.createElement('span'); avatar.className = `avatar ${e.kind}`; avatar.style.setProperty('--entity-color',e.color); avatar.innerHTML = '<i></i>';
     const text = document.createElement('span'); text.className = 'inhabitant-text'; const name = document.createElement('strong'); name.textContent = e.name;
     const kind = document.createElement('small'); kind.textContent = e.kind === 'troglodyte' ? 'Troglodyte' : 'Duck · NPC'; text.append(name,kind);
-    const status = document.createElement('span'); status.className = `entity-status ${displayStatus === 'thinking' || displayStatus === 'waiting' ? 'thinking' : ''}`; status.textContent = displayStatus;
+    const status = document.createElement('span'); status.className = `entity-status ${displayStatus === 'planning' || displayStatus === 'thinking' || displayStatus === 'waiting' ? 'thinking' : ''}`; status.textContent = displayStatus;
     const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.className = 'entity-toggle'; toggle.checked = enabled; toggle.disabled = !isLive;
     toggle.title = `Enable ${e.name}`; toggle.setAttribute('aria-label',`Enable ${e.name}`); toggle.onchange = () => void setEntityEnabled(e.id,toggle.checked,toggle);
     button.append(avatar,text,status); button.onclick = () => selectEntity(e.id); button.ondblclick = () => view.focus(e.id); row.append(button,toggle); list.append(row);
@@ -269,7 +269,7 @@ function journalEventLabel(event:WorldEvent) {
   if(event.type==='plan')return 'Goal and plan review';
   if(event.type==='action'||event.type==='rejected'){
     const action=(event.data as {action?:{action?:string}}|undefined)?.action?.action??'action';
-    const labels:Record<string,string>={walk:'Walking',run:'Running',jump:'Jumping',turn:'Turning',wait:'Waiting',find_material:'Scanning for materials',hit:'Striking a block',dig:'Digging with a shovel',strike_held:'Crafting with wood',join:'Joining door halves',place:'Placing an item',throw:'Throwing an item',pickup:'Picking up an item',hold:'Taking an item in hand',store:'Putting an item away',fill:'Filling a bucket',empty:'Emptying a bucket',say:'Speaking',follow:'Following',stop_follow:'Stopping following'};
+    const labels:Record<string,string>={walk:'Walking',run:'Running',jump:'Jumping',turn:'Turning',wait:'Waiting',find_material:'Scanning for materials',find_entity:'Searching for living beings',hit:'Striking a block',dig:'Digging with a shovel',strike_held:'Crafting with wood',join:'Joining door halves',place:'Placing an item',throw:'Throwing an item',pickup:'Picking up an item',hold:'Taking an item in hand',store:'Putting an item away',fill:'Filling a bucket',empty:'Emptying a bucket',say:'Speaking',follow:'Following',stop_follow:'Stopping following'};
     const label=labels[action]??'Action';return event.type==='rejected'?`${label} failed`:label;
   }
   const labels:Record<string,string>={damage:'Block damaged',discovery:'Learned',memory:'Journal note',arrived:'Movement complete',scanned:'Material scan complete',blocked:'Movement blocked',collision:'Collision',settled:'Block settled',lost:'Item lost',speech:'Speech',encounter:'Encounter',collapse:'Tree collapse',reflection:'Reflection','journal-compaction':'Journal condensed','agent-error':'Agent paused','entity-control':'Entity control','knowledge-correction':'Knowledge update','follow-ended':'Follow ended','follow-blocked':'Follow blocked',splash:'Water splashed'};

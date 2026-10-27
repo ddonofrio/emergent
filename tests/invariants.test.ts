@@ -9,7 +9,7 @@ import type { Block, Entity, WorldModule } from '../src/core/types';
 import { Store } from '../server/store';
 import { worldTools } from '../server/agents/tools';
 import { apply } from '../server/agents/harness-plugin';
-import { compactResult, compactView, inventoryContext, recentActions, relevantKnowledge, rounded } from '../server/agents/context';
+import { compactResult, compactView, historicalActions, inventoryContext, planningActions, recentActions, relevantKnowledge, rounded } from '../server/agents/context';
 import { exchangeInventory } from '../src/core/inventory';
 
 const entity = (id = 't1', x = .5, z = .5): Entity => ({ id, name: id, kind: 'troglodyte', controller: 'agent', position: [x,1,z], height: 2, yaw: 0, inventory: null, color: '#ffffff', status: 'idle' });
@@ -331,13 +331,53 @@ test('navigation separates distant approaches from possible jumps and respects o
   assert.match(observation.description,/You hold grass/);
   for(const path of observation.navigation.paths){for(const option of path.options??[])assert.ok(tools.includes(option),`Unavailable option ${option}`);if(path.jump){const copy=new Engine(near.module,near.state());assert.equal(copy.act('t1',{action:'jump',...path.jump}).ok,true);}}
   assert.ok(observation.navigation.paths[1].options!.includes('store'));assert.equal(observation.navigation.paths[1].options!.includes('hit'),false);
-  const tree=fixture([[0,1,1,'wood'],[0,2,1,'wood'],[0,3,1,'wood']]);assert.match(tree.observe('t1').description,/tree trunk/);assert.doesNotMatch(tree.observe('t1').description,/wood wall/);
+  const tree=fixture([[0,1,1,'wood'],[0,2,1,'wood'],[0,3,1,'wood']]);assert.match(tree.observe('t1').description,/wood block/);assert.doesNotMatch(tree.observe('t1').description,/wood wall/);
 });
 test('looking sideways reports movement angles relative to the unchanged body and turn is usable',()=>{
   const engine=fixture(),before=engine.entity('t1').yaw,view=engine.observeAt('t1',90);
   assert.equal(engine.entity('t1').yaw,before);assert.equal(view.bodyYaw,before);assert.equal(view.viewAngle,90);assert.deepEqual(view.navigation.paths.map(path=>path.turn),[45,90,135]);
   const turn=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='turn')!;assert.ok(turn);
   assert.equal((turn.invoke({angle:90}) as {ok:boolean}).ok,true);assert.equal(engine.entity('t1').yaw,90);
+});
+
+test('perception and scanning identify the same wood without inventing a tree from distant leaves',()=>{
+  const engine=fixture([[0,1,1,'wood'],[3,4,5,'leaves']]);
+  const view=engine.observe('t1'),scan=engine.materialsAround('t1').find(item=>item.material==='wood')!;
+  assert.match(view.description,/wood block at \[0,1,1\]/);
+  assert.doesNotMatch(view.description,/tree trunk/);
+  assert.match(view.description,/Walking clearance.*before contact/);
+  assert.match(view.description,/to its centre/);
+  assert.match(view.description,/Within reach: hit it without moving closer/);
+  assert.deepEqual(scan.target,view.interactions.hit.find(item=>item.kind==='wood')!.target);
+  assert.equal(scan.bodyRelativeDegrees,0);
+  const path=compactView(view).paths.find(path=>path.angle===0)!;
+  assert.deepEqual(path.target,scan.target);
+});
+
+test('sideways look keeps object bearings body-relative and preserves shovel interactions',()=>{
+  const engine=fixture([[3,1,0,'wood']]),view=engine.observeAt('t1',90);
+  assert.match(view.description,/wood block at \[3,1,0\].*right \(body-relative 90 degrees\)/);
+  assert.deepEqual(view.interactions.hit.find(block=>block.kind==='wood')!.target,[3,1,0]);
+  assert.equal(engine.entity('t1').yaw,0);
+  engine.voxels.set([3,1,0],'sand');engine.entity('t1').inventory={stacks:[{kind:'shovel',count:1}],selected:0,capacity:640};
+  const digging=compactView(engine.observeAt('t1',90));
+  assert.ok(digging.interactions.dig);assert.match(digging.perception,/sand block.*Within reach: dig with your shovel/);assert.doesNotMatch(digging.perception,/sand block.*free your hands to hit/);
+});
+
+test('past scans lose stale navigation while planning retains distinct blocks and their outcomes',()=>{
+  const engine=fixture([[0,1,1,'wood'],[1,1,1,'wood']]);
+  for(const target of [[0,1,1],[1,1,1]] as const){
+    engine.act('t1',{action:'find_material'});for(let tick=0;tick<20;tick++)engine.step();
+    for(let hit=0;hit<3;hit++)engine.act('t1',{action:'hit',target:[...target]});
+    engine.act('t1',{action:'store'});
+  }
+  const recent=recentActions(engine.recentEvents),history=historicalActions(recent),planning=planningActions(recent);
+  const live=recent.find(entry=>entry.action==='find_material')!.result;
+  assert.ok(live.materials!.some(material=>typeof material.bodyRelativeDegrees==='number'));
+  assert.doesNotMatch(JSON.stringify(history),/bodyRelativeDegrees|directionXZ|"facing"/);
+  assert.deepEqual(planning.filter(entry=>entry.result.blockOutcome==='collected').map(entry=>entry.object?.target),[[0,1,1],[1,1,1]]);
+  assert.deepEqual(history.filter(entry=>entry.action==='hit').map(entry=>entry.result.blockOutcome),['cracked','cracked','collected','cracked','cracked','collected']);
+  assert.ok(planning.some(entry=>entry.result.materials?.some(material=>material.material==='wood'&&material.target?.join(',')==='0,1,1')));
 });
 test('ordinary gaps do not teach the deep-water island boundary',()=>{
   const engine=fixture();engine.voxels.set([0,0,2],null);engine.voxels.set([0,0,3],null);
@@ -803,10 +843,13 @@ test('running is disabled only while a raw block is in hand, not while stored',(
   assert.equal(result.ok,false);assert.match(result.message,/store, place, or throw/i);assert.equal(engine.tick,tick);
 });
 test('the Harness schema guard validates contextual embodied tools', async () => {
-  const engine = fixture([[1,1,0,'wood']]), memory = {notes:[] as string[]}, tools=worldTools(engine,'t1',memory);
-  assert.deepEqual(tools.map(t=>t.name),['look','find_material','walk','turn','run','jump','hit','wait','journal']);
+  const engine = fixture([[1,1,0,'wood']],[entity(),entity('t2',.5,-3.5)]), memory = {notes:[] as string[]}, tools=worldTools(engine,'t1',memory);
+  assert.deepEqual(tools.map(t=>t.name),['look','find_material','find_entity','walk','turn','run','jump','hit','wait','journal']);
   const scan=tools.find(tool=>tool.name==='find_material')!.invoke({}) as any;
   assert.equal(scan.ok,true);assert.ok(scan.feedback.materials.some((item:any)=>item.material==='wood'&&Number.isFinite(item.bodyRelativeDegrees)&&Number.isFinite(item.directionXZ.x)&&Number.isFinite(item.directionXZ.z)));
+  assert.equal(engine.entity('t1').motion?.kind,'scan');for(let tick=0;tick<20;tick++)engine.step();assert.equal(engine.entity('t1').motion,undefined);
+  const entities=tools.find(tool=>tool.name==='find_entity')!.invoke({}) as any;
+  assert.equal(entities.ok,true);assert.deepEqual(entities.feedback.entities.map((other:any)=>other.name),['t2']);assert.equal(entities.feedback.entities[0].bodyRelativeDegrees,-180);
   assert.equal(engine.entity('t1').motion?.kind,'scan');for(let tick=0;tick<20;tick++)engine.step();assert.equal(engine.entity('t1').motion,undefined);
   const invalid = await tools.find(tool=>tool.name==='walk')!.execute({distance:'8'}) as {ok:boolean};
   assert.equal(invalid.ok,false);

@@ -243,7 +243,7 @@ export class Engine {
         const jump=path.jump&&Math.abs(turn)<=90?{...path.jump,angle:turn}:undefined;
         return {...path,turn,options:path.options?.filter(option=>option!=='jump'||!!jump),approach:path.approach?{...path.approach,angle:turn}:undefined,jump};
       });
-      return {description:observation.description,viewAngle:angle,bodyYaw:yaw,navigation:{...observation.navigation,paths},interactions:observation.interactions};
+      return {description:this.describe(entity,observation.surfaces,observation.entities,observation.items,observation.navigation,yaw),self:{...observation.self,yaw},viewAngle:angle,bodyYaw:yaw,navigation:{...observation.navigation,paths},interactions:observation.interactions};
     }
     finally { entity.yaw = yaw; }
   }
@@ -261,8 +261,26 @@ export class Engine {
     return [...nearest.entries()].map(([material,target])=>{
       const point=center(target),dx=point[0]-entity.position[0],dz=point[2]-entity.position[2],horizontal=Math.hypot(dx,dz);
       const absolute=Math.atan2(dx,dz)*180/Math.PI,angle=((absolute-yaw+540)%360)-180;
-      return {material,distance:Math.round(distance(entity.position,point)*10)/10,directionXZ:{x:Math.round(dx/Math.max(horizontal,.0001)*100)/100,z:Math.round(dz/Math.max(horizontal,.0001)*100)/100},bodyRelativeDegrees:Math.round(angle)};
+      return {material,target:clone(target),distance:Math.round(distance(entity.position,point)*10)/10,directionXZ:{x:Math.round(dx/Math.max(horizontal,.0001)*100)/100,z:Math.round(dz/Math.max(horizontal,.0001)*100)/100},bodyRelativeDegrees:Math.round(angle)};
     }).sort((a,b)=>a.distance-b.distance||a.material.localeCompare(b.material));
+  }
+  entitiesAround(id:string) {
+    const entity=this.entity(id),yaw=entity.yaw,nearest=new Map<string,Pick<Entity,'id'|'name'|'kind'|'position'>>(),range=this.module.manifest.perception.range;
+    try{
+      for(const offset of [0,120,240]){
+        entity.yaw=(yaw+offset)%360;
+        for(const other of this.observe(id).entities){
+          if(distance(entity.position,other.position)>range)continue;
+          const current=nearest.get(other.id);
+          if(!current||distance(entity.position,other.position)<distance(entity.position,current.position))nearest.set(other.id,clone(other));
+        }
+      }
+    }finally{entity.yaw=yaw;}
+    return [...nearest.values()].map(other=>{
+      const dx=other.position[0]-entity.position[0],dz=other.position[2]-entity.position[2],horizontal=Math.hypot(dx,dz);
+      const absolute=Math.atan2(dx,dz)*180/Math.PI,angle=((absolute-yaw+540)%360)-180;
+      return {entityId:other.id,name:other.name,kind:other.kind,distance:Math.round(distance(entity.position,other.position)*10)/10,directionXZ:{x:Math.round(dx/Math.max(horizontal,.0001)*100)/100,z:Math.round(dz/Math.max(horizontal,.0001)*100)/100},bodyRelativeDegrees:Math.round(angle)};
+    }).sort((a,b)=>a.distance-b.distance||a.name.localeCompare(b.name));
   }
   private direction(e: Entity, point: Vec3) {
     const angle = Math.atan2(point[0]-e.position[0],point[2]-e.position[2]) * 180 / Math.PI;
@@ -275,22 +293,26 @@ export class Engine {
     return 'behind';
   }
   held(e: Entity) { return e.inventory?.selected === null || !e.inventory ? undefined : e.inventory.stacks[e.inventory.selected]; }
-  private describe(e: Entity, surfaces: {kind:string;count:number;nearest:Vec3}[], entities: Pick<Entity,'id'|'name'|'kind'|'position'>[], items: Body[], navigation: NavigationReport) {
+  private describe(e: Entity, surfaces: {kind:string;count:number;nearest:Vec3}[], entities: Pick<Entity,'id'|'name'|'kind'|'position'>[], items: Body[], navigation: NavigationReport, bodyYaw=e.yaw) {
     const parts: string[] = [];
     const held = this.held(e);
+    const body={...e,yaw:bodyYaw};
+    const bearing=(point:Vec3)=>Math.round(((Math.atan2(point[0]-e.position[0],point[2]-e.position[2])*180/Math.PI-bodyYaw+540)%360)-180);
     parts.push(held ? `You hold ${held.count > 1 ? `${held.count} x ` : ''}${held.kind}${held.contents ? ` containing ${held.contents}` : ''}.` : 'Your hands are empty.');
     const forward = navigation.paths.find(path => path.turn === 0)!;
     if (forward.issue) {
-      parts.push(`${forward.issue.message} It is about ${forward.clearance.toFixed(1)} m ahead.`);
+      parts.push(`Walking clearance in the viewing direction: ${forward.clearance.toFixed(1)} m before contact. ${forward.issue.message}${forward.issue.target?` Obstacle block [${forward.issue.target.join(',')}].`:''}`);
     }
-    else parts.push(`The ground ahead is traversable for at least ${navigation.checkedDistance} m.`);
+    else parts.push(`The ground in the viewing direction is traversable for at least ${navigation.checkedDistance} m.`);
     for (const surface of surfaces.filter(surface => ['wood','plant','leaves','stone','sand'].includes(surface.kind)).slice(0,4)) {
       const metres = distance(e.position,center(surface.nearest));
-      const label = surface.kind === 'wood' ? surfaces.some(other => other.kind === 'leaves') ? 'tree trunk' : 'wood block or exposed trunk' : surface.kind === 'plant' ? 'plant or shrub' : `${surface.kind} terrain`;
-      parts.push(`A ${label} is ${metres.toFixed(1)} m ${this.direction(e,center(surface.nearest))} at block [${surface.nearest.join(',')}].`);
+      const label = surface.kind === 'plant' ? 'plant or shrub' : `${surface.kind} block`;
+      const reach=this.blockInReach(e,surface.nearest)&&!this.standingOn(surface.nearest);
+      const interaction=held?.kind==='shovel'&&['sand','dirt','grass'].includes(surface.kind)?' Within reach: dig with your shovel.':held?' Within reach; free your hands to hit it.':' Within reach: hit it without moving closer.';
+      parts.push(`A ${label} at [${surface.nearest.join(',')}] is ${metres.toFixed(1)} m to its centre, ${this.direction(body,center(surface.nearest))} (body-relative ${bearing(center(surface.nearest))} degrees).${reach?interaction:''}`);
     }
-    for (const other of entities.slice(0,4)) parts.push(`${other.name}, a ${other.kind}, is ${distance(e.position,other.position).toFixed(1)} m ${this.direction(e,other.position)}.`);
-    for (const item of items.slice(0,3)) parts.push(`A loose ${item.kind} is ${distance(e.position,item.position).toFixed(1)} m ${this.direction(e,item.position)} (item ${item.id}).`);
+    for (const other of entities.slice(0,4)) parts.push(`${other.name}, a ${other.kind}, is ${distance(e.position,other.position).toFixed(1)} m ${this.direction(body,other.position)} (body-relative ${bearing(other.position)} degrees).`);
+    for (const item of items.slice(0,3)) parts.push(`A loose ${item.kind} is ${distance(e.position,item.position).toFixed(1)} m ${this.direction(body,item.position)} (item ${item.id}).`);
     return parts.join(' ');
   }
   private footAt(x: number, z: number, from: number, height: number, maxRise = 0, maxDrop = 1, edgeSupport = false): Vec3 | null {
@@ -440,6 +462,11 @@ export class Engine {
       e.motion={kind:'scan',destination:clone(e.position),speed:0,origin:clone(e.position),progress:0,duration:1,startYaw:e.yaw};e.status='scanning';
       return {ok:true,message:materials.length?`You scan all around and find ${materials.map(item=>item.material).join(', ')}.`:'You scan all around but find no visible block materials.',feedback:{outcome:'started',materials}};
     }
+    if(a.action==='find_entity'){
+      const entities=this.entitiesAround(e.id);
+      e.motion={kind:'scan',destination:clone(e.position),speed:0,origin:clone(e.position),progress:0,duration:1,startYaw:e.yaw};e.status='scanning';
+      return {ok:true,message:entities.length?`You scan all around and see ${entities.map(other=>`${other.name}, a ${other.kind}`).join('; ')}.`:'You scan all around but see no other living beings.',feedback:{outcome:'started',entities}};
+    }
     if (a.action === 'turn') {
       if (!Number.isFinite(a.angle) || Math.abs(a.angle!) > 360) return fail('Turn angle must be between -360 and 360 degrees.');
       e.yaw = ((e.yaw + a.angle!) % 360 + 360) % 360; return ok(`Turned to ${Math.round(e.yaw)} degrees.`);
@@ -574,7 +601,7 @@ export class Engine {
       if(supported)return fail(`You cannot strike that block because ${supported.name} is standing on it.`);
       e.yaw=((Math.atan2(point[0]-e.position[0],point[2]-e.position[2])*180/Math.PI)%360+360)%360;
       const voxel=key(target),damage=(this.blockDamage.get(voxel)??0)+1;
-      if(!usingShovel&&damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`);}
+      if(!usingShovel&&damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return {...ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`),feedback:{target,material:kind,blockOutcome:'cracked',cracks:damage}};}
       this.blockDamage.delete(voxel);this.voxels.set(target,null);const sawCollapse=this.collapseUnsupportedTree(target,e);this.wakeBodies();if(!usingShovel)this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
       const collected=kind==='plant'?'stick':kind,heldResult=this.canHold(e,collected);
       if(heldResult.ok)this.addInventory(e,collected,undefined,!usingShovel);
@@ -584,7 +611,7 @@ export class Engine {
         :kind==='plant'
           ?heldResult.ok?'The plant breaks. You pick up a stick.':'The plant breaks, but the stick falls loose because your inventory is full.'
           :heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`;
-      return ok(result+(sawCollapse?' The unsupported part of the tree falls into loose blocks.':''));
+      return {...ok(result+(sawCollapse?' The unsupported part of the tree falls into loose blocks.':'')),feedback:{target,material:kind,blockOutcome:heldResult.ok?'collected':'broken',...(heldResult.ok?{collected}: {})}};
     }
     if (a.action === 'fill') {
       const held=this.held(e);if(!held||held.kind!=='bucket'||held.contents)return fail('You need to hold an empty bucket.');

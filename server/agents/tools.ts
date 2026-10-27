@@ -72,7 +72,8 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   const movement=(maximum:number)=>object({distance:{type:'number',description:`Metres: greater than 0, at most ${maximum}.`},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right.'}},['distance']);
   const tools:WorldTool[]=[
     tool('look','Look without turning your body or spending time.',object({angle:{type:'number',description:'Body-relative viewing angle (-180..180 degrees).'}}),false,({angle=0}:{angle?:number})=>compactView(engine.observeAt(id,Math.max(-180,Math.min(180,angle))))),
-    action('find_material','Scan 360 degrees for unique visible block materials. Returns the nearest distance, body-relative angle, and normalized horizontal world direction {x,z} for each material; takes one world second.',noArgs,'find_material'),
+    action('find_material','Scan 360 degrees for visible materials. Returns the nearest block target, distance to its centre and body-relative angle per material; one world second.',noArgs,'find_material'),
+    action('find_entity','Scan 360 degrees for visible living beings within 18 metres. Returns each ID, name, kind, distance and body-relative angle; one world second.',noArgs,'find_entity'),
     action('walk','Walk; stop before obstacles or unsafe terrain.',movement(32),'walk'),
     action('turn','Turn your body and forward view.',object({angle:{type:'number',description:'Degrees (-360..360); negative left, positive right.'}},['angle']),'turn'),
   ];
@@ -116,6 +117,17 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   if(targets?.hit.some(block=>block.cracks>0)){
     const index=tools.findIndex(tool=>tool.name==='hit');
     if(index>=0&&tools[index].physical)tools.unshift(...tools.splice(index,1));
+  }
+  for(const movement of tools.filter(tool=>tool.physical&&['walk','run','jump','turn'].includes(tool.name))){
+    movement.validate=(args:unknown)=>{
+      const {distance,angle} = args as {distance?:number;angle?:number};
+      const limit=movement.name==='jump'?90:movement.name==='turn'?360:180;
+      if(angle!==undefined&&(!Number.isFinite(angle)||Math.abs(angle)>limit))return `Angle must be between -${limit} and ${limit} degrees.${movement.name==='jump'?' Turn first to face a target behind you, then use a checked jump.':''}`;
+      if(movement.name==='turn')return undefined;
+      const metres=distance??(movement.name==='jump'?2:NaN),maximum=movement.name==='jump'?2.5:movement.name==='run'?24:32;
+      if(!Number.isFinite(metres)||metres>maximum||(movement.name==='jump'?metres<.75:metres<=0))return movement.name==='jump'?'Jump distance must be between 0.75 and 2.5 metres.':`Distance must be greater than zero and at most ${maximum} metres.`;
+      return undefined;
+    };
   }
   return tools;
 }
