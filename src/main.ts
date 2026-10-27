@@ -4,6 +4,7 @@ import { advancePlayback, fastScrubSpeed } from './view/playback-clock';
 import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, type TurnStatus } from './core/time';
 import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from './core/types';
 import { knowledgeDescription } from './core/knowledge';
+import { PLAN_REVIEW_INTERVAL } from './core/memory';
 
 interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
@@ -220,6 +221,25 @@ function renderDetails() {
   const pairs = [['Position',e.position.map(v => v.toFixed(1)).join(' / ')],['Facing',`${Math.round(e.yaw)}°`],['State',e.status],['Hands',held?`${held.kind}${held.contents?` · ${held.contents}`:''}`:'Empty'],['Inventory',inventory],['Perception',`${meta.module.perception.range} m · ${meta.module.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
   for (const [label,value] of pairs) { const row = document.createElement('div'); row.className = 'detail-row'; const a = document.createElement('span'); a.textContent = label; const b = document.createElement('span'); b.textContent = value; row.append(a,b); panel.append(row); }
   const focus = document.createElement('button'); focus.className = 'focus-button'; focus.textContent = `Follow ${e.name}`; focus.onclick = () => view.focus(e.id); panel.append(focus);
+  if(e.controller==='agent'){
+    const section=document.createElement('section');section.className='agent-plan';section.setAttribute('aria-label','Recorded goal and steps');
+    const planLabel=document.createElement('h4');planLabel.textContent='GOAL AND STEPS IN THIS RECORD';section.append(planLabel);
+    if(e.plan){
+      const goal=document.createElement('p');goal.className='plan-goal';goal.textContent=e.plan.goal;section.append(goal);
+      const steps=document.createElement('ol');
+      for(const step of e.plan.steps){
+        const item=document.createElement('li');item.dataset.status=step.status;
+        const status=document.createElement('span');status.className='plan-step-status';status.textContent=step.status;
+        const task=document.createElement('div');task.textContent=step.task;item.append(status,task);
+        if(step.evidence){const evidence=document.createElement('p');evidence.className='muted';evidence.textContent=step.evidence;item.append(evidence);}
+        steps.append(item);
+      }
+      section.append(steps);
+      const explanation=document.createElement('p');explanation.textContent=`Agent explanation: ${e.plan.explanation}`;section.append(explanation);
+      const review=document.createElement('p');review.className='muted';review.textContent=`${e.plan.status} · Reviewed at decision ${e.plan.reviewedTurn} · Next review at ${e.plan.reviewedTurn+PLAN_REVIEW_INTERVAL}`;section.append(review);
+    }else{const empty=document.createElement('p');empty.className='muted';empty.textContent='No plan recorded yet.';section.append(empty);}
+    panel.append(section);
+  }
   const label = document.createElement('h4'); label.textContent = 'PRIVATE NOTES IN THIS RECORD'; panel.append(label);
   if(memoryView?.actor!==selected){const p=document.createElement('p');p.className='muted';p.textContent='Loading private memory.';panel.append(p);}
   else if(!memoryView.notes.length){const p=document.createElement('p');p.className='muted';p.textContent='No private memory notes yet.';panel.append(p);}
@@ -246,6 +266,7 @@ function renderJournal() {
   if (wasAtTop) journal.scrollTop = 0;
 }
 function journalEventLabel(event:WorldEvent) {
+  if(event.type==='plan')return 'Goal and plan review';
   if(event.type==='action'||event.type==='rejected'){
     const action=(event.data as {action?:{action?:string}}|undefined)?.action?.action??'action';
     const labels:Record<string,string>={walk:'Walking',run:'Running',jump:'Jumping',turn:'Turning',wait:'Waiting',hit:'Striking a block',dig:'Digging with a shovel',strike_held:'Crafting with wood',join:'Joining door halves',place:'Placing an item',throw:'Throwing an item',pickup:'Picking up an item',hold:'Taking an item in hand',store:'Putting an item away',fill:'Filling a bucket',empty:'Emptying a bucket',say:'Speaking',follow:'Following',stop_follow:'Stopping following'};

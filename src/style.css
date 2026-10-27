@@ -1,5 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
+.agent-plan{border-bottom:1px solid var(--line);padding-bottom:12px;overflow-wrap:anywhere}.agent-plan .plan-goal{color:var(--lime);font-weight:600}.agent-plan ol{padding-left:20px;font-size:12px;line-height:1.5}.agent-plan li{padding:0 0 10px 3px}.agent-plan li[data-status="completed"]{color:var(--lime)}.agent-plan li[data-status="abandoned"]{color:var(--muted)}.agent-plan .plan-step-status{font:9px var(--mono);text-transform:uppercase;display:block;margin-bottom:3px}.agent-plan li p{margin:3px 0 0}
+
 #time-to-live{font:8px var(--mono);color:#91a38f;white-space:nowrap}.journal-entry{grid-template-columns:76px 1fr!important}
 .experiment-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.request-setting{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:11px;color:var(--muted);cursor:pointer}.request-setting input{width:14px;height:14px;margin:0;accent-color:var(--lime);cursor:pointer}.request-setting input:focus-visible{outline:2px solid var(--lime);outline-offset:3px}.request-setting input:disabled{cursor:default;opacity:.5}
 

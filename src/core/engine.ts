@@ -208,13 +208,14 @@ export class Engine {
     if(!prompt)return fail('There is no movement decision to resolve.');
     delete entity.movementPrompt;
     const speech=prompt.messages.map(message=>`${message.speakerName} saying "${message.word}"`).join(' and ');
+    const feedback={from:clone(entity.motion?.origin??entity.position),to:clone(entity.position),facing:entity.yaw};
     if(choice==='stop_moving'){
       delete entity.motion;entity.status='idle';
-      entity.lastAction=ok(`You stop moving after hearing ${speech}. Choose your next action on the next turn.`);
-      this.event(id,'movement-response',entity.lastAction.message,{choice,messages:prompt.messages});return entity.lastAction;
+      entity.lastAction={ok:true,message:`You stop moving after hearing ${speech}. Choose your next action on the next turn.`,feedback:{...feedback,outcome:'stopped'}};
+      this.event(id,'movement-response',entity.lastAction.message,{choice,messages:prompt.messages,...feedback});return entity.lastAction;
     }
     const result=ok(`You continue your current movement after hearing ${speech}.`);
-    this.event(id,'movement-response',result.message,{choice,messages:prompt.messages});return result;
+    this.event(id,'movement-response',result.message,{choice,messages:prompt.messages,...feedback});return result;
   }
   private updateEncounters(){
     for(const observer of this.entities.filter(entity=>entity.controller==='agent'&&this.active(entity))){
@@ -386,9 +387,13 @@ export class Engine {
   act(id: string, action: Action): ActionResult {
     const e = this.entity(id);
     if (!this.active(e)) return fail('This entity is disabled.');
+    const previousYaw=e.yaw;
     let result: ActionResult;
     try { result = this.execute(e, action); }
     catch (error) { result = fail(error instanceof Error ? error.message : 'Invalid action.'); }
+    if(e.yaw!==previousYaw)result.feedback={...result.feedback,facing:e.yaw};
+    if(result.ok&&action.action==='follow')result.feedback={...result.feedback,outcome:'following',from:clone(e.position)};
+    if(result.ok&&action.action==='stop_follow')result.feedback={...result.feedback,outcome:'stopped',to:clone(e.position)};
     e.lastAction = clone(result);
     this.event(id, result.ok ? 'action' : 'rejected', result.message, { action, result });
     return result;
@@ -629,8 +634,8 @@ export class Engine {
     return sawCollapse;
   }
   private endFollowing(e:Entity,message:string){
-    delete e.following;delete e.motion;e.status='idle';e.lastAction={ok:false,message};
-    this.event(e.id,'follow-ended',message);
+    delete e.following;delete e.motion;e.status='idle';e.lastAction={ok:false,message,feedback:{outcome:'stopped',to:clone(e.position),facing:e.yaw}};
+    this.event(e.id,'follow-ended',message,e.lastAction.feedback);
   }
   private bounceEntity(e:Entity,other:Entity,actionOrigin:Vec3){
     const dx=e.position[0]-other.position[0],dz=e.position[2]-other.position[2],separation=Math.hypot(dx,dz);
@@ -668,9 +673,14 @@ export class Engine {
     if(metres>.001){
       const next=this.movementPoint(e,e.position[0]+dx/metres*step,e.position[2]+dz/metres*step,e.position[1]);
       if(next.point)e.position=next.point;
-      else{delete e.motion;e.status=e.following?'following':'idle';return;}
+      else{this.finishBounce(e);return;}
     }
-    if(metres<=step+.001){e.position=clone(motion.destination);delete e.motion;e.status=e.following?'following':'idle';}
+    if(metres<=step+.001){e.position=clone(motion.destination);this.finishBounce(e);}
+  }
+  private finishBounce(e:Entity){
+    delete e.motion;e.status=e.following?'following':'idle';
+    e.lastAction={ok:false,message:`${e.lastAction?.message??'You collided with another creature.'} You are now stopped.`,feedback:{...e.lastAction?.feedback,outcome:'collision',to:clone(e.position),facing:e.yaw}};
+    this.event(e.id,'rebound-ended',e.lastAction.message,e.lastAction.feedback);
   }
   private advanceFollowing(e:Entity){
     const following=e.following!,target=this.entities.find(other=>other.id===following.entityId);
@@ -682,7 +692,7 @@ export class Engine {
     const step=Math.min(speed/TICKS_PER_SECOND,metres-1),next=this.movementPoint(e,e.position[0]+dx/metres*step,e.position[2]+dz/metres*step,e.position[1]);
     if(!next.point){
       following.blocked=next.issue;if(next.issue?.kind==='entity'){this.collide(e,next.issue);return;}delete e.motion;this.learnMovementIssue(e,next.issue!);
-      e.lastAction={ok:false,message:`You stop following the path. ${next.issue!.message} Use stop_follow to choose another action.`,feedback:{issue:next.issue}};
+      e.lastAction={ok:false,message:`You stop following the path. ${next.issue!.message} Use stop_follow to choose another action.`,feedback:{outcome:'blocked',to:clone(e.position),facing:e.yaw,issue:next.issue}};
       this.event(e.id,'follow-blocked',e.lastAction.message,e.lastAction.feedback);return;
     }
     const origin=clone(e.position);e.position=next.point;e.status='following';

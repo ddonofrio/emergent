@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { deflateSync, inflateSync } from 'node:zlib';
 import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from '../src/core/types';
 import { CLOCK_VERSION } from '../src/core/time';
-import { PRIVATE_NOTE_LIMIT } from '../src/core/memory';
+import { PRIVATE_NOTE_LIMIT, RECENT_ACTION_LIMIT } from '../src/core/memory';
 
 const pack = (data: unknown) => deflateSync(JSON.stringify(data));
 const unpack = <T>(data: Uint8Array): T => JSON.parse(inflateSync(data).toString());
@@ -74,11 +74,11 @@ export class Store {
     const rows = (actor ? this.db.prepare('SELECT data FROM events WHERE tick <= ? AND actor = ? ORDER BY id DESC LIMIT ?').all(tick, actor, limit) : this.db.prepare('SELECT data FROM events WHERE tick <= ? ORDER BY id DESC LIMIT ?').all(tick, limit)) as { data: string }[];
     return rows.map(r => JSON.parse(r.data)).reverse();
   }
-  actionEventsAt(tick:number,actor:string,limit=4):WorldEvent[]{
+  actionEventsAt(tick:number,actor:string,limit=RECENT_ACTION_LIMIT):WorldEvent[]{
     const rows=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type IN ('action','rejected') ORDER BY id DESC LIMIT ?").all(tick,actor,limit) as {data:string}[];
     const actions=rows.map(row=>JSON.parse(row.data) as WorldEvent).reverse();
     if(!actions.length)return [];
-    const outcomes=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND id > ? AND type IN ('arrived','blocked','follow-ended','follow-blocked') ORDER BY id").all(tick,actor,actions[0].id) as {data:string}[];
+    const outcomes=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND id > ? AND type IN ('arrived','blocked','collision','rebound-ended','follow-ended','follow-blocked','movement-response') ORDER BY id").all(tick,actor,actions[0].id) as {data:string}[];
     return [...actions,...outcomes.map(row=>JSON.parse(row.data) as WorldEvent)].sort((a,b)=>a.id-b.id);
   }
   memoryAt(tick:number,actor:string,limit=PRIVATE_NOTE_LIMIT) {

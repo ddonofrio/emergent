@@ -9,7 +9,7 @@ import type { Block, Entity, WorldModule } from '../src/core/types';
 import { Store } from '../server/store';
 import { worldTools } from '../server/agents/tools';
 import { apply } from '../server/agents/harness-plugin';
-import { compactView, inventoryContext, recentActions, relevantKnowledge } from '../server/agents/context';
+import { compactResult, compactView, inventoryContext, recentActions, relevantKnowledge, rounded } from '../server/agents/context';
 import { exchangeInventory } from '../src/core/inventory';
 
 const entity = (id = 't1', x = .5, z = .5): Entity => ({ id, name: id, kind: 'troglodyte', controller: 'agent', position: [x,1,z], height: 2, yaw: 0, inventory: null, color: '#ffffff', status: 'idle' });
@@ -74,6 +74,13 @@ test('entity hitboxes prevent pass-through and produce a recorded safe rebound',
   assert.match(walker.lastAction!.message,/collide.*bounce back safely/i);
   assert.ok(engine.recentEvents.some(event=>event.type==='collision'&&event.actor==='t1'));
   assert.ok(other.position[2]>2.5,'The struck character also rebounds instead of being passed through.');
+  const store=new Store(':memory:',engine.module.manifest);
+  try{
+    store.record(engine.frame(),engine.state());
+    const history=recentActions(store.actionEventsAt(engine.tick,'t1'));
+    assert.equal(history.length,1);assert.equal(history[0].result.outcome,'collision');
+    assert.deepEqual(history[0].result.from,[.5,1,.5]);assert.deepEqual(history[0].result.to,rounded(walker.position));
+  }finally{store.close();}
 });
 
 test('following parks at one metre, resumes when the target moves, and replays without decisions',()=>{
@@ -506,15 +513,15 @@ test('wood transformation preserves resources when five output pieces do not fit
   assert.equal(actor.inventory!.stacks.reduce((sum,stack)=>sum+stack.count,0),64);
   assert.equal(engine.held(actor)?.count,64);
 });
-test('recorded action context uses final movement outcomes and callable shaping arguments',()=>{
+test('the last twenty recorded actions retain final movement outcomes and callable shaping arguments',()=>{
   const engine=fixture(),store=new Store(':memory:',engine.module.manifest);
   try{
-    for(let index=0;index<4;index++)engine.act('t1',{action:'wait'});
+    for(let index=0;index<24;index++)engine.act('t1',{action:'wait'});
     engine.act('t1',{action:'walk',distance:2});
     for(let tick=0;tick<20;tick++)engine.step();
     store.record(engine.frame(),engine.state());
     const started=recentActions(store.actionEventsAt(0,'t1')),completed=recentActions(store.actionEventsAt(20,'t1'));
-    assert.equal(completed.length,4);assert.match(started.at(-1)!.result.message,/start walking/);
+    assert.equal(completed.length,20);assert.match(started.at(-1)!.result.message,/start walking/);
     assert.match(completed.at(-1)!.result.message,/finish walking/);assert.deepEqual(completed.at(-1)!.args,{distance:2});
     assert.deepEqual(store.actionEventsAt(20,'someone-else'),[]);
     engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
@@ -522,6 +529,44 @@ test('recorded action context uses final movement outcomes and callable shaping 
     const shaping=recentActions(store.actionEventsAt(20,'t1')).at(-1)!;
     assert.deepEqual(shaping.args,{point:'top_center'});assert.equal(shaping.action,'strike_held');
   }finally{store.close();}
+});
+test('recorded movement distinguishes partial progress from a rejected move that changes facing',()=>{
+  const engine=fixture([[0,1,2,'stone']]),store=new Store(':memory:',engine.module.manifest);
+  try{
+    assert.equal(engine.act('t1',{action:'walk',distance:4}).ok,true);
+    for(let tick=0;tick<40;tick++)engine.step();
+    const end=rounded(engine.entity('t1').position);
+    assert.ok(end[2]>.5);store.record(engine.frame(),engine.state());
+    const entry=recentActions(store.actionEventsAt(engine.tick,'t1')).at(-1)!;
+    assert.equal(entry.result.outcome,'partial');assert.deepEqual(entry.result.from,[.5,1,.5]);assert.deepEqual(entry.result.to,end);
+    assert.equal(compactResult(engine.entity('t1').lastAction!).outcome,'partial');
+
+    engine.entity('t1').yaw=90;
+    const rejected=engine.act('t1',{action:'walk',distance:1,angle:-90});
+    assert.equal(rejected.ok,false);store.record(engine.frame());
+    const failure=recentActions(store.actionEventsAt(engine.tick,'t1')).at(-1)!;
+    assert.equal(failure.result.outcome,'rejected');assert.equal(failure.result.facing,0);
+    assert.deepEqual(rounded(engine.entity('t1').position),end);
+  }finally{store.close();}
+});
+test('speech decisions update the original recorded walk without inventing another physical action',()=>{
+  for(const choice of ['continue_moving','stop_moving'] as const){
+    const engine=fixture([],[entity(),entity('t2',2.5,.5)]),store=new Store(':memory:',engine.module.manifest);
+    try{
+      engine.act('t1',{action:'walk',distance:3});
+      for(let tick=0;tick<5;tick++)engine.step();
+      engine.act('t2',{action:'say',word:'Come here'});engine.wakeMovingListenersFromSpeech();
+      store.record(engine.frame(),engine.state());
+      engine.resolveMovementPrompt('t1',choice);store.record(engine.frame());
+      const reacted=recentActions(store.actionEventsAt(engine.tick,'t1'));
+      assert.equal(reacted.length,1);assert.equal(reacted[0].reaction?.choice,choice);
+      assert.equal(reacted[0].result.outcome,choice==='stop_moving'?'stopped':'started');
+      for(let tick=0;tick<40;tick++)engine.step();store.record(engine.frame());
+      const final=recentActions(store.actionEventsAt(engine.tick,'t1'))[0];
+      assert.equal(final.reaction?.choice,choice);assert.equal(final.result.outcome,choice==='stop_moving'?'stopped':'completed');
+      assert.deepEqual(final.result.from,[.5,1,.5]);assert.deepEqual(final.result.to,rounded(engine.entity('t1').position));
+    }finally{store.close();}
+  }
 });
 test('front-edge wood strikes make chosen door halves which join into one rustic door',()=>{
   const engine=fixture();engine.entity('t1').inventory={stacks:[{kind:'wood',count:2}],selected:0,capacity:64};

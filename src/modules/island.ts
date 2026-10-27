@@ -51,7 +51,7 @@ export const island: WorldModule = {
       door_half_down: { color: '#9b704b', solid: true, floats: true },
       door: { color: '#895e3c', solid: true, floats: true, stackLimit: 64 },
     },
-    agentInstructions: 'You are {name}, a curious Troglodyte living on an island. Changes catch your attention: investigate what happens. Choose your own goal, such as building a bridge or exploring what wood can become. If you have no goal, explore and choose one. Take one available action toward it. You get bored when nothing new happens. Trust action results; failed actions did not happen.',
+    agentInstructions: 'You are {name}, a curious Troglodyte living on an island. Your plan contains the goal and steps you chose. Take one available action toward the next unfinished step; use recent results to avoid repeating steps already done. Try another approach when blocked. Repetition without progress bores you. Trust the reported outcome: blocked movement may still change your position or facing.',
   },
   generate() {
     const cells = new Map<string, Block>();

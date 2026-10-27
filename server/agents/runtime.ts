@@ -1,18 +1,20 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Engine } from '../../src/core/engine';
-import { clone, distance, type Action, type Observation } from '../../src/core/types';
+import { clone, distance, type Action, type ActionResult, type AgentPlan, type Observation } from '../../src/core/types';
 import { validateJsonSchemaValue } from '../../vendor/deepseek-harness/json-schema';
 import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
-import { TURN_TICKS, type DecisionStatus } from '../../src/core/time';
+import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import type { Store } from '../store';
 import { ProviderChain, type ProviderConfig, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
-import { compactView, inventoryContext, recentActions, relevantKnowledge, rounded } from './context';
+import { compactResult, compactView, inventoryContext, recentActions, relevantKnowledge, rounded } from './context';
 import { compactJournal } from './journal-compaction';
 import { journalReminder } from './journal';
+import { needsPlanReview, planDecision } from './planning';
 
 interface Message { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
 interface Mind extends Memory {
+  plan?: AgentPlan;
   turns: number; modelTurns: number; lastResult?: unknown;
   carriedMoves?: number; carryingReminder?: string; emptyHandMoves?: number;
   knownDiscoveries?: string[]; lastEncounters?: Record<string,number>; lastSpoken?: Record<string,number>;
@@ -32,6 +34,7 @@ export interface PreparedDecision {
   hints?: string[];
   journalReminder?: string;
   journalEntries?: string[];
+  planEvents?: AgentPlan[];
   journalCompactions?: {before:string[];after:string[];incoming:string}[];
   stopFollowing?: boolean;
   viewAngle?: number;
@@ -76,7 +79,7 @@ export class AgentRuntime {
       const urgentSpeech=input.prompt.messages.map(message=>({speaker:message.speakerName,message:message.word,direction:message.direction,distanceMetres:message.distance}));
       const started=Date.now(),messages:Message[]=[
         {role:'system',content:`You are ${this.engine.entity(input.id).name}, a Troglodyte moving through a physical world. Choose exactly one available tool.`},
-        {role:'user',content:JSON.stringify({urgentSpeech,currentMovement:{kind:input.motion.kind??'walk',remainingMetres:rounded(distance(this.engine.entity(input.id).position,input.motion.destination))},instruction:'You heard this while moving. Choose only whether to continue the current movement or stop. Stopping does not grant another action until the next shared turn.'})},
+        {role:'user',content:JSON.stringify({urgentSpeech,currentMovement:{kind:input.motion.kind??'walk',remainingMetres:rounded(distance(this.engine.entity(input.id).position,input.motion.destination))},...(input.mind.plan?{goal:input.mind.plan.goal}:{}),instruction:'You heard this while moving. Choose only whether to continue the current movement or stop. Stopping does not grant another action until the next shared turn.'})},
       ];
       const tools=[
         {type:'function' as const,function:{name:'continue_moving',description:'Keep the current movement unchanged.',parameters:{type:'object',properties:{},required:[],additionalProperties:false}}},
@@ -124,7 +127,7 @@ export class AgentRuntime {
     const prepare=async ({ id, mind, observation }:typeof inputs[number]) => {
       signal.throwIfAborted();
       const cached = this.store.loadPending<PreparedDecision>(tick, id, this.inference.cacheKey);
-      if (cached) {
+      if (cached && (this.mode==='demo'||cached.mind.plan)) {
         cached.mind.notes=cached.mind.notes.slice(-PRIVATE_NOTE_LIMIT);
         delete (cached.mind as Mind & {cycles?:Message[][]}).cycles;
         report(id, { state: 'ready' }); return cached;
@@ -153,9 +156,35 @@ export class AgentRuntime {
     const call={id:'demo-'+tick+'-'+id,type:'function' as const,function:{name,arguments:JSON.stringify(args)}};
     return{id,mind,observation,content:null,calls:[call],latencyMs:0,attempts:0,provider:'demo',model:'demo'};
   }
+  private async preparePlan(id:string,mind:Mind,observation:Observation,signal:AbortSignal,report:Report) {
+    if(!needsPlanReview(mind.plan,mind.turns))return [];
+    type StagedPlan={plan:AgentPlan;events:AgentPlan[];modelCalls:number};
+    const actor=`plan:${id}`,cached=this.store.loadPending<StagedPlan>(observation.tick,actor,this.inference.cacheKey);
+    const staged:StagedPlan=cached??{plan:mind.plan!,events:[],modelCalls:0};
+    if(!cached||staged.plan.status!=='active'){
+      const context=rounded({body:{position:observation.self.position,yaw:observation.self.yaw},...compactView(observation),
+        inventory:inventoryContext(observation),learned:relevantKnowledge(this.engine,observation),notes:mind.notes,
+        ...(observation.self.lastAction?{lastResult:compactResult(observation.self.lastAction)}:{}),
+        ...(observation.heard.length?{heard:observation.heard.map(({tick,direction,distance,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND,directionWhenHeard:direction,distanceWhenHeard:distance}))}:{}),
+        recent:recentActions(this.store.actionEventsAt(observation.tick,id)),...(observation.following?{following:observation.following}:{}),
+      });
+      staged.plan=await planDecision({name:observation.self.name,turn:mind.turns,plan:cached?.plan??mind.plan,context,signal,retryDelayMs:this.config.retryDelayMs,
+        complete:async(request,abort)=>{
+          report(id,{state:'thinking',message:'Planning a goal and reviewing steps; world time is held.'});
+          const answer=await this.inference.complete(request,abort,(provider)=>report(id,{state:'thinking',message:`Planning with ${provider.name}; world time is held.`}));
+          staged.modelCalls++;return answer;
+        },
+        waiting:message=>report(id,{state:'waiting',message}),
+        save:plan=>{staged.plan=clone(plan);staged.events.push(clone(plan));this.store.savePending(observation.tick,actor,this.inference.cacheKey,staged);},
+      });
+    }
+    signal.throwIfAborted();mind.plan=clone(staged.plan);mind.modelTurns+=staged.modelCalls;
+    return staged.events;
+  }
   private async request(id: string, mind: Mind, observation: Observation, signal: AbortSignal, report: Report): Promise<PreparedDecision> {
     let following=!!observation.self.following,stopFollowing=false,viewAngle=0,speechMenu=false;
     const started = Date.now();
+    const planEvents=await this.preparePlan(id,mind,observation,signal,report);
     const journalCompactions:NonNullable<PreparedDecision['journalCompactions']>=[];
     const journalEntries:string[]=[];
     let journalHint=following?undefined:journalReminder(mind);
@@ -179,14 +208,14 @@ export class AgentRuntime {
     if(!following&&firstWoodShape){
       const product=woodProductName(firstWoodShape.slice('wood-shape:'.length));
       const made=product==='planks'?product:`${/^[aeiou]/.test(product)?'an':'a'} ${product}`;
-      hints.push(`You shaped wood into ${made} for the first time. Wood may have other useful forms besides ${product==='planks'?product:`the ${product}`}. You need more raw wood to test them; gathering it and investigating what wood can become could be your first goal. Consider using journal to preserve that goal and this discovery.`);
+      hints.push(`You shaped wood into ${made} for the first time. Wood may have other useful forms besides ${product==='planks'?product:`the ${product}`}. You need more raw wood to test them. Consider this discovery when reviewing your plan; journal can preserve useful details for later investigation.`);
     }
     if(!following)mind.knownDiscoveries=discoveries;
     mind.lastEncounters??={};
     for(const notice of observation.encounters)mind.lastEncounters[notice.otherId]=Math.max(mind.lastEncounters[notice.otherId]??0,notice.tick);
     const listeners=observation.interactions.speak.filter(other=>(mind.lastSpoken?.[other.id]??-1)<(mind.lastEncounters![other.id]??0));
     if(listeners.length)hints.push(`You can greet or reply to ${listeners.map(other=>other.name).join(', ')} with say.`);
-    const system = ()=>[this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),journalHint].filter(Boolean).join('\n');
+    const system = ()=>[this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),!following&&mind.notes.length?'Notes are past records, oldest first; your current plan takes priority. Use journal with replace for outdated notes. Old locations and directions may no longer apply.':undefined,journalHint].filter(Boolean).join('\n');
     delete mind.carryingReminder;
     const held=observation.self.inventory?.selected===null||!observation.self.inventory?undefined:observation.self.inventory.stacks[observation.self.inventory.selected];
     let reminder=held&&(mind.carriedMoves??0)>=10?carryingReminder(held.kind,held.contents,observation.interactions.hit.length>0):undefined;
@@ -199,12 +228,13 @@ export class AgentRuntime {
     }
     if(reminder&&held?.kind==='wood')hints.splice(0,hints.length,...hints.filter(hint=>!hint.includes('shapeable')));
     const notes=()=>mind.notes.length?{notes:mind.notes}:{};
-    const recent=recentActions(this.store.actionEventsAt(observation.tick,id,4)),learned=relevantKnowledge(this.engine,observation);
-    const lastResult=observation.self.lastAction??mind.lastResult;
-    const heard=observation.heard.length?{heard:observation.heard}:{};
+    const recent=recentActions(this.store.actionEventsAt(observation.tick,id)),learned=relevantKnowledge(this.engine,observation);
+    const lastResult=(observation.self.lastAction??mind.lastResult) as ActionResult|undefined;
+    const heard=observation.heard.length?{heard:observation.heard.map(({tick,direction,distance,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND,directionWhenHeard:direction,distanceWhenHeard:distance}))}:{};
     const {attention,...view}=compactView(observation);
-    const normalContext=()=>rounded({...(attention?{attention}:{}),...(lastResult?{lastResult:{ok:(lastResult as any).ok,message:(lastResult as any).message}}:{}),...view,body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...notes(),...(learned.length?{learned}:{}),...(recent.length?{recent}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{})});
-    const initial=following?{following:observation.following,...heard}:normalContext();
+    const planContext={goal:mind.plan!.goal,steps:mind.plan!.steps.filter(step=>step.status==='pending').map(step=>step.task),explanation:mind.plan!.explanation};
+    const normalContext=()=>rounded({...(attention?{attention}:{}),...(lastResult?{lastResult:compactResult(lastResult)}:{}),plan:planContext,...notes(),...view,body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...(learned.length?{learned}:{}),...(recent.length?{recent}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{})});
+    const initial=following?{following:observation.following,plan:planContext,...heard}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
     let attempts=0,supporting=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
     const complete=async()=>{
@@ -232,6 +262,9 @@ export class AgentRuntime {
         else if(tool.name==='look'&&supporting++>=2)result={ok:false,message:'Use at most two look calls before acting. Journal remains freely available.'};
         else{try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{signal.throwIfAborted();result={ok:false,message:'Invalid tool arguments.'};}}
         cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
+        if(call.function.name==='journal'&&(result as {ok?:boolean})?.ok){
+          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
+        }
         if(call.function.name==='look'&&typeof (result as {viewAngle?:number})?.viewAngle==='number'){
           viewAngle=(result as {viewAngle:number}).viewAngle;
           tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
@@ -250,7 +283,7 @@ export class AgentRuntime {
           tools=worldTools(this.engine,id,mind,{following:false,viewAngle,speechMenu,...journalOptions});
         }
       }
-      if(physical.length===1)return{id,mind,observation,content,calls:physical,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(journalPromptUsed?{journalReminder:journalPromptUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
+      if(physical.length===1)return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(journalPromptUsed?{journalReminder:journalPromptUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
       if(physical.length>1){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action.'})});}
       if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(normalContext())});
       else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose follow or stop_follow.':'Choose one available action.'});
@@ -268,7 +301,9 @@ export class AgentRuntime {
       const { id, observation, content, calls } = decision;
       if (!this.engine.active(this.engine.entity(id))) continue;
       const previousMind=this.minds.get(id)!,mind = clone(decision.mind);
+      if(mind.plan)this.engine.entity(id).plan=clone(mind.plan);
       if (this.mode === 'llm') {
+        for(const plan of decision.planEvents??[])this.engine.event(id,'plan',`${plan.status==='active'?'Plan':plan.status==='completed'?'Goal completed':'Goal abandoned'}: ${plan.goal} ${plan.explanation}`,{plan});
         this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, attention:observation.following&&!decision.stopFollowing?null:compactView(observation).attention??null, reminder:decision.reminder??null, hints:decision.hints??[], journalReminder:decision.journalReminder??null, turn: mind.turns });
         for(const compaction of decision.journalCompactions??[])this.engine.event(id,'journal-compaction',`Condensed ${compaction.before.length} private notes into ${compaction.after.length} before saving a new note.`,compaction);
         this.engine.event(id, 'decision', content?.slice(0, 500) || `Requested ${calls.length} tool calls.`, {

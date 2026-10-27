@@ -36,11 +36,18 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   const target=object({target:vector},['target']);
   const availableOnly=options.availableOnly!==false;
   const choice=(values:(string|number)[],type:'string'|'integer'='string'):JsonSchemaNode=>({type,...(availableOnly?{enum:values}:{})});
-  const remember=async(note:string)=>{
+  const remember=async(note:string,replace?:number)=>{
     if(!note.trim()||note.length>300)return {ok:false,message:'Write 1..300 characters.'};
     const value=note.trim();
-    if(memory.notes.includes(value))return {ok:true,message:'Already remembered.'};
+    if(replace!==undefined&&(!Number.isInteger(replace)||replace<0||replace>=memory.notes.length))return {ok:false,message:'Choose an existing zero-based note index to replace.'};
     if([...(engine.discoveries.get(id)??[])].map(knowledgeDescription).includes(value))return {ok:true,message:'Already learned.'};
+    if(replace!==undefined){
+      if(memory.notes[replace]===value)return {ok:true,message:'Already remembered.'};
+      const retained=memory.notes.filter((_,index)=>index!==replace);
+      memory.notes=retained.includes(value)?retained:[...retained,value];options.onJournalEntry?.(value);
+      return {ok:true,message:'Replaced the old note. Updated notes are ordered oldest to newest.',notes:memory.notes};
+    }
+    if(memory.notes.includes(value))return {ok:true,message:'Already remembered.'};
     let retained=memory.notes;
     if(retained.length>=PRIVATE_NOTE_LIMIT){
       if(!options.compactJournal)return {ok:false,message:'Journal compaction is unavailable; all existing notes were retained.'};
@@ -104,7 +111,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   if(!availableOnly||targets!.follow.length)tools.push(tool('follow','Follow a visible creature within 20 metres; stop one metre away.',object({entityId:choice(targets?.follow.map(other=>other.id)??[])},['entityId']),true,({entityId}:{entityId:string})=>engine.act(id,{action:'follow',entityId,angle:options.viewAngle??0})));
   if(!availableOnly||targets!.speak.length)tools.push(tool('say','Open your available communication ideas. This takes no world time.',noArgs,false,()=>({ok:true,message:'Choose one idea to communicate, or use do_not_reply if you do not want to answer.',options:engine.module.manifest.vocabulary})));
   tools.push(action('wait','Wait and watch.',noArgs,'wait'));
-  tools.push(tool('journal',`Leave your future self a meaningful goal or unfinished task and where to resume. Add updates when progress, blockers, or goals change; mark goals completed or abandoned. Skip immediate steps, repetition, and learned facts. ${PRIVATE_NOTE_LIMIT} notes, automatically condensed when full; takes no world time.`,object({note:{type:'string',description:'1..300 characters. Example: Shelter goal: gathered wood by the shore; next return there to build.'}},['note']),false,({note}:{note:string})=>remember(note)));
+  tools.push(tool('journal',`Save a meaningful goal or unfinished task for your future self. Include progress and a location, not just 'here' or 'ahead'. Replace outdated plans, including completed or abandoned goals. Skip single moves and learned facts. ${PRIVATE_NOTE_LIMIT} notes; new entries compact when full; takes no world time.`,object({note:{type:'string',description:'1..300 characters. Example: Shelter at [4,5,8]: gathered wood; next build the walls.'},...(memory.notes.length?{replace:{type:'integer' as const,description:'Optional zero-based index in notes to replace; the updated note becomes newest.',enum:memory.notes.map((_,index)=>index)}}:{})},['note']),false,({note,replace}:{note:string;replace?:number})=>remember(note,replace)));
   if(targets?.hit.some(block=>block.cracks>0)){
     const index=tools.findIndex(tool=>tool.name==='hit');
     if(index>=0&&tools[index].physical)tools.unshift(...tools.splice(index,1));

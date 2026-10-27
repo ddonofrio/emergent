@@ -4,11 +4,20 @@ export interface Material { color: string; solid: boolean; floats: boolean; stac
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }
+export interface AgentPlan {
+  goal: string;
+  status: 'active' | 'completed' | 'abandoned';
+  steps: { task: string; status: 'pending' | 'completed' | 'abandoned'; evidence?: string }[];
+  explanation: string;
+  createdTurn: number;
+  reviewedTurn: number;
+}
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander'; position: Vec3; yaw: number;
   enabled?: boolean;
   height: number; hitbox?: { radius: number; height: number }; color: string; inventory: Inventory | null;
   status: string; speech?: { word: string; until: number };
+  plan?: AgentPlan;
   movementPrompt?: { messages:{speakerId:string;speakerName:string;word:string;tick:number;direction:string;distance:number}[] };
   followInvitation?: { speakerId:string; speakerName:string; tick:number; untilTick:number };
   following?: { entityId: string; blocked?: MovementIssue };
