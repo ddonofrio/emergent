@@ -44,6 +44,17 @@ function respondTool(request:Request,name:string,argumentsValue:unknown){
   request.response.setHeader('Content-Type','application/json');
   request.response.end(JSON.stringify({choices:[{message:{content:null,tool_calls:[{id:'call-'+request.id,type:'function',function:{name,arguments:JSON.stringify(argumentsValue)}}]}}],usage:{total_tokens:42}}));
 }
+async function respondWithCommunicationMenu(p:Awaited<ReturnType<typeof provider>>,request:Request,action:Action){
+  if(action.action!=='say'){respond(request,action);return;}
+  const closed=request.body.tools.find((tool:any)=>tool.function.name==='say');
+  assert.deepEqual(closed.function.parameters.properties,{});
+  const before=p.requests.length;respondTool(request,'say',{});await until(()=>p.requests.length===before+1);
+  const choice=p.requests[before];assert.equal(choice.id,request.id);
+  assert.deepEqual(choice.body.tools.map((tool:any)=>tool.function.name),['say','do_not_reply']);
+  const opened=choice.body.tools.find((tool:any)=>tool.function.name==='say');
+  assert.ok(opened.function.parameters.properties.word.enum.includes(action.word));
+  respond(choice,action);
+}
 async function until(predicate:()=>boolean) {
   const deadline=Date.now()+3000;
   while(!predicate() && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,5));
@@ -58,6 +69,40 @@ function run(engine: Engine, store: Store, url: string, maxTurns: number | null 
   },()=>wall);
   return {runtime,clock,frames,failures,advance(ms:number){wall+=ms;clock.pump();}};
 }
+
+test('speech wakes a moving agent with only continue or stop while world time remains frozen',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('duck',false);engine.entity('t1').yaw=90;engine.entity('t2').yaw=0;
+    r.clock.pump();await until(()=>p.requests.length===2);
+    const moss=p.requests.find(request=>request.id==='t1')!,flint=p.requests.find(request=>request.id==='t2')!;
+    respond(flint,{action:'walk',distance:8});
+    await respondWithCommunicationMenu(p,moss,{action:'say',word:'I like you'});
+    await until(()=>r.clock.status().phase==='advancing');
+
+    r.advance(50);await until(()=>p.requests.length===4);
+    const interruption=p.requests[3];
+    assert.equal(interruption.id,'t2');
+    assert.deepEqual(interruption.body.tools.map((tool:any)=>tool.function.name),['continue_moving','stop_moving']);
+    const prompt=JSON.parse(interruption.body.messages.at(-1).content);
+    assert.equal(prompt.urgentSpeech[0].message,'I like you');
+    assert.equal(typeof prompt.urgentSpeech[0].direction,'string');
+    assert.equal(typeof prompt.urgentSpeech[0].distanceMetres,'number');
+    const tick=engine.tick,position=[...engine.entity('t2').position];
+    assert.ok(engine.entity('t2').motion,'The current walk remains active while the model decides.');
+    r.advance(5000);
+    assert.equal(engine.tick,tick);assert.deepEqual(engine.entity('t2').position,position);
+
+    respondTool(interruption,'stop_moving',{});
+    await until(()=>r.clock.status().phase==='advancing');
+    assert.equal(engine.entity('t2').motion,undefined);
+    assert.equal(p.requests.length,4,'Stopping does not grant an immediate replacement action.');
+    r.advance(950);assert.equal(engine.tick,20);assert.equal(r.clock.status().phase,'idle');
+    assert.equal(p.requests.length,4);
+    r.clock.pump();await until(()=>p.requests.length===6);
+    assert.ok(p.requests.slice(4).some(request=>request.id==='t2'),'The agent acts again on the next shared turn.');
+  }finally{r.clock.close();store.close();p.close();}
+});
 
 test('looking sideways makes follow available for the newly seen entity without spending a turn',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
@@ -153,7 +198,8 @@ test('one wood hint follows stored and held wood until a shape is discovered',as
       else assert.doesNotMatch(hints,/shapeable/);
       if(index===1){assert.match(hints,/hold with stack=0/);assert.equal(p.requests[index].body.tools.some((tool:any)=>tool.function.name==='strike_held'),false);}
       assert.doesNotMatch(prompt.perception,/strike_held/);
-      assert.doesNotMatch(hints,/journal/);
+      if(index===3){assert.match(hints,/journal/);assert.match(hints,/Wood may have other useful forms besides the bucket/);assert.match(hints,/more raw wood.*first goal/);}
+      else assert.doesNotMatch(hints,/journal/);
       respond(p.requests[index],action);await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     }
     assert.deepEqual(r.runtime.minds.get('t1')!.notes,[],'No note or goal is invented automatically.');
@@ -168,19 +214,20 @@ test('social hints repeat until heard speech, survive restart and return only fo
   const turn=async(actions:Record<string,Action>,expected:Record<string,boolean>)=>{
     const start=p.requests.length,pending=runtime.prepareTurn(new AbortController().signal,()=>{});
     await until(()=>p.requests.length===start+2);
-    for(const request of p.requests.slice(start)){
+    const initial=p.requests.slice(start,start+2);
+    for(const request of initial){
       const prompt=JSON.parse(request.body.messages.at(-1).content);
       assert.equal((prompt.hints??[]).some((hint:string)=>hint.includes('greet or reply')),expected[request.id],request.id);
-      respond(request,actions[request.id]);
+      await respondWithCommunicationMenu(p,request,actions[request.id]);
     }
     const prepared=await pending;engine.step(()=>runtime.commit(prepared));for(let tick=1;tick<20;tick++)engine.step();
     store.record(engine.frame(),engine.state(),runtime.persistence());
   };
   try{
     await turn({t1:{action:'wait'},t2:{action:'wait'}},{t1:true,t2:true});
-    await turn({t1:{action:'say',word:'hey'},t2:{action:'wait'}},{t1:true,t2:true});
+    await turn({t1:{action:'say',word:'I like you'},t2:{action:'wait'}},{t1:true,t2:true});
     runtime=new AgentRuntime(engine,store,runtime.config);
-    await turn({t1:{action:'wait'},t2:{action:'say',word:'yes'}},{t1:false,t2:true});
+    await turn({t1:{action:'wait'},t2:{action:'say',word:'I enjoy your company'}},{t1:false,t2:true});
     await turn({t1:{action:'wait'},t2:{action:'wait'}},{t1:false,t2:false});
     engine.setEntityEnabled('t2',false);engine.step();engine.setEntityEnabled('t2',true);engine.step();
     await turn({t1:{action:'wait'},t2:{action:'wait'}},{t1:true,t2:true});
@@ -193,16 +240,34 @@ test('unheard speech does not dismiss a social hint',async()=>{
   engine.setEntityEnabled('duck',false);
   engine.entity('t1').yaw=90;engine.entity('t2').yaw=270;
   try{
-    r.clock.pump();await until(()=>p.requests.length===2);
-    const t1=p.requests.find(request=>request.id==='t1')!;
+    const start=p.requests.length;r.clock.pump();await until(()=>p.requests.length===start+2);
+    const initial=p.requests.slice(start,start+2),t1=initial.find(request=>request.id==='t1')!;
     assert.ok(JSON.parse(t1.body.messages.at(-1).content).hints.some((hint:string)=>hint.includes('greet or reply')));
-    engine.entity('t2').position=[30,1,.5];for(const request of p.requests)respond(request,request.id==='t1'?{action:'say',word:'hey'}:{action:'wait'});
+    engine.entity('t2').position=[30,1,.5];for(const request of initial)await respondWithCommunicationMenu(p,request,request.id==='t1'?{action:'say',word:'Come here'}:{action:'wait'});
     await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.match(engine.entity('t1').lastAction!.message,/nobody/);assert.deepEqual(r.runtime.minds.get('t1')!.lastSpoken,{});
-    engine.entity('t2').position=[1.5,1,.5];r.clock.pump();await until(()=>p.requests.length===4);
-    const next=p.requests.slice(2).find(request=>request.id==='t1')!;
+    engine.entity('t2').position=[1.5,1,.5];const nextStart=p.requests.length;r.clock.pump();await until(()=>p.requests.length===nextStart+2);
+    const nextRequests=p.requests.slice(nextStart,nextStart+2),next=nextRequests.find(request=>request.id==='t1')!;
     assert.ok(JSON.parse(next.body.messages.at(-1).content).hints.some((hint:string)=>hint.includes('greet or reply')));
-    for(const request of p.requests.slice(2))respond(request,{action:'wait'});
+    for(const request of nextRequests)respond(request,{action:'wait'});
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('opening communication forces a phrase or an explicit free cancellation',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);const duck=engine.entity('duck');delete duck.motion;duck.position=[-.5,1,4.5];
+    r.clock.pump();await until(()=>p.requests.length===1);
+    assert.ok(p.requests[0].body.tools.some((tool:any)=>tool.function.name==='say'));
+    respondTool(p.requests[0],'say',{});await until(()=>p.requests.length===2);
+    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['say','do_not_reply']);
+    assert.equal(engine.tick,0);
+    respondTool(p.requests[1],'do_not_reply',{});await until(()=>p.requests.length===3);
+    assert.ok(p.requests[2].body.tools.some((tool:any)=>tool.function.name==='walk'));
+    assert.ok(p.requests[2].body.tools.some((tool:any)=>tool.function.name==='say'));
+    assert.equal(engine.tick,0);
+    respond(p.requests[2],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.time,1);
   }finally{r.clock.close();store.close();p.close();}
 });
 

@@ -11,7 +11,7 @@ import { compactView, inventoryContext, recentActions, relevantKnowledge, rounde
 import { compactJournal } from './journal-compaction';
 import { journalReminder } from './journal';
 
-interface Message { role: 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
+interface Message { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
 interface Mind extends Memory {
   turns: number; modelTurns: number; lastResult?: unknown;
   carriedMoves?: number; carryingReminder?: string; emptyHandMoves?: number;
@@ -38,6 +38,10 @@ export interface PreparedDecision {
   usage?: unknown;
 }
 export interface PreparedTurn { tick: number; decisions: PreparedDecision[]; }
+export interface PreparedMovementPrompt {
+  id:string; tick:number; choice:'continue_moving'|'stop_moving'; mind:Mind;
+  content:string|null; latencyMs:number; attempts:number; provider:string; model:string; usage?:unknown;
+}
 type Report = (id: string, status: DecisionStatus) => void;
 
 export class AgentRuntime {
@@ -65,6 +69,46 @@ export class AgentRuntime {
   }
   persistence(): [string, unknown][] { return [...this.minds]; }
   setParallelRequests(enabled:boolean) { this.store.saveParallelRequests(enabled);this.parallelRequests=enabled; }
+  async prepareMovementPrompts(signal:AbortSignal,report:Report):Promise<PreparedMovementPrompt[]> {
+    const tick=this.engine.tick,inputs=this.engine.movementPrompts().map(entity=>({id:entity.id,mind:clone(this.minds.get(entity.id)!),prompt:clone(entity.movementPrompt!),motion:clone(entity.motion!)}));
+    const prepare=async(input:typeof inputs[number])=>{
+      if(this.mode==='demo'||(this.config.maxTurns!==null&&input.mind.modelTurns>=this.config.maxTurns))return {id:input.id,tick,choice:'continue_moving' as const,mind:input.mind,content:null,latencyMs:0,attempts:0,provider:'demo',model:'demo'};
+      const urgentSpeech=input.prompt.messages.map(message=>({speaker:message.speakerName,message:message.word,direction:message.direction,distanceMetres:message.distance}));
+      const started=Date.now(),messages:Message[]=[
+        {role:'system',content:`You are ${this.engine.entity(input.id).name}, a Troglodyte moving through a physical world. Choose exactly one available tool.`},
+        {role:'user',content:JSON.stringify({urgentSpeech,currentMovement:{kind:input.motion.kind??'walk',remainingMetres:rounded(distance(this.engine.entity(input.id).position,input.motion.destination))},instruction:'You heard this while moving. Choose only whether to continue the current movement or stop. Stopping does not grant another action until the next shared turn.'})},
+      ];
+      const tools=[
+        {type:'function' as const,function:{name:'continue_moving',description:'Keep the current movement unchanged.',parameters:{type:'object',properties:{},required:[],additionalProperties:false}}},
+        {type:'function' as const,function:{name:'stop_moving',description:'Stop the current movement now. Choose a new action on the next shared turn.',parameters:{type:'object',properties:{},required:[],additionalProperties:false}}},
+      ];
+      let attempts=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
+      while(true){
+        signal.throwIfAborted();attempts++;report(input.id,{state:attempts===1?'thinking':'waiting',attempts,message:'Considering speech heard during movement; world time is held.'});
+        try{
+          const answer=await this.inference.complete({messages,tools,max_tokens:300},signal,(candidate,index)=>report(input.id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));
+          input.mind.modelTurns++;provider=answer.provider;model=answer.model;usage=answer.usage;content=answer.content;
+          const calls=answer.calls.filter(call=>call.function.name==='continue_moving'||call.function.name==='stop_moving');
+          if(calls.length===1){
+            try{const args=JSON.parse(calls[0].function.arguments);if(args&&typeof args==='object'&&!Array.isArray(args)&&Object.keys(args).length===0)return {id:input.id,tick,choice:calls[0].function.name as 'continue_moving'|'stop_moving',mind:input.mind,content,latencyMs:Date.now()-started,attempts,provider,model,...(usage===undefined?{}:{usage})};}catch{}
+          }
+          messages.push({role:'assistant',content:answer.content,...(answer.calls.length?{tool_calls:answer.calls}:{})},{role:'user',content:'Choose exactly one: continue_moving or stop_moving, with no arguments.'});
+        }catch(error){signal.throwIfAborted();report(input.id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});}
+      }
+    };
+    const decisions:PreparedMovementPrompt[]=[];
+    if(this.parallelRequests)decisions.push(...await Promise.all(inputs.map(prepare)));
+    else for(const input of inputs)decisions.push(await prepare(input));
+    return decisions;
+  }
+  commitMovementPrompts(decisions:PreparedMovementPrompt[]) {
+    for(const decision of decisions){
+      const entity=this.engine.entity(decision.id);
+      if(!entity.movementPrompt||decision.tick!==this.engine.tick)continue;
+      if(this.mode==='llm')this.engine.event(decision.id,'movement-decision',decision.content?.slice(0,500)||`Chose ${decision.choice}.`,{choice:decision.choice,provider:decision.provider,model:decision.model,latencyMs:decision.latencyMs,attempts:decision.attempts,usage:decision.usage??null});
+      const result=this.engine.resolveMovementPrompt(decision.id,decision.choice);decision.mind.lastResult=result;this.minds.set(decision.id,decision.mind);
+    }
+  }
   async prepareTurn(signal: AbortSignal, report: Report): Promise<PreparedTurn> {
     signal.throwIfAborted();
     const tick = this.engine.tick;
@@ -110,7 +154,7 @@ export class AgentRuntime {
     return{id,mind,observation,content:null,calls:[call],latencyMs:0,attempts:0,provider:'demo',model:'demo'};
   }
   private async request(id: string, mind: Mind, observation: Observation, signal: AbortSignal, report: Report): Promise<PreparedDecision> {
-    let following=!!observation.self.following,stopFollowing=false,viewAngle=0;
+    let following=!!observation.self.following,stopFollowing=false,viewAngle=0,speechMenu=false;
     const started = Date.now();
     const journalCompactions:NonNullable<PreparedDecision['journalCompactions']>=[];
     const journalEntries:string[]=[];
@@ -125,9 +169,18 @@ export class AgentRuntime {
       },
       onJournalEntry:(note:string)=>{journalEntries.push(note);mind.lastJournalEntryTurn=mind.turns;mind.nextJournalPromptTurn=mind.turns+50;journalHint=undefined;},
     };
-    let tools = worldTools(this.engine, id, mind,{following,...journalOptions});
+    let tools = worldTools(this.engine, id, mind,{following,speechMenu,...journalOptions});
     const discoveries=[...(this.engine.discoveries.get(id)??[])];
     const hints=this.engine.module.agentHints?.(observation,new Set(discoveries))??[];
+    const knownDiscoveries=new Set(mind.knownDiscoveries??discoveries);
+    const firstWoodShape=knownDiscoveries.size!==discoveries.length&&!([...knownDiscoveries].some(fact=>fact.startsWith('wood-shape:')))
+      ?discoveries.find(fact=>fact.startsWith('wood-shape:')&&!knownDiscoveries.has(fact))
+      :undefined;
+    if(!following&&firstWoodShape){
+      const product=woodProductName(firstWoodShape.slice('wood-shape:'.length));
+      const made=product==='planks'?product:`${/^[aeiou]/.test(product)?'an':'a'} ${product}`;
+      hints.push(`You shaped wood into ${made} for the first time. Wood may have other useful forms besides ${product==='planks'?product:`the ${product}`}. You need more raw wood to test them; gathering it and investigating what wood can become could be your first goal. Consider using journal to preserve that goal and this discovery.`);
+    }
     if(!following)mind.knownDiscoveries=discoveries;
     mind.lastEncounters??={};
     for(const notice of observation.encounters)mind.lastEncounters[notice.otherId]=Math.max(mind.lastEncounters[notice.otherId]??0,notice.tick);
@@ -181,12 +234,20 @@ export class AgentRuntime {
         cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
         if(call.function.name==='look'&&typeof (result as {viewAngle?:number})?.viewAngle==='number'){
           viewAngle=(result as {viewAngle:number}).viewAngle;
-          tools=worldTools(this.engine,id,mind,{following,viewAngle,...journalOptions});
+          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
+        }
+        if(call.function.name==='say'&&!tool?.physical&&(result as {ok?:boolean})?.ok){
+          speechMenu=true;
+          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
+        }
+        if(call.function.name==='do_not_reply'&&(result as {ok?:boolean})?.ok){
+          speechMenu=false;
+          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
         }
         if(call.function.name==='stop_follow'&&(result as {ok?:boolean})?.ok){
           following=false;stopFollowing=true;journalHint=journalReminder(mind);journalPromptUsed??=journalHint;
           mind.knownDiscoveries=discoveries;
-          tools=worldTools(this.engine,id,mind,{following:false,viewAngle,...journalOptions});
+          tools=worldTools(this.engine,id,mind,{following:false,viewAngle,speechMenu,...journalOptions});
         }
       }
       if(physical.length===1)return{id,mind,observation,content,calls:physical,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(journalPromptUsed?{journalReminder:journalPromptUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
@@ -216,10 +277,11 @@ export class AgentRuntime {
       }
       if(decision.stopFollowing)this.engine.act(id,{action:'stop_follow'});
       const tools=worldTools(this.engine,id,mind,{viewAngle:decision.viewAngle,availableOnly:false});
+      const speechTools=worldTools(this.engine,id,mind,{viewAngle:decision.viewAngle,availableOnly:false,speechMenu:true});
       for (const call of calls) {
         let result: unknown;
         try {
-          const tool = tools.find(t => t.name === call.function.name && t.physical);
+          const tool = (call.function.name==='say'?speechTools:tools).find(t => t.name === call.function.name && t.physical);
           const args=JSON.parse(call.function.arguments);
           // Ready decisions from older recordings may still contain physical impact coordinates.
           result=call.function.name==='strike_held'&&args.impact&&!args.point
@@ -250,6 +312,7 @@ export class AgentRuntime {
       }
       this.minds.set(id, mind);
     }
+    this.engine.wakeMovingListenersFromSpeech();
   }
 }
 
@@ -258,6 +321,14 @@ function carryingReminder(kind:string,contents?:string,canDig=false) {
   if(kind==='shovel')return canDig?'Your shovel can remove the reachable soil with dig.':'You are holding a shovel. Look for reachable soil to dig.';
   if(kind==='bucket')return contents?`Your bucket holds ${contents}; you can empty it.`:'Your empty bucket can carry material when fill is available.';
   return `You are still holding ${kind}; you could place or throw it.`;
+}
+
+function woodProductName(kind:string) {
+  if(kind==='plank')return 'planks';
+  if(kind==='door_half_up')return 'upper door half';
+  if(kind==='door_half_down')return 'lower door half';
+  if(kind==='door')return 'rustic door';
+  return kind.replaceAll('_',' ');
 }
 
 // Deliberately deterministic and labelled in the UI. This is a mechanical demo,
@@ -271,7 +342,7 @@ function demoAction(o: Observation, turn: number, id: string): Action {
   if (held) return phase % 2 ? { action: 'throw', force: 7 } : { action: 'place', target: [Math.floor(o.self.position[0] + Math.sin(o.self.yaw * Math.PI / 180) * 2), Math.floor(o.self.position[1]), Math.floor(o.self.position[2] + Math.cos(o.self.yaw * Math.PI / 180) * 2)] };
   const wood = nearby.find(b => b[3] === 'wood');
   if (wood) return { action: 'hit', target: wood.slice(0,3) as [number,number,number] };
-  if (phase === 0 || phase === 8) return { action: 'say', word: phase ? 'look' : 'hey' };
+  if (phase === 0 || phase === 8) return { action: 'say', word: phase ? 'Look at this' : "Let's explore together" };
   if (phase === 2 && o.items.length) return { action: 'pickup', itemId: o.items[0].id };
   if (phase === 6 && nearby.length) { const block = nearby.find(b => b[3] !== 'grass') ?? nearby[0]; return { action: 'hit', target: block.slice(0,3) as [number,number,number] }; }
   if (phase % 3 === 0) return { action: 'turn', angle: id === 't1' ? 57 : -73 };

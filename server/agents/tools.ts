@@ -17,7 +17,7 @@ export interface WorldTool {
   execute(args: unknown, exec?: { signal?: AbortSignal }): Promise<unknown>;
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
 }
-export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void} = {}): WorldTool[] {
+export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;speechMenu?:boolean;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void} = {}): WorldTool[] {
   const tool = (name: string, description: string, parameters: JsonSchemaNode, physical: boolean, run: (args: any) => unknown): WorldTool => {
     assertSupportedJsonSchema(parameters);
     return { name, description, parameters, physical, output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
@@ -58,6 +58,10 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   ];
   const view=availableOnly?engine.observeAt(id,options.viewAngle??0):undefined;
   const targets=view?.interactions;
+  if(options.speechMenu)return [
+    action('say','Communicate one selected idea to everyone within clear hearing range (10 metres).',object({word:{type:'string',enum:engine.module.manifest.vocabulary}},['word']),'say'),
+    tool('do_not_reply','Choose not to reply. Close the communication menu without speaking or spending world time.',noArgs,false,()=>({ok:true,message:'You chose not to reply. Choose another action.'})),
+  ];
   const movement=(maximum:number)=>object({distance:{type:'number',description:`Metres: greater than 0, at most ${maximum}.`},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right.'}},['distance']);
   const tools:WorldTool[]=[
     tool('look','Look without turning your body or spending time.',object({angle:{type:'number',description:'Body-relative viewing angle (-180..180 degrees).'}}),false,({angle=0}:{angle?:number})=>compactView(engine.observeAt(id,Math.max(-180,Math.min(180,angle))))),
@@ -98,7 +102,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   const stacks=entity.inventory?.stacks.flatMap((_,index)=>index!==entity.inventory!.selected?[index]:[])??[];
   if(stacks.length||(!availableOnly&&entity.inventory?.stacks.length))tools.push(action('hold','Take an inventory stack into your hands.',object({stack:choice(stacks,'integer')},['stack']),'hold'));
   if(!availableOnly||targets!.follow.length)tools.push(tool('follow','Follow a visible creature within 20 metres; stop one metre away.',object({entityId:choice(targets?.follow.map(other=>other.id)??[])},['entityId']),true,({entityId}:{entityId:string})=>engine.act(id,{action:'follow',entityId,angle:options.viewAngle??0})));
-  if(!availableOnly||targets!.speak.length)tools.push(action('say','Speak one word to everyone within clear hearing range (10 metres).',object({word:{type:'string',enum:engine.module.manifest.vocabulary}},['word']),'say'));
+  if(!availableOnly||targets!.speak.length)tools.push(tool('say','Open your available communication ideas. This takes no world time.',noArgs,false,()=>({ok:true,message:'Choose one idea to communicate, or use do_not_reply if you do not want to answer.',options:engine.module.manifest.vocabulary})));
   tools.push(action('wait','Wait and watch.',noArgs,'wait'));
   tools.push(tool('journal',`Leave your future self a meaningful goal or unfinished task and where to resume. Add updates when progress, blockers, or goals change; mark goals completed or abandoned. Skip immediate steps, repetition, and learned facts. ${PRIVATE_NOTE_LIMIT} notes, automatically condensed when full; takes no world time.`,object({note:{type:'string',description:'1..300 characters. Example: Shelter goal: gathered wood by the shore; next return there to build.'}},['note']),false,({note}:{note:string})=>remember(note)));
   if(targets?.hit.some(block=>block.cracks>0)){

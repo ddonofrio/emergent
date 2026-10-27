@@ -51,7 +51,7 @@ export class Engine {
   setEntityEnabled(id: string, enabled: boolean) {
     const entity = this.entity(id);
     if (this.active(entity) === enabled) return false;
-    entity.enabled = enabled; delete entity.motion; delete entity.speech; delete entity.following;
+    entity.enabled = enabled; delete entity.motion; delete entity.speech; delete entity.following; delete entity.movementPrompt; delete entity.followInvitation;
     if(!enabled)for(const follower of this.entities)if(follower.following?.entityId===id)this.endFollowing(follower,`${entity.name} is no longer available to follow.`);
     if(!enabled){this.contacts.delete(id);this.encounterNotices.delete(id);for(const contacts of this.contacts.values())contacts.delete(id);for(const [actor,notices] of this.encounterNotices)this.encounterNotices.set(actor,notices.filter(notice=>notice.otherId!==id));}
     entity.status = enabled ? 'idle' : 'disabled';
@@ -135,6 +135,9 @@ export class Engine {
     const items = clone(this.bodies.filter(b => this.visible(e, b.position)).sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)));
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
     const held=this.held(e),emptyHands=!held,hasShovel=held?.kind==='shovel';
+    const followCandidates=[...entities];
+    const invited=e.followInvitation&&e.followInvitation.untilTick>=this.tick?this.entities.find(other=>other.id===e.followInvitation!.speakerId&&this.active(other)):undefined;
+    if(invited&&!followCandidates.some(other=>other.id===invited.id))followCandidates.push({id:invited.id,name:invited.name,kind:invited.kind,position:clone(invited.position)});
     const interactions = {
       hit: emptyHands||hasShovel ? blocks.filter(block=>{
         const target=block.slice(0,3) as Vec3;
@@ -144,7 +147,7 @@ export class Engine {
       pickup: emptyHands ? items.filter(item=>distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
         .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).slice(0,3).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
       speak: entities.filter(other=>this.canSpeakTo(e,this.entity(other.id))).map(({id,name})=>({id,name})),
-      follow: entities.filter(other=>this.canFollow(e,this.entity(other.id))).map(({id,name,position})=>({id,name,metres:Math.round(distance(e.position,position)*10)/10})),
+      follow: followCandidates.filter(other=>this.canFollow(e,this.entity(other.id))).map(({id,name,position})=>({id,name,metres:Math.round(distance(e.position,position)*10)/10})),
       ...this.containerTargets(e),
     };
     const followed=e.following&&this.entities.find(other=>other.id===e.following!.entityId);
@@ -165,7 +168,10 @@ export class Engine {
     if(seen.size)this.encounterNotices.set(id,(this.encounterNotices.get(id)??[]).filter(notice=>!seen.has(notice.eventId)));
   }
   private canSpeakTo(speaker:Entity,listener:Entity){return speaker.id!==listener.id&&this.active(speaker)&&this.active(listener)&&distance(this.eye(speaker),this.eye(listener))<=10&&this.voxels.clearLine(this.eye(speaker),this.eye(listener));}
-  canFollow(follower:Entity,target:Entity,viewAngle=0){return follower.id!==target.id&&this.active(follower)&&this.active(target)&&!this.followersOf(follower).length&&distance(follower.position,target.position)<=20&&this.visible({...follower,yaw:follower.yaw+viewAngle},this.eye(target),false,20);}
+  canFollow(follower:Entity,target:Entity,viewAngle=0){
+    const invited=follower.followInvitation?.speakerId===target.id&&follower.followInvitation.untilTick>=this.tick&&this.voxels.clearLine(this.eye(follower),this.eye(target));
+    return follower.id!==target.id&&this.active(follower)&&this.active(target)&&!this.followersOf(follower).length&&distance(follower.position,target.position)<=20&&(invited||this.visible({...follower,yaw:follower.yaw+viewAngle},this.eye(target),false,20));
+  }
   private speak(speaker:Entity,word:string,respond=true):Entity[]{
     const recipients=this.entities.filter(other=>this.canSpeakTo(speaker,other));
     speaker.speech={word,until:this.time+4};
@@ -173,10 +179,42 @@ export class Engine {
       const inbox=this.inbox.get(listener.id)??[];
       inbox.push({from:speaker.name,speakerId:speaker.id,word,tick:this.tick,direction:this.direction(listener,speaker.position),distance:Math.round(distance(this.eye(listener),this.eye(speaker))*10)/10});
       this.inbox.set(listener.id,inbox.slice(-16));
+      if(word==='Follow me'&&listener.controller==='agent')listener.followInvitation={speakerId:speaker.id,speakerName:speaker.name,tick:this.tick,untilTick:this.tick+1200};
     }
     this.event(speaker.id,'speech',`${speaker.name} says "${word}".`,{word,recipientIds:recipients.map(other=>other.id)});
     if(respond)for(const listener of recipients){const reply=this.module.respondToSpeech?.(listener,speaker,word);if(reply)this.speak(listener,reply,false);}
     return recipients;
+  }
+  wakeMovingListenersFromSpeech(){
+    for(const speech of this.recentEvents.filter(event=>event.tick===this.tick&&event.type==='speech')){
+      const data=speech.data as {word:string;recipientIds:string[]};
+      for(const id of data.recipientIds){
+        const listener=this.entities.find(entity=>entity.id===id),motion=listener?.motion;
+        if(!listener||listener.controller!=='agent'||!this.active(listener)||listener.following||!motion||!['walk','run'].includes(motion.kind??'walk'))continue;
+        const speaker=this.entity(speech.actor);
+        const messages=listener.movementPrompt?.messages??[];
+        if(messages.some(message=>message.tick===speech.tick&&message.speakerId===speech.actor&&message.word===data.word))continue;
+        messages.push({speakerId:speaker.id,speakerName:speaker.name,word:data.word,tick:speech.tick,direction:this.direction(listener,speaker.position),distance:Math.round(distance(this.eye(listener),this.eye(speaker))*10)/10});listener.movementPrompt={messages};
+        this.event(listener.id,'movement-prompt',`${speaker.name} said "${data.word}" while you were moving. Decide whether to continue or stop.`,{speakerId:speaker.id,word:data.word});
+      }
+    }
+  }
+  movementPrompts(){
+    for(const entity of this.entities)if(entity.movementPrompt&&(!entity.motion||entity.following||!['walk','run'].includes(entity.motion.kind??'walk')))delete entity.movementPrompt;
+    return this.entities.filter(entity=>this.active(entity)&&!!entity.movementPrompt&&!!entity.motion&&!entity.following);
+  }
+  resolveMovementPrompt(id:string,choice:'continue_moving'|'stop_moving'){
+    const entity=this.entity(id),prompt=entity.movementPrompt;
+    if(!prompt)return fail('There is no movement decision to resolve.');
+    delete entity.movementPrompt;
+    const speech=prompt.messages.map(message=>`${message.speakerName} saying "${message.word}"`).join(' and ');
+    if(choice==='stop_moving'){
+      delete entity.motion;entity.status='idle';
+      entity.lastAction=ok(`You stop moving after hearing ${speech}. Choose your next action on the next turn.`);
+      this.event(id,'movement-response',entity.lastAction.message,{choice,messages:prompt.messages});return entity.lastAction;
+    }
+    const result=ok(`You continue your current movement after hearing ${speech}.`);
+    this.event(id,'movement-response',result.message,{choice,messages:prompt.messages});return result;
   }
   private updateEncounters(){
     for(const observer of this.entities.filter(entity=>entity.controller==='agent'&&this.active(entity))){
@@ -369,7 +407,7 @@ export class Engine {
       if(!target||!this.canFollow(e,target,a.angle??0))return fail('Follow requires another visible living entity within 20 metres, with a clear line of sight.');
       if(e.motion&&!e.following)return fail('Wait until your movement finishes before following.');
       if(target.following)this.endFollowing(target,`${e.name} started following you. You stop following and continue with your own actions.`);
-      e.following={entityId:target.id};delete e.motion;e.status='following';e.yaw=((Math.atan2(target.position[0]-e.position[0],target.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
+      e.following={entityId:target.id};delete e.motion;delete e.followInvitation;e.status='following';e.yaw=((Math.atan2(target.position[0]-e.position[0],target.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
       return ok(`You follow ${target.name}, stopping one metre away. Each turn choose follow to continue or stop_follow to stop and take another action immediately.`);
     }
     if(e.following)return fail('While following, choose follow or stop_follow. Stopping lets you act immediately.');
@@ -420,7 +458,7 @@ export class Engine {
       return {ok:true,message:`You jump ${jumpDistance.toFixed(1)} metres toward a safe landing.`,feedback:{outcome:'started',from:clone(e.position),destination:clone(landing)}};
     }
     if (a.action === 'say') {
-      if (!this.module.manifest.vocabulary.includes(a.word!)) return fail('That word is not in your vocabulary.');
+      if (!this.module.manifest.vocabulary.includes(a.word!)) return fail('That idea is not in your communication vocabulary.');
       const recipients = this.speak(e,a.word!);
       return {ok:true,message:`Said "${a.word}". Heard by ${recipients.map(r => r.name).join(', ') || 'nobody'}.`,feedback:{recipientIds:recipients.map(recipient=>recipient.id)}};
     }

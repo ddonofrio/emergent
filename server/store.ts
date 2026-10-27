@@ -108,6 +108,8 @@ function compatibleManifest(recorded: string, current: ModuleManifest) {
     previous.daySeconds=current.daySeconds;
     // Agent wording does not change recorded geometry or replay compatibility.
     previous.agentInstructions=current.agentInstructions;
+    // Communication choices affect future decisions, not recorded state or replay.
+    previous.vocabulary=current.vocabulary;
     // Inventory capacity changes affect future actions, not recorded terrain or replay.
     for(const [kind,material] of Object.entries(previous.materials))if(current.materials[kind])material.stackLimit=current.materials[kind].stackLimit;
     // New products may extend the catalog; existing material behavior must match.

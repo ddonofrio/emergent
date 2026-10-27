@@ -144,14 +144,15 @@ export class WorldView {
     this.box(arm,[.16,.46,.20],[0,-.23,0],skinColor);
     this.box(arm,[.075,.05,.10],[0,-.465,0],skinColor);
     // Resting palms face the thighs: thickness along X, fingers spread along Z.
-    this.box(arm,[.065,.12,.148],[0,-.54,0],skinColor);
-    const fingerLengths=[.078,.09,.084,.062],palmBottom=-.60;
+    const hand=new THREE.Group();hand.position.y=-.49;hand.scale.setScalar(1.5);
+    this.box(hand,[.065,.12,.148],[0,-.05,0],skinColor);
+    const fingerLengths=[.078,.09,.084,.062],palmBottom=-.11;
     for(let finger=0;finger<fingerLengths.length;finger++){
       const length=fingerLengths[finger];
-      this.box(arm,[.055,length,.032],[0,palmBottom-length/2+.002,.054-finger*.036],skinColor);
+      this.box(hand,[.055,length,.032],[0,palmBottom-length/2+.002,.054-finger*.036],skinColor);
     }
-    const thumb=new THREE.Group();thumb.position.set(-side*.014,-.515,.067);thumb.rotation.x=-.18;
-    this.box(thumb,[.045,.072,.045],[0,-.03,0],skinColor);arm.add(thumb);
+    const thumb=new THREE.Group();thumb.position.set(-side*.014,-.025,.067);thumb.rotation.x=-.18;
+    this.box(thumb,[.045,.072,.045],[0,-.03,0],skinColor);hand.add(thumb);arm.add(hand);
     group.add(arm);return arm;
   }
   private styleEntity(group: THREE.Group, enabled: boolean) {
@@ -166,7 +167,7 @@ export class WorldView {
   }
   private heldVisual(kind: string, color: string, inHand=true) {
     const visual=new THREE.Group();visual.userData.kind=kind;
-    if(inHand){if(kind==='spear')visual.position.set(0,-.54,.4);else visual.position.set(.36,1,.38);}
+    if(inHand){if(kind==='spear')visual.position.set(0,-.565,.4);else visual.position.set(.36,1,.38);}
     const material=(value:string)=>{const result=new THREE.MeshStandardMaterial({color:value,roughness:.86});result.userData.activeColor=value;return result;};
     if(kind==='arrow'||kind==='spear'){
       const length=kind==='spear' ? .85 : .9,radius=kind==='spear' ? .045 : .025;
@@ -199,8 +200,15 @@ export class WorldView {
       if (this.creatures.has(entity.id)) continue;
       const group = new THREE.Group(); group.userData.entity = entity.id;
       if (entity.kind === 'duck') {
-        this.box(group,[.55,.4,.8],[0,.3,0],'#eee5c5'); this.box(group,[.35,.4,.35],[0,.55,.35],'#f7efd3');
-        this.box(group,[.28,.12,.3],[0,.48,.6],'#d59a43'); this.box(group,[.07,.07,.08],[-.18,.63,.48],'#263a31'); this.box(group,[.07,.07,.08],[.18,.63,.48],'#263a31');
+        const legColor='#c98535';
+        this.box(group,[.55,.4,.8],[0,.43,0],'#eee5c5'); this.box(group,[.35,.4,.35],[0,.69,.35],'#f7efd3');
+        this.box(group,[.28,.12,.3],[0,.62,.6],'#d59a43'); this.box(group,[.07,.07,.08],[-.18,.77,.48],'#263a31'); this.box(group,[.07,.07,.08],[.18,.77,.48],'#263a31');
+        for(const [name,x] of [['leg-left',-.16],['leg-right',.16]] as const){
+          const leg=new THREE.Group();leg.name=name;leg.position.set(x,.25,0);
+          this.box(leg,[.07,.22,.07],[0,-.11,0],legColor);
+          this.box(leg,[.16,.07,.26],[0,-.215,.08],legColor);
+          group.add(leg);
+        }
       } else {
         const hairColor='#514d3e',invertedHide=entity.id==='t2',hideColor=invertedHide?'#493326':'#b8874d',spotColor=invertedHide?'#b8874d':'#493326',skinColor='#d9b98d';
         this.box(group,[.58,.66,.35],[0,.93,0],skinColor);

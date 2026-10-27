@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from '../src/core/engine';
-import { island } from '../src/modules/island';
+import { island, speechIdeas } from '../src/modules/island';
 import type { Block, Entity, WorldModule } from '../src/core/types';
 import { Store } from '../server/store';
 import { worldTools } from '../server/agents/tools';
@@ -111,15 +111,37 @@ test('voices broadcast to bystanders and animals with recorded direction and dis
   const listener=entity('t2',.5,5.5),outside=entity('outside',.5,11),blocked=entity('blocked',-4.5,.5);
   const engine=fixture([[-2,2,0,'stone']],[entity(),listener,duck,outside,blocked]),store=new Store(':memory:',island.manifest);
   try{
-    assert.equal(engine.act('t1',{action:'say',word:'hey'}).ok,true);
+    assert.equal(engine.act('t1',{action:'say',word:'Follow me'}).ok,true);
     const heard=engine.observe('t2').heard;assert.equal(heard.length,2);
-    assert.deepEqual(heard[0],{from:'t1',speakerId:'t1',word:'hey',tick:0,direction:'behind',distance:5});
+    assert.deepEqual(heard[0],{from:'t1',speakerId:'t1',word:'Follow me',tick:0,direction:'behind',distance:5});
     assert.equal(heard[1].from,'Pebble');assert.equal(heard[1].word,'quack');assert.equal(typeof heard[1].distance,'number');assert.ok(heard[1].direction);
-    assert.equal(engine.observe('t1').heard.at(-1)!.word,'quack');assert.equal(engine.observe('duck').heard[0].word,'hey');
+    assert.equal(engine.observe('t1').heard.at(-1)!.word,'quack');assert.equal(engine.observe('duck').heard[0].word,'Follow me');
     assert.equal(engine.observe('outside').heard.some(voice=>voice.from==='t1'),false);assert.equal(engine.observe('blocked').heard.some(voice=>voice.from==='t1'),false);
     assert.equal(engine.entity('duck').speech?.word,'quack');assert.equal(engine.recentEvents.filter(event=>event.type==='speech').length,2);
     store.record(engine.frame(),engine.state());const restored=new Engine(engine.module,store.stateAt(0));assert.deepEqual(restored.observe('t2').heard,heard);
   }finally{store.close();}
+});
+
+test('any audible message interrupts walking for an explicit continue or stop decision',()=>{
+  const engine=fixture([],[entity(),entity('t2',.5,5.5)]);
+  assert.equal(engine.act('t2',{action:'walk',distance:8}).ok,true);
+  assert.equal(engine.act('t1',{action:'say',word:'I like you'}).ok,true);
+  engine.wakeMovingListenersFromSpeech();
+  const prompt=engine.entity('t2').movementPrompt!;
+  assert.equal(prompt.messages[0].word,'I like you');
+  assert.equal(prompt.messages[0].speakerName,'t1');
+  assert.equal(typeof prompt.messages[0].direction,'string');
+  assert.equal(typeof prompt.messages[0].distance,'number');
+  const motion=engine.entity('t2').motion;
+  assert.equal(engine.resolveMovementPrompt('t2','continue_moving').ok,true);
+  assert.equal(engine.entity('t2').motion,motion);
+  assert.equal(engine.entity('t2').movementPrompt,undefined);
+
+  assert.equal(engine.act('t1',{action:'say',word:'Come here'}).ok,true);
+  engine.wakeMovingListenersFromSpeech();
+  assert.equal(engine.resolveMovementPrompt('t2','stop_moving').ok,true);
+  assert.equal(engine.entity('t2').motion,undefined);
+  assert.match(engine.entity('t2').lastAction!.message,/next turn/);
 });
 
 test('local interaction targets are actionable, exclude supporting blocks and refresh with the hands',()=>{
@@ -572,16 +594,27 @@ test('supporting blocks reject damage with a clear creature-specific error',()=>
 test('speech requires vocabulary, clear line of sight and ten-metre range; inbox survives resume', () => {
   const engine = fixture([], [entity(),entity('t2',.5,5.5)]);
   assert.equal(engine.act('t1',{action:'say',word:'hello'}).ok,false);
-  assert.equal(engine.act('t1',{action:'say',word:'hey'}).ok,true);
+  assert.equal(engine.act('t1',{action:'say',word:'Follow me'}).ok,true);
   assert.equal(engine.observe('t2').heard.length,1);
   engine.voxels.set([0,2,3],'stone');
-  engine.act('t1',{action:'say',word:'look'});
+  engine.act('t1',{action:'say',word:'Look at this'});
   assert.equal(engine.observe('t2').heard.length,1);
   engine.voxels.set([0,2,3],null); engine.entity('t2').position[2]=11;
-  engine.act('t1',{action:'say',word:'come'});
+  engine.act('t1',{action:'say',word:'Come here'});
   assert.equal(engine.observe('t2').heard.length,1);
   const resumed = new Engine(engine.module,engine.state());
   assert.deepEqual(resumed.observe('t2').heard,engine.observe('t2').heard);
+});
+test('communication ideas stay hidden until the agent opens say',async()=>{
+  const engine=fixture([],[entity(),entity('t2',.5,5.5)]);
+  const closed=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='say')!;
+  assert.equal(closed.physical,false);assert.deepEqual(closed.parameters.properties,{});
+  const serialized=JSON.stringify(closed);for(const idea of speechIdeas)assert.equal(serialized.includes(idea),false);
+  const menu=await closed.invoke({}) as {ok:boolean;options:string[]};
+  assert.equal(menu.ok,true);assert.deepEqual(menu.options,[...speechIdeas]);
+  const opened=worldTools(engine,'t1',{notes:[]},{speechMenu:true}).find(tool=>tool.name==='say')!;
+  assert.equal(opened.physical,true);assert.deepEqual(opened.parameters.properties!.word.enum,[...speechIdeas]);
+  assert.deepEqual(worldTools(engine,'t1',{notes:[]},{speechMenu:true}).map(tool=>tool.name),['say','do_not_reply']);
 });
 test('encounters support multiple Troglodytes and animals, persist and emit once until they separate',()=>{
   const second=entity('t2',.5,4.5);second.yaw=180;
@@ -675,13 +708,15 @@ test('SQLite replays exact edits, dynamics and events, including same-tick resta
   assert.ok(store.eventsAt(4).length>=3);
   store.close();
 });
-test('new materials and inventory limits can extend a recording without changing its physical rules',()=>{
+test('agent language and new materials can extend a recording without changing its physical rules',()=>{
   const directory=mkdtempSync(join(tmpdir(),'emergent-material-test-')),path=join(directory,'test.sqlite');
   try{
     const previous=structuredClone(island.manifest);
     previous.materials.bucket.stackLimit=1;
     for(const kind of ['plank','shovel','door_half_up','door_half_down','door'])delete previous.materials[kind];
     new Store(path,previous).close();
+    const newLanguage=structuredClone(island.manifest);newLanguage.vocabulary=['A completely new idea'];newLanguage.agentInstructions='New instructions for future decisions.';
+    new Store(path,newLanguage).close();
     new Store(path,island.manifest).close();
     const incompatible=structuredClone(island.manifest);incompatible.materials.wood.floats=false;
     assert.throws(()=>new Store(path,incompatible),/Module configuration changed/);

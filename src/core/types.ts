@@ -9,6 +9,8 @@ export interface Entity {
   enabled?: boolean;
   height: number; hitbox?: { radius: number; height: number }; color: string; inventory: Inventory | null;
   status: string; speech?: { word: string; until: number };
+  movementPrompt?: { messages:{speakerId:string;speakerName:string;word:string;tick:number;direction:string;distance:number}[] };
+  followInvitation?: { speakerId:string; speakerName:string; tick:number; untilTick:number };
   following?: { entityId: string; blocked?: MovementIssue };
   motion?: { kind?: 'walk' | 'run' | 'jump' | 'bounce'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; stopIssue?: MovementIssue; requestedDistance?: number };
   lastAction?: ActionResult;

@@ -30,25 +30,27 @@ export class TurnClock {
     this.enabled = enabled;
     if (!enabled && this.phase !== 'advancing') {
       this.pending?.abort(); this.pending = undefined; this.prepared = undefined; this.phase = 'paused'; this.decisions = {};
-    } else if (enabled && this.phase === 'paused') this.phase = 'idle';
+    } else if (enabled && this.phase === 'paused') this.phase = this.engine.tick % TURN_TICKS || this.engine.movementPrompts().length ? 'advancing' : 'idle';
     // Once committed, finish the single second before pausing. Never commit half a decision set.
     this.hooks.status();
   }
   entityChanged() {
     if (this.phase === 'thinking') {
       this.pending?.abort(); this.pending = undefined; this.prepared = undefined; this.decisions = {};
-      this.phase = this.enabled ? 'idle' : 'paused';
+      this.phase = this.enabled ? this.engine.tick < this.endTick ? 'advancing' : 'idle' : 'paused';
     }
     this.hooks.status();
   }
   pump() {
     if (this.closed) return;
+    if (this.enabled && !this.pending && this.engine.movementPrompts().length) { this.beginMovementPrompts(); return; }
     if (this.phase === 'advancing') {
       const now = this.now();
       while (now - this.previous >= STEP_MS && this.engine.tick < this.endTick) {
         this.previous += STEP_MS;
         const prepared = this.prepared; this.prepared = undefined;
         this.engine.step(prepared ? () => this.agents.commit(prepared) : undefined);
+        if (this.engine.movementPrompts().length) { this.beginMovementPrompts(); return; }
         if (this.engine.tick % FRAME_TICKS === 0) this.hooks.frame();
       }
       if (this.engine.tick === this.endTick) {
@@ -66,6 +68,28 @@ export class TurnClock {
       if (this.closed || this.pending !== controller || controller.signal.aborted) return;
       this.pending = undefined; this.prepared = prepared; this.endTick = prepared.tick + TURN_TICKS;
       this.previous = this.now(); this.phase = 'advancing'; this.hooks.status();
+    }).catch(error => {
+      if (!controller.signal.aborted && !this.closed) this.hooks.fatal(error);
+    });
+  }
+  private beginMovementPrompts() {
+    if (this.pending || !this.enabled || !this.engine.movementPrompts().length) return;
+    // Persist the interruption before inference. Replays never repeat this decision.
+    this.hooks.frame();
+    const controller = new AbortController(); this.pending = controller; this.phase = 'thinking'; this.decisions = {};
+    this.hooks.status();
+    void this.agents.prepareMovementPrompts(controller.signal, (id, status) => {
+      if (this.pending !== controller || controller.signal.aborted) return;
+      this.decisions[id] = status; this.hooks.status();
+    }).then(decisions => {
+      if (this.closed || this.pending !== controller || controller.signal.aborted) return;
+      this.pending = undefined;
+      this.agents.commitMovementPrompts(decisions);
+      this.hooks.frame();
+      this.previous = this.now();
+      this.phase = this.enabled ? 'advancing' : 'paused';
+      this.decisions = {};
+      this.hooks.status();
     }).catch(error => {
       if (!controller.signal.aborted && !this.closed) this.hooks.fatal(error);
     });
