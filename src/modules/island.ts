@@ -61,12 +61,15 @@ export const island: WorldModule = {
     if(issue.material==='wood'&&(issue.height??0)>1)return 'A tree trunk or tall wooden structure blocks your path.';
   },
   encounterMessage(observer,other,metres){
-    if(observer.kind==='troglodyte'&&other.kind==='troglodyte')return `You see ${other.name}, another Troglodyte, ${metres.toFixed(1)} metres away. You can use say to speak to them if you wish.`;
+    if(observer.kind==='troglodyte')return `You see ${other.name}, ${other.kind==='troglodyte'?'another Troglodyte':`a ${other.kind}`}, ${metres.toFixed(1)} metres away. You can use say to speak to them if you wish.`;
   },
   agentHints(observation,learned){
     const inventory=observation.self.inventory,stack=inventory?.stacks.findIndex(item=>item.kind==='wood')??-1;
     if(stack<0||[...learned].some(knowledge=>knowledge.startsWith('wood-shape:')))return [];
     return [`The wood you carry looks as though striking it could shape it into useful things. ${inventory!.selected===stack?'You can experiment with strike_held.':`Use hold with stack=${stack} to take it in your hands, then experiment with strike_held.`}`];
+  },
+  respondToSpeech(listener){
+    if(listener.kind==='duck')return 'quack';
   },
   canEnter(entity, feet) {
     return waterLevel - feet[1] > entity.height / 2

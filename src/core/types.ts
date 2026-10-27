@@ -9,13 +9,15 @@ export interface Entity {
   enabled?: boolean;
   height: number; color: string; inventory: Inventory | null;
   status: string; speech?: { word: string; until: number };
+  following?: { entityId: string; blocked?: MovementIssue };
   motion?: { kind?: 'walk' | 'run' | 'jump'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; stopIssue?: MovementIssue; requestedDistance?: number };
   lastAction?: ActionResult;
 }
 export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; }
 export interface WorldEvent { id: number; tick: number; time: number; day: number; actor: string; type: string; message: string; data?: unknown; }
 export interface EncounterNotice { eventId:number; tick:number; otherId:string; otherName:string; message:string; }
-export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, { from: string; word: string; tick: number }[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; }
+export interface HeardVoice { from: string; word: string; tick: number; speakerId?: string; direction?: string; distance?: number; }
+export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, HeardVoice[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; }
 export interface WorldState extends DynamicState { blocks: Block[]; }
 export interface Frame extends DynamicState { changes: [string, string | null][]; events: WorldEvent[]; }
 export interface ModuleManifest {
@@ -25,7 +27,7 @@ export interface ModuleManifest {
   perception: { range: number; fieldOfView: number; maxBlocks: number };
   agentInstructions: string;
 }
-export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'place' | 'throw' | 'pickup' | 'hit' | 'strike_held' | 'fill' | 'empty' | 'hold' | 'store' | 'say'; distance?: number; angle?: number; target?: Vec3; impact?: Vec3; itemId?: string; word?: string; force?: number; stack?: number; }
+export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'place' | 'throw' | 'pickup' | 'hit' | 'strike_held' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; target?: Vec3; impact?: Vec3; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
 export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: number; clearance: number; approach?: { distance:number; angle:number }; jump?: { distance:number; angle:number }; }
 export interface NavigationReport { checkedDistance: number; paths: (NavigationPath & { issue?: MovementIssue; options?: string[] })[]; blockedAfter?: number; }
 export interface ActionResult { ok: boolean; message: string; navigation?: NavigationReport; feedback?: Record<string, unknown>; }
@@ -33,11 +35,13 @@ export interface InteractionTargets {
   hit: { target: Vec3; kind: string; cracks: number }[];
   pickup: { itemId: string; kind: string; metres: number }[];
   speak: { id: string; name: string }[];
+  follow: { id: string; name: string; metres: number }[];
 }
 export interface Observation {
   tick: number; time: number; self: Entity; blocks: Block[];
   entities: Pick<Entity, 'id' | 'name' | 'kind' | 'position'>[];
-  items: Body[]; heard: { from: string; word: string; tick: number }[];
+  items: Body[]; heard: HeardVoice[];
+  following?: { entityId: string; name: string; metres?: number; direction?: string; message: string };
   encounters: (EncounterNotice & {canSpeakNow:boolean})[];
   surfaces: { kind: string; count: number; nearest: Vec3 }[];
   navigation: NavigationReport;
@@ -52,6 +56,7 @@ export interface WorldModule {
   describeObstacle?(issue: MovementIssue): string | undefined;
   encounterMessage?(observer:Entity,other:Entity,metres:number):string|undefined;
   agentHints?(observation:Observation,learned:ReadonlySet<string>):string[];
+  respondToSpeech?(listener:Entity,speaker:Entity,word:string):string|undefined;
 }
 export const key = (p: Vec3) => p.join(',');
 export const unkey = (value: string): Vec3 => value.split(',').map(Number) as Vec3;

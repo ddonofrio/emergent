@@ -34,7 +34,7 @@ store.record(engine.frame(), engine.state(), agents.persistence());
 const clients = new Set<ServerResponse>();
 const production = process.argv.includes('--production');
 const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
-const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.inference.label, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
+const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.inference.label, parallelRequests: agents.parallelRequests, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
 function broadcast(event: string, value: unknown) {
   const message = `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`;
   for (const client of clients) {
@@ -56,6 +56,10 @@ const server = createServer(async (req, res) => {
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 2048) { json(res, { error: 'Request too large.' }, 413); return; } }
         const data = JSON.parse(body);
+        if(typeof data.parallelRequests==='boolean'){
+          agents.setParallelRequests(data.parallelRequests);
+          broadcast('settings',{parallelRequests:agents.parallelRequests});json(res,metadata());return;
+        }
         if (typeof data.agentsEnabled === 'boolean') {
           turnClock.setEnabled(data.agentsEnabled); json(res, metadata()); return;
         }
@@ -67,7 +71,7 @@ const server = createServer(async (req, res) => {
           }
           json(res, { ...metadata(), entity: engine.entity(entity.id) }); return;
         }
-        json(res, { error: 'Provide agentsEnabled or entityId with entityEnabled.' }, 400); return;
+        json(res, { error: 'Provide parallelRequests, agentsEnabled, or entityId with entityEnabled.' }, 400); return;
       }
       if (req.method !== 'GET') { json(res, { error: 'Method not allowed.' }, 405); return; }
       const requestedTick = Number(url.searchParams.get('tick') ?? engine.tick);

@@ -15,6 +15,70 @@ function fixture(blocks: Block[] = [], entities = [entity()]): Engine {
   return new Engine(module);
 }
 
+test('follow is offered only for visible active entities within twenty metres, including animals',()=>{
+  const engine=fixture([],[entity(),entity('t2',.5,20.5)]),memory={notes:[]};
+  assert.ok(engine.observe('t1').interactions.follow.some(other=>other.id==='t2'));
+  assert.ok(worldTools(engine,'t1',memory).some(tool=>tool.name==='follow'));
+  engine.entity('t2').position[2]=20.51;
+  assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,false);assert.equal(worldTools(engine,'t1',memory).some(tool=>tool.name==='follow'),false);
+  engine.entity('t2').position[2]=4.5;engine.entity('t1').yaw=180;
+  assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,false);
+  engine.entity('t1').yaw=0;engine.voxels.set([0,2,2],'stone');
+  assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,false);
+  engine.voxels.set([0,2,2],null);engine.setEntityEnabled('t2',false);
+  assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,false);
+  engine.setEntityEnabled('t2',true);engine.entity('t2').kind='duck';engine.entity('t2').controller='wander';engine.entity('t2').height=.65;
+  assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,true);
+  assert.deepEqual(worldTools(engine,'t1',memory).map(tool=>tool.name),['follow','stop_follow']);
+  assert.equal(engine.act('t1',{action:'walk',distance:1}).ok,false);
+});
+
+test('following parks at one metre, resumes when the target moves, and replays without decisions',()=>{
+  const engine=fixture([],[entity(),entity('t2',.5,5.5)]),store=new Store(':memory:',engine.module.manifest);
+  try{
+    assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,true);store.record(engine.frame(),engine.state());
+    for(let tick=0;tick<50;tick++){engine.step();store.record(engine.frame());}
+    assert.ok(Math.abs(engine.entity('t1').position[2]-4.5)<1e-8);assert.equal(engine.entity('t1').motion,undefined);
+    assert.deepEqual(store.stateAt(50),engine.state());
+    const restored=new Engine(engine.module,store.stateAt(50));restored.nextEvent=store.maxEventId()+1;
+    assert.equal(restored.act('t2',{action:'walk',distance:2}).ok,true);
+    for(let tick=0;tick<20;tick++)restored.step();
+    assert.ok(restored.entity('t1').position[2]>6.2);assert.ok(restored.entity('t2').position[2]-restored.entity('t1').position[2]>=.99);
+    const tick=restored.tick;assert.equal(restored.act('t1',{action:'stop_follow'}).ok,true);assert.equal(restored.act('t1',{action:'turn',angle:90}).ok,true);
+    assert.equal(restored.tick,tick);assert.equal(restored.entity('t1').following,undefined);
+  }finally{store.close();}
+});
+
+test('following stops at unsafe terrain and loses contact without exposing a hidden target location',()=>{
+  const engine=fixture([[0,1,2,'stone']],[entity(),entity('t2',.5,5.5)]);
+  engine.act('t1',{action:'follow',entityId:'t2'});for(let tick=0;tick<20;tick++)engine.step();
+  assert.equal(engine.entity('t1').following?.blocked?.kind,'rise');assert.ok(engine.entity('t1').position[2]<1.8);
+  assert.match(engine.observe('t1').following!.message,/Stop following/);
+  for(let y=1;y<5;y++)engine.voxels.set([0,y,3],'stone');
+  const obscured=engine.observe('t1').following!;assert.equal(obscured.metres,undefined);assert.equal(obscured.direction,undefined);
+  engine.step();assert.equal(engine.entity('t1').following,undefined);assert.match(engine.entity('t1').lastAction!.message,/lose direct contact/);
+  const water=fixture([],[entity(),entity('t2',.5,4.5)]);water.entity('t1').position[1]=-1;water.entity('t2').position[1]=-1;
+  for(let z=-1;z<=5;z++){water.voxels.set([0,0,z],null);water.voxels.set([0,-2,z],z<=0?'sand':null);}
+  assert.equal(water.act('t1',{action:'follow',entityId:'t2'}).ok,true);for(let tick=0;tick<20;tick++)water.step();
+  assert.equal(water.entity('t1').following?.blocked?.kind,'water');assert.ok(water.discoveries.get('t1')?.has('deep-water-limit'));
+});
+
+test('voices broadcast to bystanders and animals with recorded direction and distance; ducks reply without recursion',()=>{
+  const duck:Entity={...entity('duck',2.5,2.5),name:'Pebble',kind:'duck',controller:'wander',height:.65};
+  const listener=entity('t2',.5,5.5),outside=entity('outside',.5,11),blocked=entity('blocked',-4.5,.5);
+  const engine=fixture([[-2,2,0,'stone']],[entity(),listener,duck,outside,blocked]),store=new Store(':memory:',island.manifest);
+  try{
+    assert.equal(engine.act('t1',{action:'say',word:'hey'}).ok,true);
+    const heard=engine.observe('t2').heard;assert.equal(heard.length,2);
+    assert.deepEqual(heard[0],{from:'t1',speakerId:'t1',word:'hey',tick:0,direction:'behind',distance:5});
+    assert.equal(heard[1].from,'Pebble');assert.equal(heard[1].word,'quack');assert.equal(typeof heard[1].distance,'number');assert.ok(heard[1].direction);
+    assert.equal(engine.observe('t1').heard.at(-1)!.word,'quack');assert.equal(engine.observe('duck').heard[0].word,'hey');
+    assert.equal(engine.observe('outside').heard.some(voice=>voice.from==='t1'),false);assert.equal(engine.observe('blocked').heard.some(voice=>voice.from==='t1'),false);
+    assert.equal(engine.entity('duck').speech?.word,'quack');assert.equal(engine.recentEvents.filter(event=>event.type==='speech').length,2);
+    store.record(engine.frame(),engine.state());const restored=new Engine(engine.module,store.stateAt(0));assert.deepEqual(restored.observe('t2').heard,heard);
+  }finally{store.close();}
+});
+
 test('local interaction targets are actionable, exclude supporting blocks and refresh with the hands',()=>{
   const engine=fixture([[0,1,2,'wood'],[0,2,2,'stone'],[0,3,2,'stone'],[0,1,4,'wood']]);
   engine.bodies.push({id:'near',kind:'arrow',position:[-.5,1.6,1.5],velocity:[0,0,0],resting:true},{id:'far',kind:'arrow',position:[4.5,1.6,6.5],velocity:[0,0,0],resting:true});
@@ -262,15 +326,15 @@ test('speech requires vocabulary, clear line of sight and ten-metre range; inbox
   const resumed = new Engine(engine.module,engine.state());
   assert.deepEqual(resumed.observe('t2').heard,engine.observe('t2').heard);
 });
-test('encounters support multiple Troglodytes, persist and emit once until they separate',()=>{
+test('encounters support multiple Troglodytes and animals, persist and emit once until they separate',()=>{
   const second=entity('t2',.5,4.5);second.yaw=180;
   const third=entity('t3',3.5,3.5);third.yaw=225;
   const duck:Entity={...entity('duck',1.5,3.5),kind:'duck',controller:'wander',height:.65};
   const engine=fixture([],[entity(),second,third,duck]),store=new Store(':memory:',engine.module.manifest);
   try{
     store.record(engine.frame(),engine.state());engine.step();store.record(engine.frame());
-    const notices=engine.observe('t1').encounters;assert.equal(notices.length,2);assert.ok(notices.every(notice=>notice.canSpeakNow));assert.ok(notices.every(notice=>notice.message.includes('use say')));
-    assert.equal(store.eventsAt(1,'t1').filter(event=>event.type==='encounter').length,2);
+    const notices=engine.observe('t1').encounters;assert.equal(notices.length,3);assert.ok(notices.every(notice=>notice.canSpeakNow));assert.ok(notices.every(notice=>notice.message.includes('use say')));
+    assert.equal(store.eventsAt(1,'t1').filter(event=>event.type==='encounter').length,3);
     const restored=new Engine(engine.module,store.stateAt(1));restored.nextEvent=store.maxEventId()+1;assert.deepEqual(restored.observe('t1').encounters,notices);
     restored.step();assert.equal(restored.frame().events.filter(event=>event.type==='encounter').length,0,'Remaining in view must not repeat encounters after restart.');
     restored.acknowledgeEncounters('t1',notices);assert.equal(restored.observe('t1').encounters.length,0);

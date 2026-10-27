@@ -1,7 +1,7 @@
 import { Voxels } from './voxels';
 import { TICKS_PER_SECOND } from './time';
 import { knowledgeDescription } from './knowledge';
-import { clone, distance, key, type Action, type ActionResult, type Body, type EncounterNotice, type Entity, type Frame, type Inventory, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
+import { clone, distance, key, type Action, type ActionResult, type Body, type EncounterNotice, type Entity, type Frame, type HeardVoice, type Inventory, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
 
 const ok = (message: string): ActionResult => ({ ok: true, message });
 const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
@@ -31,7 +31,7 @@ export class Engine {
   private nextBody = 1;
   private pendingEvents: WorldEvent[] = [];
   readonly recentEvents: WorldEvent[] = [];
-  readonly inbox = new Map<string, { from: string; word: string; tick: number }[]>();
+  readonly inbox = new Map<string, HeardVoice[]>();
   private contacts=new Map<string,Set<string>>();
   private encounterNotices=new Map<string,EncounterNotice[]>();
   constructor(readonly module: WorldModule, state?: WorldState) {
@@ -54,7 +54,8 @@ export class Engine {
   setEntityEnabled(id: string, enabled: boolean) {
     const entity = this.entity(id);
     if (this.active(entity) === enabled) return false;
-    entity.enabled = enabled; delete entity.motion; delete entity.speech;
+    entity.enabled = enabled; delete entity.motion; delete entity.speech; delete entity.following;
+    if(!enabled)for(const follower of this.entities)if(follower.following?.entityId===id)this.endFollowing(follower,`${entity.name} is no longer available to follow.`);
     if(!enabled){this.contacts.delete(id);this.encounterNotices.delete(id);for(const contacts of this.contacts.values())contacts.delete(id);for(const [actor,notices] of this.encounterNotices)this.encounterNotices.set(actor,notices.filter(notice=>notice.otherId!==id));}
     entity.status = enabled ? 'idle' : 'disabled';
     this.event('world', 'entity-control', `${entity.name} was ${enabled ? 'enabled' : 'disabled'}.`, { entityId: id, enabled });
@@ -79,9 +80,9 @@ export class Engine {
   }
   inside(p: Vec3) { return p.every((v, i) => v >= this.module.manifest.bounds.min[i] && v < this.module.manifest.bounds.max[i]); }
   eye(e: Entity): Vec3 { return [e.position[0], e.position[1] + e.height * .85, e.position[2]]; }
-  visible(e: Entity, point: Vec3, ignoreEnd = false) {
+  visible(e: Entity, point: Vec3, ignoreEnd = false, range = this.module.manifest.perception.range) {
     const eye = this.eye(e), d = distance(eye, point);
-    if (d > this.module.manifest.perception.range) return false;
+    if (d > range) return false;
     const angle = Math.atan2(point[0] - eye[0], point[2] - eye[2]);
     const difference = Math.atan2(Math.sin(angle - e.yaw * Math.PI / 180), Math.cos(angle - e.yaw * Math.PI / 180));
     return (d < 1.6 || Math.abs(difference) <= this.module.manifest.perception.fieldOfView * Math.PI / 360) && this.voxels.clearLine(eye, point, ignoreEnd);
@@ -103,7 +104,7 @@ export class Engine {
     // Preserve nearby reach targets and a representative of every visible material.
     const samples = new Map(blocks.slice(0,Math.max(0,maxBlocks-surfaces.size)).map(b => [key(b.slice(0,3) as Vec3),b]));
     for (const surface of surfaces.values()) { const b = blocks.find(b => b[3]===surface.kind)!; samples.set(key(surface.nearest),b); }
-    const entities = this.entities.filter(other => other.id !== id && this.active(other) && this.visible(e, this.eye(other))).map(({ id, name, kind, position }) => ({ id, name, kind, position: clone(position) }));
+    const entities = this.entities.filter(other => other.id !== id && this.active(other) && this.visible(e, this.eye(other),false,Math.max(20,this.module.manifest.perception.range))).map(({ id, name, kind, position }) => ({ id, name, kind, position: clone(position) }));
     const navigation = this.navigationReport(e);
     const items = clone(this.bodies.filter(b => this.visible(e, b.position)));
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
@@ -117,19 +118,37 @@ export class Engine {
       pickup: emptyHands ? items.filter(item=>distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents).ok)
         .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).slice(0,3).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
       speak: entities.filter(other=>this.canSpeakTo(e,this.entity(other.id))).map(({id,name})=>({id,name})),
+      follow: entities.filter(other=>this.canFollow(e,this.entity(other.id))).map(({id,name,position})=>({id,name,metres:Math.round(distance(e.position,position)*10)/10})),
     };
+    const followed=e.following&&this.entities.find(other=>other.id===e.following!.entityId);
+    const tracking=followed&&this.active(followed)&&distance(e.position,followed.position)<=20&&this.voxels.clearLine(eye,this.eye(followed));
+    const following=followed?{entityId:followed.id,name:followed.name,...(tracking?{metres:Math.round(distance(e.position,followed.position)*10)/10,direction:this.direction(e,followed.position)}:{}),message:!tracking?'Direct contact has been lost. Stop following to choose another action.':e.following!.blocked?`${e.following!.blocked.message} Stop following to choose another action.`:'Automatically following, stopping one metre away. Choose follow to continue or stop_follow to stop and act immediately.'}:undefined;
     return { tick: this.tick, time: this.time, self: clone(e), blocks: [...samples.values()].slice(0,maxBlocks), surfaces: [...surfaces.values()], entities,
       items, heard: clone((this.inbox.get(id) ?? []).filter(m => this.tick - m.tick < 1200)),
       encounters:clone((this.encounterNotices.get(id)??[]).map(notice=>({...notice,canSpeakNow:this.canSpeakTo(e,this.entity(notice.otherId))}))),
       navigation,
       interactions,
+      ...(following?{following}:{}),
       description, truncated: blocks.length > maxBlocks };
   }
   acknowledgeEncounters(id:string,notices:EncounterNotice[]){
     const seen=new Set(notices.map(notice=>notice.eventId));
     if(seen.size)this.encounterNotices.set(id,(this.encounterNotices.get(id)??[]).filter(notice=>!seen.has(notice.eventId)));
   }
-  private canSpeakTo(speaker:Entity,listener:Entity){return speaker.id!==listener.id&&this.active(speaker)&&this.active(listener)&&listener.controller==='agent'&&distance(this.eye(speaker),this.eye(listener))<=10&&this.voxels.clearLine(this.eye(speaker),this.eye(listener));}
+  private canSpeakTo(speaker:Entity,listener:Entity){return speaker.id!==listener.id&&this.active(speaker)&&this.active(listener)&&distance(this.eye(speaker),this.eye(listener))<=10&&this.voxels.clearLine(this.eye(speaker),this.eye(listener));}
+  canFollow(follower:Entity,target:Entity,viewAngle=0){return follower.id!==target.id&&this.active(follower)&&this.active(target)&&distance(follower.position,target.position)<=20&&this.visible({...follower,yaw:follower.yaw+viewAngle},this.eye(target),false,20);}
+  private speak(speaker:Entity,word:string,respond=true):Entity[]{
+    const recipients=this.entities.filter(other=>this.canSpeakTo(speaker,other));
+    speaker.speech={word,until:this.time+4};
+    for(const listener of recipients){
+      const inbox=this.inbox.get(listener.id)??[];
+      inbox.push({from:speaker.name,speakerId:speaker.id,word,tick:this.tick,direction:this.direction(listener,speaker.position),distance:Math.round(distance(this.eye(listener),this.eye(speaker))*10)/10});
+      this.inbox.set(listener.id,inbox.slice(-16));
+    }
+    this.event(speaker.id,'speech',`${speaker.name} says "${word}".`,{word,recipientIds:recipients.map(other=>other.id)});
+    if(respond)for(const listener of recipients){const reply=this.module.respondToSpeech?.(listener,speaker,word);if(reply)this.speak(listener,reply,false);}
+    return recipients;
+  }
   private updateEncounters(){
     for(const observer of this.entities.filter(entity=>entity.controller==='agent'&&this.active(entity))){
       const previous=this.contacts.get(observer.id)??new Set<string>(),current=new Set<string>();
@@ -308,6 +327,18 @@ export class Engine {
     return this.entities.find(other=>this.active(other)&&Math.floor(other.position[0])===target[0]&&Math.floor(other.position[2])===target[2]&&Math.abs(other.position[1]-(target[1]+1))<.05);
   }
   private execute(e: Entity, a: Action): ActionResult {
+    if(a.action==='stop_follow'){
+      if(e.following){delete e.following;delete e.motion;e.status='idle';}
+      return ok('You stop following. You can choose another action immediately.');
+    }
+    if(a.action==='follow'){
+      const id=a.entityId??e.following?.entityId,target=this.entities.find(other=>other.id===id);
+      if(!target||!this.canFollow(e,target,a.angle??0))return fail('Follow requires another visible living entity within 20 metres, with a clear line of sight.');
+      if(e.motion&&!e.following)return fail('Wait until your movement finishes before following.');
+      e.following={entityId:target.id};delete e.motion;e.status='following';e.yaw=((Math.atan2(target.position[0]-e.position[0],target.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
+      return ok(`You follow ${target.name}, stopping one metre away. Each turn choose follow to continue or stop_follow to stop and take another action immediately.`);
+    }
+    if(e.following)return fail('While following, choose follow or stop_follow. Stopping lets you act immediately.');
     if (e.motion) return fail('Wait until your movement finishes.');
     if (a.action === 'wait') { e.status = 'idle'; return ok('Waiting and watching.'); }
     if (a.action === 'turn') {
@@ -356,12 +387,7 @@ export class Engine {
     }
     if (a.action === 'say') {
       if (!this.module.manifest.vocabulary.includes(a.word!)) return fail('That word is not in your vocabulary.');
-      const recipients = this.entities.filter(other => this.canSpeakTo(e,other));
-      for (const other of recipients) {
-        const inbox = this.inbox.get(other.id) ?? []; inbox.push({ from: e.name, word: a.word!, tick: this.tick });
-        this.inbox.set(other.id, inbox.slice(-16));
-      }
-      e.speech = { word: a.word!, until: this.time + 4 };
+      const recipients = this.speak(e,a.word!);
       return {ok:true,message:`Said "${a.word}". Heard by ${recipients.map(r => r.name).join(', ') || 'nobody'}.`,feedback:{recipientIds:recipients.map(recipient=>recipient.id)}};
     }
     if (a.action === 'pickup') {
@@ -490,6 +516,25 @@ export class Engine {
     }
     return sawCollapse;
   }
+  private endFollowing(e:Entity,message:string){
+    delete e.following;delete e.motion;e.status='idle';e.lastAction={ok:false,message};
+    this.event(e.id,'follow-ended',message);
+  }
+  private advanceFollowing(e:Entity){
+    const following=e.following!,target=this.entities.find(other=>other.id===following.entityId);
+    if(!target||!this.active(target)||distance(e.position,target.position)>20||!this.voxels.clearLine(this.eye(e),this.eye(target))){this.endFollowing(e,'You lose direct contact with the entity you were following. Choose another action.');return;}
+    const dx=target.position[0]-e.position[0],dz=target.position[2]-e.position[2],metres=Math.hypot(dx,dz);
+    e.yaw=((Math.atan2(dx,dz)*180/Math.PI)%360+360)%360;
+    if(metres<=1.0001||following.blocked){delete e.motion;e.status='following';return;}
+    const step=Math.min(2/TICKS_PER_SECOND,metres-1),next=this.movementPoint(e,e.position[0]+dx/metres*step,e.position[2]+dz/metres*step,e.position[1]);
+    if(!next.point){
+      following.blocked=next.issue;delete e.motion;this.learnMovementIssue(e,next.issue!);
+      e.lastAction={ok:false,message:`You stop following the path. ${next.issue!.message} Use stop_follow to choose another action.`,feedback:{issue:next.issue}};
+      this.event(e.id,'follow-blocked',e.lastAction.message,e.lastAction.feedback);return;
+    }
+    const origin=clone(e.position);e.position=next.point;e.status='following';
+    e.motion={kind:'walk',origin,destination:clone(next.point),speed:2};
+  }
   step(beforePhysics?: () => void) {
     this.tick++;
     // Commands belong to this step, so a boundary snapshot cannot see future actions.
@@ -497,6 +542,7 @@ export class Engine {
     for (const e of this.entities) {
       if (!this.active(e)) continue;
       if (e.speech && e.speech.until < this.time) delete e.speech;
+      if(e.following){this.advanceFollowing(e);continue;}
       if (e.controller === 'wander' && !e.motion && this.tick % 60 === 0) {
         e.yaw = (this.tick * 13.37) % 360;
         // The NPC uses the same collision and depth rules, without adding agent journal noise.

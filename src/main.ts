@@ -5,7 +5,7 @@ import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, type TurnStatus } fr
 import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from './core/types';
 import { knowledgeDescription } from './core/knowledge';
 
-interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; agentsEnabled: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
+interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; parallelRequests: boolean; agentsEnabled: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -30,7 +30,7 @@ app.innerHTML = `
       </section>
     </section>
     <aside class="inspector" aria-label="World inspector">
-      <div class="experiment"><span class="eyebrow">EXPERIMENT 001</span><div class="experiment-title">A world without a task.<span class="seed">SEED 731</span></div><p>Watch curiosity become behavior.</p><div id="runtime-mode" class="runtime-mode">Connecting to runtime</div><p id="turn-status" role="status">One turn = one world second</p><button id="agent-toggle" class="agent-toggle">Pause world <span>Ⅱ</span></button></div>
+      <div class="experiment"><div class="experiment-heading"><span class="eyebrow">EXPERIMENT 001</span><span class="seed">SEED 731</span></div><div id="runtime-mode" class="runtime-mode">Connecting to runtime</div><label class="request-setting" title="Changes apply from the next turn."><input id="parallel-requests" type="checkbox" checked disabled>Parallel requests</label><p id="turn-status" role="status">One turn = one world second</p><button id="agent-toggle" class="agent-toggle">Pause world <span>Ⅱ</span></button></div>
       <div class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">03</span></div><div id="entity-list"></div></div>
       <div class="inspector-tabs" role="tablist"><button id="journal-tab" role="tab" aria-selected="true" class="active">Journal</button><button id="details-tab" role="tab" aria-selected="false">In focus</button><span id="event-count">0</span></div>
       <div id="journal" class="journal" role="tabpanel"><p class="empty">Waiting for the first trace.</p></div>
@@ -69,11 +69,18 @@ function setBoot(boot: Boot) {
   liveEvents = boot.events; $('loading').classList.add('hidden');
   $('runtime-mode').textContent = meta.mode === 'demo' ? 'SCRIPTED DEMO · No LLM connected' : `LLM CONNECTED · ${meta.model}`;
   $('runtime-mode').classList.toggle('model',meta.mode === 'llm');
+  $<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
+  $<HTMLInputElement>('parallel-requests').disabled=false;
   $('module-name').textContent = meta.module.name; $('population').textContent = `${boot.state.entities.length} inhabitants`;
   if (isLive) goLive(); else renderTimeline();
 }
 const stream = new EventSource('/api/stream');
 stream.addEventListener('boot', event => { setConnection(true); setBoot(JSON.parse((event as MessageEvent).data)); });
+stream.addEventListener('settings',event=>{
+  if(!meta)return;
+  meta.parallelRequests=JSON.parse((event as MessageEvent).data).parallelRequests;
+  $<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
+});
 stream.addEventListener('status', event => {
   if (!meta) return;
   meta.runtime = JSON.parse((event as MessageEvent).data).runtime; meta.agentsEnabled = meta.runtime.enabled;
@@ -257,6 +264,16 @@ $('overview').onclick = () => view.overview(); $('top-down').onclick = () => vie
 $('agent-toggle').onclick = async () => {
   try { const response = await fetch('/api/control',{ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentsEnabled: !meta.agentsEnabled }) }); if (!response.ok) throw new Error(); meta = await response.json(); renderTimeline(); }
   catch { toast('Could not change agent state. Check the connection.'); }
+};
+$<HTMLInputElement>('parallel-requests').onchange=async event=>{
+  if(!meta)return;
+  const input=event.target as HTMLInputElement,parallelRequests=input.checked;input.disabled=true;
+  try{
+    const response=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parallelRequests})});
+    if(!response.ok)throw new Error();
+    meta.parallelRequests=(await response.json() as Metadata).parallelRequests;
+  }catch{toast('Could not change request mode. Check the connection.');}
+  finally{input.checked=meta.parallelRequests;input.disabled=false;}
 };
 for (const tab of ['journal','details']) $(tab+'-tab').onclick = () => {
   activeTab = tab; for (const name of ['journal','details']) { $(name).classList.toggle('hidden',name!==tab); $(name+'-tab').classList.toggle('active',name===tab); $(name+'-tab').setAttribute('aria-selected',String(name===tab)); }

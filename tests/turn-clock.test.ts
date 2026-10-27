@@ -56,6 +56,69 @@ function run(engine: Engine, store: Store, url: string, maxTurns: number | null 
   return {runtime,clock,frames,failures,advance(ms:number){wall+=ms;clock.pump();}};
 }
 
+test('looking sideways makes follow available for the newly seen entity without spending a turn',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);delete engine.entity('duck').motion;
+    r.clock.pump();await until(()=>p.requests.length===1);assert.equal(p.requests[0].body.tools.some((tool:any)=>tool.function.name==='follow'),false);
+    respondTool(p.requests[0],'look',{angle:90});await until(()=>p.requests.length===2);
+    assert.equal(engine.tick,0);assert.equal(engine.entity('t1').yaw,0);assert.ok(p.requests[1].body.tools.some((tool:any)=>tool.function.name==='follow'));
+    assert.ok(JSON.parse(p.requests[1].body.messages.at(-1).content).interactions.follow.some((target:any)=>target.id==='duck'));
+    respond(p.requests[1],{action:'follow',entityId:'duck'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.entity('t1').following?.entityId,'duck');assert.ok(engine.entity('t1').position[0]>1);assert.equal(engine.time,1);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('following asks every world second; stopping stages a free normal action that survives a ready-decision restart',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  let resumed:ReturnType<typeof run>|undefined;
+  try{
+    engine.setEntityEnabled('t2',false);const duck=engine.entity('duck');delete duck.motion;duck.position=[-.5,1,5.5];
+    engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+    store.record(engine.frame(),engine.state(),r.runtime.persistence());
+    r.clock.pump();await until(()=>p.requests.length===1);
+    assert.ok(JSON.parse(p.requests[0].body.messages.at(-1).content).interactions.follow.some((target:any)=>target.id==='duck'));
+    respond(p.requests[0],{action:'follow',entityId:'duck'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.tick,20);assert.ok(engine.entity('t1').motion);
+    r.clock.pump();await until(()=>p.requests.length===2);
+    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow']);
+    const prompt=JSON.parse(p.requests[1].body.messages.at(-1).content);assert.equal(prompt.following.entityId,'duck');assert.ok(Math.abs(prompt.following.metres-3)<.01);
+    const frozen=engine.state();r.advance(90000);assert.deepEqual(engine.state(),frozen);
+    respond(p.requests[1],{action:'follow'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.tick,40);assert.ok(Math.abs(engine.entity('t1').position[2]-4.5)<1e-8);
+    r.clock.pump();await until(()=>p.requests.length===3);respondTool(p.requests[2],'stop_follow',{});await until(()=>p.requests.length===4);
+    assert.equal(engine.tick,40);assert.ok(engine.entity('t1').following,'Stopping must not mutate the shared observation instant.');
+    assert.ok(p.requests[3].body.tools.some((tool:any)=>tool.function.name==='place'));
+    respond(p.requests[3],{action:'place',target:[-1,1,3]});await until(()=>r.clock.status().phase==='advancing');
+    assert.ok(engine.entity('t1').following);r.clock.close();
+    const restored=new Engine(engine.module,store.stateAt(40));restored.nextEvent=store.maxEventId()+1;
+    resumed=run(restored,store,p.url,null);resumed.clock.pump();await until(()=>resumed!.clock.status().phase==='advancing');
+    assert.equal(p.requests.length,4,'A ready stop-and-act decision must not call the model again.');
+    resumed.advance(1000);assert.equal(restored.tick,60);assert.equal(restored.entity('t1').following,undefined);assert.equal(restored.voxels.get([-1,1,3]),'wood');
+    assert.equal(resumed.runtime.minds.get('t1')!.turns,3);
+    const actions=store.eventsAt(60,'t1').filter(event=>event.type==='action'&&event.tick===41).map(event=>(event.data as any).action.action);
+    assert.deepEqual(actions,['stop_follow','place']);assert.deepEqual(resumed.failures,[]);
+  }finally{r.clock.close();resumed?.clock.close();store.close();p.close();}
+});
+
+test('a periodic reflection waits until following stops, then still permits the immediate normal action',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);const duck=engine.entity('duck');delete duck.motion;duck.position=[-.5,1,5.5];
+    engine.act('t1',{action:'follow',entityId:'duck'});r.runtime.minds.get('t1')!.turns=99;
+    r.clock.pump();await until(()=>p.requests.length===1);
+    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow']);
+    respond(p.requests[0],{action:'follow'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(r.runtime.minds.get('t1')!.turns,100);assert.equal(r.runtime.minds.get('t1')!.lastReflectionTurn,undefined);
+    r.clock.pump();await until(()=>p.requests.length===2);respondTool(p.requests[1],'stop_follow',{});await until(()=>p.requests.length===3);
+    assert.match(JSON.parse(p.requests[2].body.messages.at(-1).content).reflection,/Pause to reflect/);assert.equal(engine.tick,20);
+    respondTool(p.requests[2],'reflect',{remember:false});await until(()=>p.requests.length===4);
+    assert.equal(engine.tick,20);respond(p.requests[3],{action:'turn',angle:90});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.tick,40);assert.equal(engine.entity('t1').following,undefined);assert.equal(engine.entity('t1').yaw,90);
+    assert.equal(r.runtime.minds.get('t1')!.lastReflectionTurn,101);assert.deepEqual(r.runtime.minds.get('t1')!.notes,[]);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
 test('wood hints follow stored and held wood until a shape is discovered; discovery suggests an optional intention note once',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
@@ -107,6 +170,7 @@ test('social hints repeat until heard speech, survive restart and return only fo
 
 test('unheard speech does not dismiss a social hint',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  engine.setEntityEnabled('duck',false);
   engine.entity('t1').yaw=90;engine.entity('t2').yaw=270;
   try{
     r.clock.pump();await until(()=>p.requests.length===2);
@@ -147,6 +211,31 @@ test('every hundred decisions requires an optional reflection before acting, wit
     const reflections=store.eventsAt(engine.tick,'t1').filter(event=>event.type==='reflection');
     assert.deepEqual(reflections.map(event=>(event.data as any).turn),[100,200]);
     assert.equal((reflections[1].data as any).note,note);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('sequential inference finishes one complete agent decision before starting the next and preserves the shared instant',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    assert.equal(r.runtime.parallelRequests,true);r.runtime.setParallelRequests(false);
+    assert.equal(new AgentRuntime(engine,store,r.runtime.config).parallelRequests,false,'The server preference survives runtime reconstruction.');
+    store.record(engine.frame(),engine.state(),r.runtime.persistence());const initial=engine.state();
+    r.clock.pump();await until(()=>p.requests.length===1);assert.equal(p.requests[0].id,'t1');
+    r.advance(90000);assert.deepEqual(engine.state(),initial);assert.equal(p.requests.length,1);
+    respondTool(p.requests[0],'look',{angle:0});await until(()=>p.requests.length===2);
+    assert.equal(p.requests[1].id,'t1','Supporting tool calls belong to the same sequential decision.');
+    assert.deepEqual(engine.state(),initial);assert.equal(r.clock.status().agents.t2?.state,'waiting');
+    respond(p.requests[1],{action:'wait'});await until(()=>p.requests.length===3);
+    assert.equal(p.requests[2].id,'t2');assert.equal(r.clock.status().agents.t1?.state,'ready');
+    assert.deepEqual(engine.state(),initial);assert.equal(store.latestTick(),0);
+    r.runtime.setParallelRequests(true);assert.equal(p.requests.length,3,'A mode change does not cancel or duplicate the current turn.');
+    respond(p.requests[2],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.time,1);
+    const observations=store.eventsAt(engine.tick).filter(event=>event.type==='observation');
+    assert.equal(observations.length,2);assert.ok(observations.every(event=>(event.data as any).observation.tick===0));
+    r.clock.pump();await until(()=>p.requests.length===5);assert.deepEqual(p.requests.slice(3).map(request=>request.id).sort(),['t1','t2']);
+    for(const request of p.requests.slice(3))respond(request,{action:'wait'});
+    assert.equal(new AgentRuntime(engine,store,r.runtime.config).parallelRequests,true);assert.deepEqual(r.failures,[]);
   }finally{r.clock.close();store.close();p.close();}
 });
 
@@ -289,6 +378,7 @@ test('journal is freely available within a frozen decision and persists notes fo
 
 test('encounter notices reach both prompts and are acknowledged only at the shared commit',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest);
+  engine.setEntityEnabled('duck',false);
   engine.entity('t1').yaw=90;engine.entity('t2').yaw=270;
   for(let tick=0;tick<20;tick++)engine.step();store.record(engine.frame(),engine.state());
   const r=run(engine,store,p.url,null);

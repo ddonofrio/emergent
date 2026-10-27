@@ -13,6 +13,7 @@ interface Mind extends Memory {
   turns: number; modelTurns: number; cycles: Message[][]; lastResult?: unknown;
   carriedMoves?: number; carryingReminder?: string; emptyHandMoves?: number;
   knownDiscoveries?: string[]; lastEncounters?: Record<string,number>; lastSpoken?: Record<string,number>;
+  lastReflectionTurn?: number;
 }
 export interface PreparedDecision {
   id: string;
@@ -27,6 +28,8 @@ export interface PreparedDecision {
   reminder?: string;
   hints?: string[];
   reflection?: {turn:number;note:string|null};
+  stopFollowing?: boolean;
+  viewAngle?: number;
   cycle: Message[];
   usage?: unknown;
 }
@@ -37,9 +40,11 @@ export class AgentRuntime {
   readonly mode: 'llm' | 'demo';
   readonly minds = new Map<string, Mind>();
   readonly inference: ProviderChain;
+  parallelRequests: boolean;
   constructor(readonly engine: Engine, readonly store: Store, readonly config: {
     providers: ProviderConfig[]; maxTurns: number | null; retryDelayMs?: number;
   }) {
+    this.parallelRequests=store.loadParallelRequests();
     this.inference = new ProviderChain(config.providers);
     this.mode = this.inference.enabled ? 'llm' : 'demo';
     for (const entity of engine.entities.filter(e => e.controller === 'agent')) {
@@ -47,10 +52,12 @@ export class AgentRuntime {
       this.minds.set(entity.id, saved ? { ...saved, notes:saved.notes.slice(-PRIVATE_NOTE_LIMIT), modelTurns: saved.modelTurns ?? 0 } : { notes: [], turns: 0, modelTurns: 0, cycles: [] });
       if(engine.discoveries.get(entity.id)?.delete('unsafe-terrain-edge'))engine.event(entity.id,'knowledge-correction','Removed the generic terrain-edge discovery; only the deep-water island boundary is learned.',{removed:'unsafe-terrain-edge'});
       if (!engine.active(entity)) entity.status = 'disabled';
+      else if (entity.following) entity.status = 'following';
       else if (!entity.motion) entity.status = 'idle';
     }
   }
   persistence(): [string, unknown][] { return [...this.minds]; }
+  setParallelRequests(enabled:boolean) { this.store.saveParallelRequests(enabled);this.parallelRequests=enabled; }
   async prepareTurn(signal: AbortSignal, report: Report): Promise<PreparedTurn> {
     signal.throwIfAborted();
     const tick = this.engine.tick;
@@ -58,11 +65,13 @@ export class AgentRuntime {
     const inputs = [...this.minds].sort(([a], [b]) => a.localeCompare(b)).flatMap(([id, mind]) => {
       const entity = this.engine.entity(id);
       if (!this.engine.active(entity)) { report(id, { state: 'disabled' }); return []; }
-      if (entity.motion) { report(id, { state: 'moving' }); return []; }
+      if (entity.motion&&!entity.following) { report(id, { state: 'moving' }); return []; }
       if (this.mode === 'llm' && this.config.maxTurns !== null && mind.modelTurns >= this.config.maxTurns) { report(id, { state: 'turn limit' }); return []; }
       return [{ id, mind: clone(mind), observation: this.engine.observe(id) }];
     });
-    const decisions = await Promise.all(inputs.map(async ({ id, mind, observation }) => {
+    const parallelRequests=this.parallelRequests;
+    const prepare=async ({ id, mind, observation }:typeof inputs[number]) => {
+      signal.throwIfAborted();
       const cached = this.store.loadPending<PreparedDecision>(tick, id, this.inference.cacheKey);
       if (cached) { report(id, { state: 'ready' }); return cached; }
       mind.turns++;
@@ -74,7 +83,13 @@ export class AgentRuntime {
       this.store.savePending(tick, id, this.inference.cacheKey, prepared);
       report(id, { state: 'ready', attempts: prepared.attempts });
       return prepared;
-    }));
+    };
+    const decisions:PreparedDecision[]=[];
+    if(parallelRequests)decisions.push(...await Promise.all(inputs.map(prepare)));
+    else{
+      for(const input of inputs)report(input.id,{state:'waiting',message:'Queued for sequential inference; world time is held.'});
+      for(const input of inputs)decisions.push(await prepare(input));
+    }
     signal.throwIfAborted();
     return { tick, decisions };
   }
@@ -85,14 +100,17 @@ export class AgentRuntime {
     return{id,mind,observation,content:null,calls:[call],cycle,latencyMs:0,attempts:0,provider:'demo',model:'demo'};
   }
   private async request(id: string, mind: Mind, observation: Observation, signal: AbortSignal, report: Report): Promise<PreparedDecision> {
-    let reflectionPending=mind.turns%100===0;
+    let following=!!observation.self.following,stopFollowing=false,viewAngle=0;
+    const reflectionDue=Math.floor(mind.turns/100)>Math.floor((mind.lastReflectionTurn??0)/100);
+    let reflectionPending=reflectionDue&&!following;
     let reflection:PreparedDecision['reflection'];
-    const started = Date.now(), tools = worldTools(this.engine, id, mind,{reflection:reflectionPending});
+    const started = Date.now();
+    let tools = worldTools(this.engine, id, mind,{reflection:reflectionPending,following});
     const discoveries=[...(this.engine.discoveries.get(id)??[])];
     const learnedKnowledge=discoveries.map(knowledgeDescription).filter(knowledge=>!mind.notes.includes(knowledge));
     const hints=this.engine.module.agentHints?.(observation,new Set(discoveries))??[];
     if(discoveries.some(knowledge=>!mind.knownDiscoveries?.includes(knowledge)))hints.push('You have discovered something new. Learned facts are already remembered. You may use journal to note what you would like to try next.');
-    mind.knownDiscoveries=discoveries;
+    if(!following)mind.knownDiscoveries=discoveries;
     mind.lastEncounters??={};
     for(const notice of observation.encounters)mind.lastEncounters[notice.otherId]=Math.max(mind.lastEncounters[notice.otherId]??0,notice.tick);
     const listeners=observation.interactions.speak.filter(other=>(mind.lastSpoken?.[other.id]??-1)<(mind.lastEncounters![other.id]??0));
@@ -107,7 +125,7 @@ Private memory: ${JSON.stringify(mind.notes)}
 Learned knowledge: ${JSON.stringify(learnedKnowledge)}
 Last action result: ${JSON.stringify(observation.self.lastAction ?? mind.lastResult ?? null)}
 You may freely use journal to keep optional private notes about goals, plans, or things you want to do. Recent conversations fade; a note lets you resume an intention later. For example: "Return to the tree and investigate its wood." Your latest ${PRIVATE_NOTE_LIMIT} notes are remembered; older entries are forgotten. Writing takes no world time.
-Choose one embodied action. You may call look or journal first and will receive their results before choosing. Do not invent outcomes.`;
+Choose one embodied action. You may call look or journal first and will receive their results before choosing. While following someone, choose only follow or stop_follow; stopping gives you an immediate normal action. Voice directions and distances describe where a voice was when heard. Do not invent outcomes.`;
     delete mind.carryingReminder;
     const held=observation.self.inventory?.selected===null||!observation.self.inventory?undefined:observation.self.inventory.stacks[observation.self.inventory.selected];
     let reminder=held&&(mind.carriedMoves??0)>=10?carryingReminder(held.kind,held.contents):undefined;
@@ -120,7 +138,8 @@ Choose one embodied action. You may call look or journal first and will receive 
     }
     const reflectionQuestion='Pause to reflect: is there anything you want to keep in your private journal, such as a goal or something to try? Use journal to write it, or reflect with remember=false if there is nothing to save. Then choose your physical action. Reflection takes no world time.';
     const encounters=observation.encounters.filter(notice=>(mind.lastSpoken?.[notice.otherId]??-1)<notice.tick);
-    const initial={body:{position:observation.self.position,yaw:observation.self.yaw},perception:observation.description,navigation:observation.navigation,interactions:observation.interactions,heard:observation.heard,inventory:observation.self.inventory,...(encounters.length?{encounters}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{}),...(reflectionPending?{reflection:reflectionQuestion}:{})};
+    const normalContext={body:{position:observation.self.position,yaw:observation.self.yaw},perception:observation.description,navigation:observation.navigation,interactions:observation.interactions,heard:observation.heard,inventory:observation.self.inventory,...(encounters.length?{encounters}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{})};
+    const initial=following?{following:observation.following,heard:observation.heard,question:'Continue with follow, or use stop_follow to stop and choose another action immediately.'}:{...normalContext,...(reflectionPending?{reflection:reflectionQuestion}:{})};
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
     let attempts=0,supporting=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
     const complete=async()=>{
@@ -136,6 +155,7 @@ Choose one embodied action. You may call look or journal first and will receive 
       cycle.push({role:'assistant',content:answer.content,...(answer.calls.length?{tool_calls:answer.calls}:{})});
       const physical:ToolCall[]=[];
       const wasReflecting=reflectionPending;
+      const wasFollowing=following;
       for(const call of answer.calls){
         const tool=tools.find(candidate=>candidate.name===call.function.name);let result:unknown;
         if(!tool)result={ok:false,message:'Unknown tool.'};
@@ -147,16 +167,27 @@ Choose one embodied action. You may call look or journal first and will receive 
         else if(tool.name==='look'&&supporting++>=2)result={ok:false,message:'Use at most two look calls before acting. Journal remains freely available.'};
         else{try{result=tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{result={ok:false,message:'Invalid tool arguments.'};}}
         cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
+        if(call.function.name==='look'&&typeof (result as {viewAngle?:number})?.viewAngle==='number'){
+          viewAngle=(result as {viewAngle:number}).viewAngle;
+          tools=worldTools(this.engine,id,mind,{reflection:reflectionPending,following,viewAngle});
+        }
+        if(call.function.name==='stop_follow'&&(result as {ok?:boolean})?.ok){
+          following=false;stopFollowing=true;reflectionPending=reflectionDue;
+          mind.knownDiscoveries=discoveries;
+          tools=worldTools(this.engine,id,mind,{reflection:reflectionPending,following:false,viewAngle});
+        }
         if(reflectionPending&&['journal','reflect'].includes(call.function.name)&&(result as {ok?:boolean})?.ok){
           const args=JSON.parse(call.function.arguments);
           reflection={turn:mind.turns,note:call.function.name==='reflect'&&!args.remember?null:args.note.trim()};
           reflectionPending=false;
+          mind.lastReflectionTurn=mind.turns;
         }
       }
-      if(physical.length===1)return{id,mind,observation,content,calls:physical,cycle,latencyMs:Date.now()-started,attempts,provider,model,...(reminder?{reminder}:{}),...(hints.length?{hints}:{}),...(reflection?{reflection}:{}),...(usage===undefined?{}:{usage})};
+      if(physical.length===1)return{id,mind,observation,content,calls:physical,cycle,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(reflection?{reflection}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
       if(physical.length>1){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action.'})});}
-      if(wasReflecting&&!reflectionPending)cycle.push({role:'user',content:'Reflection complete. Choose one physical action; the world has not advanced.'});
-      else if(!answer.calls.length)cycle.push({role:'user',content:reflectionPending?'Use journal to save a note, or reflect with remember=false to decline.': 'Choose one available physical action, or wait explicitly.'});
+      if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify({...normalContext,message:'You can now choose another action at the same world instant.',...(reflectionPending?{reflection:reflectionQuestion}:{})})});
+      else if(wasReflecting&&!reflectionPending)cycle.push({role:'user',content:'Reflection complete. Choose one physical action; the world has not advanced.'});
+      else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose follow to continue, or stop_follow to stop and act immediately.':reflectionPending?'Use journal to save a note, or reflect with remember=false to decline.': 'Choose one available physical action, or wait explicitly.'});
     }
   }
   commit(turn: PreparedTurn) {
@@ -170,7 +201,7 @@ Choose one embodied action. You may call look or journal first and will receive 
     for (const decision of decisions) {
       const { id, observation, content, calls } = decision;
       if (!this.engine.active(this.engine.entity(id))) continue;
-      const previousMind=this.minds.get(id)!,mind = clone(decision.mind), tools = worldTools(this.engine, id, mind);
+      const previousMind=this.minds.get(id)!,mind = clone(decision.mind);
       if (this.mode === 'llm') {
         this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, reminder:decision.reminder??null, hints:decision.hints??[], reflection:decision.reflection??null, turn: mind.turns });
         if(decision.reflection)this.engine.event(id,'reflection',decision.reflection.note?'Chose to save a private note during reflection.':'Chose not to add a private note during reflection.',decision.reflection);
@@ -179,6 +210,8 @@ Choose one embodied action. You may call look or journal first and will receive 
         });
       }
       const cycle:Message[]=clone(decision.cycle);
+      if(decision.stopFollowing)this.engine.act(id,{action:'stop_follow'});
+      const tools=worldTools(this.engine,id,mind,{viewAngle:decision.viewAngle});
       for (const call of calls) {
         let result: unknown;
         try {
@@ -224,6 +257,7 @@ function carryingReminder(kind:string,contents?:string) {
 // Deliberately deterministic and labelled in the UI. This is a mechanical demo,
 // not evidence of LLM behavior. It uses exactly the same local observations/tools.
 function demoAction(o: Observation, turn: number, id: string): Action {
+  if(o.self.following)return {action:'follow'};
   const phase = (turn + (id === 't2' ? 4 : 0)) % 16;
   const eye = [o.self.position[0], o.self.position[1] + 1.5, o.self.position[2]] as [number,number,number];
   const nearby = o.blocks.filter(b => distance(eye, [b[0]+.5,b[1]+.5,b[2]+.5]) < 2.9);

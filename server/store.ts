@@ -88,6 +88,8 @@ export class Store {
   savePending(tick: number, actor: string, model: string, value: unknown) {
     this.db.prepare('INSERT OR REPLACE INTO pending_decisions VALUES (?, ?, ?, ?)').run(tick, actor, model, JSON.stringify(value));
   }
+  loadParallelRequests() { return (this.db.prepare('SELECT value FROM meta WHERE key = ?').get('parallelRequests') as {value:string}|undefined)?.value !== 'false'; }
+  saveParallelRequests(enabled:boolean) { this.db.prepare('INSERT OR REPLACE INTO meta VALUES (?, ?)').run('parallelRequests',String(enabled)); }
   close() { this.db.close(); }
 }
 
