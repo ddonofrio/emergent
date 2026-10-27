@@ -174,7 +174,7 @@ test('a visible trunk face can be struck even when its centre is hidden by the u
 test('full inventories omit pickup, storing only frees hands, and arguments select real local items and stacks',()=>{
   const engine=fixture(),actor=engine.entity('t1'),memory={notes:[]};
   engine.bodies.push({id:'near-arrow',kind:'arrow',position:[.5,1.2,1.5],velocity:[0,0,0],resting:true});
-  actor.inventory={stacks:['wood','sand','stone','grass','dirt','leaves','plant','plank','knife','spear'].map(kind=>({kind,count:64})),selected:0,capacity:640};
+  actor.inventory={stacks:['wood','sand','stone','grass','dirt','leaves','stick','plank','knife','spear'].map(kind=>({kind,count:64})),selected:0,capacity:640};
   assert.equal((worldTools(engine,'t1',memory).find(tool=>tool.name==='store')!.invoke({}) as any).ok,true);
   const inventory=inventoryContext(engine.observe('t1'));
   assert.equal(inventory.stackSlots,10);assert.equal(inventory.freeStackSlots,0);assert.equal(inventory.maxPerStack,64);assert.equal(inventory.hand,null);
@@ -425,6 +425,17 @@ test('every block cracks twice, breaks on the third hit and conserves inventory'
   assert.equal(engine.voxels.cells.size,before);
   assert.equal(engine.entity('t1').inventory,null);
 });
+test('striking faces the target and plants become loose stick-shaped items',()=>{
+  const engine=fixture([[1,1,0,'plant']]),actor=engine.entity('t1');actor.yaw=270;
+  assert.match(engine.act('t1',{action:'hit',target:[1,1,0]}).message,/Thin cracks/);
+  assert.equal(actor.yaw,90);
+  assert.match(engine.act('t1',{action:'hit',target:[1,1,0]}).message,/cracks spread/);
+  assert.match(engine.act('t1',{action:'hit',target:[1,1,0]}).message,/pick up a stick/);
+  assert.equal(engine.held(actor)?.kind,'stick');
+  assert.equal(engine.act('t1',{action:'place',target:[0,1,1]}).ok,true);
+  assert.equal(engine.voxels.get([0,1,1]),undefined);
+  assert.equal(engine.bodies[0].kind,'stick');assert.equal(engine.bodies[0].resting,true);
+});
 test('crafting, block breaking and the deep-water limit are journaled once per creature',()=>{
   const engine=fixture([[1,1,0,'wood']]);
   for(let hit=0;hit<3;hit++)engine.act('t1',{action:'hit',target:[1,1,0]});
@@ -536,7 +547,7 @@ test('bucket stacks split and merge by contents while dirt filling conserves one
   assert.deepEqual(engine.entity('t1').inventory!.stacks,[{kind:'bucket',count:64}]);
 });
 test('ten distinct stacks admit matching items up to sixty-four and reject an eleventh kind',()=>{
-  const kinds=['grass','dirt','sand','stone','wood','leaves','plant','bucket','plank','spear'];
+  const kinds=['grass','dirt','sand','stone','wood','leaves','stick','bucket','plank','spear'];
   const inventory={stacks:kinds.map(kind=>({kind,count:64})),selected:null,capacity:640};
   assert.equal(exchangeInventory(inventory,[],[{kind:'knife',count:1}]),undefined);
   assert.equal(exchangeInventory(inventory,[],[{kind:'wood',count:1}]),undefined);
@@ -549,7 +560,7 @@ test('ten distinct stacks admit matching items up to sixty-four and reject an el
 
 test('full inventory rejects bucket splitting and crafting atomically but permits slot reuse',()=>{
   const engine=fixture([[1,1,0,'sand']]),actor=engine.entity('t1');
-  const other=['grass','dirt','stone','wood','leaves','plant','plank','spear','knife'].map(kind=>({kind,count:2}));
+  const other=['grass','dirt','stone','wood','leaves','stick','plank','spear','knife'].map(kind=>({kind,count:2}));
   actor.inventory={stacks:[{kind:'bucket',count:2},...other],selected:0,capacity:640};
   const before=structuredClone(actor.inventory);
   assert.equal(engine.act('t1',{action:'fill',target:[1,1,0]}).ok,false);
@@ -569,7 +580,7 @@ test('full inventory rejects bucket splitting and crafting atomically but permit
 
 test('bucket emptying and door joining preserve resources when their result cannot fit',()=>{
   const engine=fixture(),actor=engine.entity('t1');
-  const other=['grass','dirt','stone','wood','leaves','plant','plank','spear','knife'].map(kind=>({kind,count:2}));
+  const other=['grass','dirt','stone','wood','leaves','stick','plank','spear','knife'].map(kind=>({kind,count:2}));
   actor.inventory={stacks:[{kind:'bucket',count:2,contents:'sand'},...other],selected:0,capacity:640};
   const before=structuredClone(actor.inventory);
   assert.equal(engine.act('t1',{action:'empty',target:[1,1,0]}).ok,false);
@@ -585,6 +596,15 @@ test('resuming merges legacy bucket stacks by contents and preserves the selecte
   const actor=entity();actor.inventory={stacks:[{kind:'bucket',count:1},{kind:'bucket',count:2,water:true},{kind:'bucket',count:3},{kind:'bucket',count:1,contents:'water'}],selected:3,capacity:64};
   const engine=fixture([],[actor]);
   assert.deepEqual(engine.entity('t1').inventory,{stacks:[{kind:'bucket',count:4},{kind:'bucket',count:3,contents:'water'}],selected:1,capacity:640});
+});
+
+test('resuming converts legacy carried and loose plants into sticks',()=>{
+  const actor=entity();actor.inventory={stacks:[{kind:'plant',count:2}],selected:0,capacity:64};
+  const engine=fixture([],[actor]),state=engine.state();
+  assert.deepEqual(engine.held(engine.entity('t1')),{kind:'stick',count:2});
+  state.bodies.push({id:'legacy-plant',kind:'plant',position:[1.5,1.5,1.5],velocity:[0,0,0],resting:true});
+  const resumed=new Engine(engine.module,state);
+  assert.equal(resumed.bodies[0].kind,'stick');
 });
 
 test('supporting blocks reject damage with a clear creature-specific error',()=>{

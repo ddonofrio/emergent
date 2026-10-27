@@ -167,9 +167,11 @@ export class WorldView {
   }
   private heldVisual(kind: string, color: string, inHand=true) {
     const visual=new THREE.Group();visual.userData.kind=kind;
-    if(inHand){if(kind==='spear')visual.position.set(0,-.565,.4);else visual.position.set(.36,1,.38);}
+    if(inHand){if(kind==='spear'||kind==='stick')visual.position.set(0,-.565,.4);else visual.position.set(.36,1,.38);}
     const material=(value:string)=>{const result=new THREE.MeshStandardMaterial({color:value,roughness:.86});result.userData.activeColor=value;return result;};
-    if(kind==='arrow'||kind==='spear'){
+    if(kind==='stick'){
+      const shaft=new THREE.Mesh(new THREE.CylinderGeometry(.035,.05,.68,7),material(color));shaft.rotation.x=Math.PI/2;shaft.rotation.z=.08;shaft.castShadow=true;visual.add(shaft);
+    }else if(kind==='arrow'||kind==='spear'){
       const length=kind==='spear' ? .85 : .9,radius=kind==='spear' ? .045 : .025;
       const shaft=new THREE.Mesh(new THREE.CylinderGeometry(radius,radius,length,8),material(color));shaft.rotation.x=Math.PI/2;shaft.castShadow=true;visual.add(shaft);
       const tip=new THREE.Mesh(new THREE.ConeGeometry(kind==='spear' ? .09 : .075,kind==='spear' ? .27 : .18,8),material(color));tip.rotation.x=Math.PI/2;tip.position.z=kind==='spear' ? .52 : .53;tip.castShadow=true;visual.add(tip);
@@ -267,7 +269,7 @@ export class WorldView {
         const carried=e.inventory?.selected===null||!e.inventory?undefined:e.inventory.stacks[e.inventory.selected];
         if (carried) {
           const color=this.manifest!.materials[carried.kind]?.color??'#ffffff';
-          if (!held || held.userData.kind!==carried.kind) { if(held)this.disposeItemVisual(held);held=this.heldVisual(carried.kind,color);const hand=carried.kind==='spear'?group.getObjectByName('arm-right'):undefined;(hand??group).add(held);this.held.set(e.id,held);group.userData.enabled=undefined; }
+          if (!held || held.userData.kind!==carried.kind) { if(held)this.disposeItemVisual(held);held=this.heldVisual(carried.kind,color);const hand=carried.kind==='spear'||carried.kind==='stick'?group.getObjectByName('arm-right'):undefined;(hand??group).add(held);this.held.set(e.id,held);group.userData.enabled=undefined; }
           held.visible = true;
         } else if (held) held.visible = false;
         this.styleEntity(group,enabled);
@@ -295,7 +297,7 @@ export class WorldView {
         let object = this.objects.get(b.id);
         if (!object) {
           const color=this.manifest!.materials[b.kind]?.color??'#ffffff';
-          if(['arrow','spear','shovel','plank','door_half_up','door_half_down','door'].includes(b.kind))object=this.heldVisual(b.kind,color,false);else{const mesh=new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial({color}));mesh.scale.setScalar(.56);mesh.castShadow=true;object=mesh;}
+          if(['stick','arrow','spear','shovel','plank','door_half_up','door_half_down','door'].includes(b.kind))object=this.heldVisual(b.kind,color,false);else{const mesh=new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial({color}));mesh.scale.setScalar(.56);mesh.castShadow=true;object=mesh;}
           this.scene.add(object);this.objects.set(b.id,object);
         }
         const previous = this.prior?.bodies.find(p => p.id === b.id) ?? b; object.position.set(...previous.position).lerp(new THREE.Vector3(...b.position),alpha);

@@ -14,7 +14,7 @@ export function normalizeInventory(value: unknown): Inventory | null {
   const stacks: Stack[] = [];
   let hand: number | null = null;
   for (const [index, old] of original.entries()) {
-    const stack: Stack = { kind: old.kind, count: old.count, ...((old.contents || old.water) ? { contents: old.contents || 'water' } : {}) };
+    const stack: Stack = { kind: old.kind === 'plant' ? 'stick' : old.kind, count: old.count, ...((old.contents || old.water) ? { contents: old.contents || 'water' } : {}) };
     let match = stacks.findIndex(item => same(item, stack));
     if (match < 0) { match = stacks.length; stacks.push(stack); }
     else stacks[match].count += stack.count;

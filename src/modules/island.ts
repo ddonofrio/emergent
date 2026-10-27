@@ -39,6 +39,7 @@ export const island: WorldModule = {
       wood: { color: '#886147', solid: true, floats: true },
       leaves: { color: '#477b51', solid: true, floats: true },
       plant: { color: '#94ad61', solid: false, floats: true },
+      stick: { color: '#795334', solid: true, floats: true },
       bucket: { color: '#b98b58', solid: true, floats: true, stackLimit: 64, vessel: true },
       plank: { color: '#a17a55', solid: true, floats: true },
       spear: { color: '#9b714d', solid: true, floats: true },
@@ -109,7 +110,7 @@ export const island: WorldModule = {
     const nearWater=observation.self.position[1]<=waterLevel+1||observation.navigation.paths.some(path=>path.issue?.kind==='water');
     if(knowledge==='blocks-break-after-three-hits')return !held&&observation.interactions.hit.length>0;
     if(knowledge==='deep-water-limit')return nearWater;
-    if(knowledge==='thrown-blocks-settle')return !!held&&['dirt','grass','sand','stone','wood','leaves','plant'].includes(held.kind);
+    if(knowledge==='thrown-blocks-settle')return !!held&&['dirt','grass','sand','stone','wood','leaves'].includes(held.kind);
     if(knowledge==='nonfloating-objects-sink')return nearWater&&!!held;
     if(knowledge==='wood-shape:door')return !!inventory?.stacks.some(stack=>stack.kind==='door_half_up'||stack.kind==='door_half_down');
     if(knowledge.startsWith('wood-shape:'))return held?.kind==='wood';

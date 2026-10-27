@@ -68,7 +68,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
     action('walk','Walk; stop before obstacles or unsafe terrain.',movement(32),'walk'),
     action('turn','Turn your body and forward view.',object({angle:{type:'number',description:'Degrees (-360..360); negative left, positive right.'}},['angle']),'turn'),
   ];
-  const raw=held&&['dirt','grass','sand','stone','wood','leaves','plant'].includes(held.kind);
+  const raw=held&&['dirt','grass','sand','stone','wood','leaves'].includes(held.kind);
   if(raw)tools.push(tool('run',`Disabled while you hold ${held!.kind}; store, place, or throw it before running.`,movement(24),false,()=>({ok:false,message:`Run is unavailable while you hold ${held!.kind}. Store, place, or throw it first.`})));
   else tools.push(action('run','Run across clear terrain at twice the speed of walking.',movement(24),'run'));
   tools.push(action('jump','Jump up one block or across a gap; unsafe landings are refused.',object({distance:{type:'number',description:'Metres from here: 0.75..2.5, default 2; use the checked jump when given.'},angle:{type:'number',description:'Body-relative degrees (-90..90).'}}),'jump'));

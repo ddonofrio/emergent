@@ -8,7 +8,7 @@ const ok = (message: string): ActionResult => ({ ok: true, message });
 const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
 const center = (p: Vec3): Vec3 => p.map(v => v + .5) as Vec3;
 const faces: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
-const rawBlock = (kind: string) => ['grass','dirt','sand','stone','wood','leaves','plant'].includes(kind);
+const rawBlock = (kind: string) => ['grass','dirt','sand','stone','wood','leaves'].includes(kind);
 
 export class Engine {
   readonly voxels: Voxels;
@@ -32,7 +32,7 @@ export class Engine {
     for (const [voxel, damage] of Object.entries((state as WorldState | undefined)?.blockDamage ?? {})) this.blockDamage.set(voxel, damage);
     for (const [actor, learned] of Object.entries((state as WorldState | undefined)?.discoveries ?? {})) this.discoveries.set(actor,new Set(learned));
     if (state) {
-      this.tick = state.tick; this.bodies = clone(state.bodies); this.lost = state.lost;
+      this.tick = state.tick; this.bodies = clone(state.bodies).map(body=>body.kind==='plant'?{...body,kind:'stick'}:body); this.lost = state.lost;
       for (const [id, messages] of Object.entries(state.inbox ?? {})) this.inbox.set(id, clone(messages));
       for(const [id,contacts] of Object.entries(state.contacts??{}))this.contacts.set(id,new Set(contacts));
       for(const [id,notices] of Object.entries(state.encounterNotices??{}))this.encounterNotices.set(id,clone(notices));
@@ -545,15 +545,18 @@ export class Engine {
       if(usingShovel&&!['sand','dirt','grass'].includes(kind))return fail('The wooden shovel can remove only sand, dirt, or grass in one strike.');
       const supported=this.standingOn(target);
       if(supported)return fail(`You cannot strike that block because ${supported.name} is standing on it.`);
+      e.yaw=((Math.atan2(point[0]-e.position[0],point[2]-e.position[2])*180/Math.PI)%360+360)%360;
       const voxel=key(target),damage=(this.blockDamage.get(voxel)??0)+1;
       if(!usingShovel&&damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`);}
       this.blockDamage.delete(voxel);this.voxels.set(target,null);const sawCollapse=this.collapseUnsupportedTree(target,e);this.wakeBodies();if(!usingShovel)this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
-      const heldResult=this.canHold(e,kind);
-      if(heldResult.ok)this.addInventory(e,kind,undefined,!usingShovel);
-      else this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind,position:center(target),velocity:[0,0,0],resting:false});
+      const collected=kind==='plant'?'stick':kind,heldResult=this.canHold(e,collected);
+      if(heldResult.ok)this.addInventory(e,collected,undefined,!usingShovel);
+      else this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:collected,position:center(target),velocity:[0,0,0],resting:false});
       const result=usingShovel
         ?heldResult.ok?`The wooden shovel removes the ${kind} block in one strike. You pick it up.`:`The wooden shovel removes the ${kind}, but it falls loose because your inventory is full.`
-        :heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`;
+        :kind==='plant'
+          ?heldResult.ok?'The plant breaks. You pick up a stick.':'The plant breaks, but the stick falls loose because your inventory is full.'
+          :heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`;
       return ok(result+(sawCollapse?' The unsupported part of the tree falls into loose blocks.':''));
     }
     if (a.action === 'fill') {
