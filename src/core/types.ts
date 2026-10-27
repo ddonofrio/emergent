@@ -29,6 +29,11 @@ export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'p
 export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: number; clearance: number; approach?: { distance:number; angle:number }; jump?: { distance:number; angle:number }; }
 export interface NavigationReport { checkedDistance: number; paths: (NavigationPath & { issue?: MovementIssue; options?: string[] })[]; blockedAfter?: number; }
 export interface ActionResult { ok: boolean; message: string; navigation?: NavigationReport; feedback?: Record<string, unknown>; }
+export interface InteractionTargets {
+  hit: { target: Vec3; kind: string; cracks: number }[];
+  pickup: { itemId: string; kind: string; metres: number }[];
+  speak: { id: string; name: string }[];
+}
 export interface Observation {
   tick: number; time: number; self: Entity; blocks: Block[];
   entities: Pick<Entity, 'id' | 'name' | 'kind' | 'position'>[];
@@ -36,6 +41,7 @@ export interface Observation {
   encounters: (EncounterNotice & {canSpeakNow:boolean})[];
   surfaces: { kind: string; count: number; nearest: Vec3 }[];
   navigation: NavigationReport;
+  interactions: InteractionTargets;
   description: string; truncated: boolean;
 }
 export interface WorldModule {
@@ -45,6 +51,7 @@ export interface WorldModule {
   canEnter(entity: Entity, feet: Vec3): ActionResult;
   describeObstacle?(issue: MovementIssue): string | undefined;
   encounterMessage?(observer:Entity,other:Entity,metres:number):string|undefined;
+  agentHints?(observation:Observation,learned:ReadonlySet<string>):string[];
 }
 export const key = (p: Vec3) => p.join(',');
 export const unkey = (value: string): Vec3 => value.split(',').map(Number) as Vec3;

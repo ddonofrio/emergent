@@ -56,6 +56,100 @@ function run(engine: Engine, store: Store, url: string, maxTurns: number | null 
   return {runtime,clock,frames,failures,advance(ms:number){wall+=ms;clock.pump();}};
 }
 
+test('wood hints follow stored and held wood until a shape is discovered; discovery suggests an optional intention note once',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+    const actions:Action[]=[{action:'store'},{action:'hold',stack:0},{action:'strike_held',impact:[.5,1,.5]},{action:'wait'},{action:'wait'}];
+    for(const [index,action] of actions.entries()){
+      r.clock.pump();await until(()=>p.requests.length===index+1);
+      const prompt=JSON.parse(p.requests[index].body.messages.at(-1).content),hints=(prompt.hints??[]).join(' ');
+      assert.ok(prompt.interactions);
+      if(index<3)assert.match(hints,/striking it could shape it into useful things/);
+      else assert.doesNotMatch(hints,/striking it could shape/);
+      if(index===1){assert.match(hints,/hold with stack=0/);assert.equal(p.requests[index].body.tools.some((tool:any)=>tool.function.name==='strike_held'),false);}
+      if(index===0||index===2){assert.match(prompt.perception,/experiment.*strike_held/);assert.doesNotMatch(prompt.perception,/Store or place.*before striking/);}
+      if(index===3)assert.match(hints,/Learned facts are already remembered.*journal/);
+      if(index===4)assert.doesNotMatch(hints,/discovered something new/);
+      respond(p.requests[index],action);await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    }
+    assert.deepEqual(r.runtime.minds.get('t1')!.notes,[],'No note or goal is invented automatically.');
+    assert.ok(store.eventsAt(engine.tick,'t1').some(event=>event.type==='observation'&&(event.data as any).hints.some((hint:string)=>hint.includes('striking it could shape'))));
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('social hints repeat until heard speech, survive restart and return only for a new encounter',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest);
+  engine.entity('t1').yaw=90;engine.entity('t2').yaw=270;
+  let runtime=new AgentRuntime(engine,store,{providers:[{id:'stub',name:'Stub',apiKey:'test',baseUrl:p.url,model:'stub-model'}],maxTurns:null});
+  const turn=async(actions:Record<string,Action>,expected:Record<string,boolean>)=>{
+    const start=p.requests.length,pending=runtime.prepareTurn(new AbortController().signal,()=>{});
+    await until(()=>p.requests.length===start+2);
+    for(const request of p.requests.slice(start)){
+      const prompt=JSON.parse(request.body.messages.at(-1).content);
+      assert.equal((prompt.hints??[]).some((hint:string)=>hint.includes('good to greet')),expected[request.id],request.id);
+      respond(request,actions[request.id]);
+    }
+    const prepared=await pending;engine.step(()=>runtime.commit(prepared));for(let tick=1;tick<20;tick++)engine.step();
+    store.record(engine.frame(),engine.state(),runtime.persistence());
+  };
+  try{
+    await turn({t1:{action:'wait'},t2:{action:'wait'}},{t1:true,t2:true});
+    await turn({t1:{action:'say',word:'hey'},t2:{action:'wait'}},{t1:true,t2:true});
+    runtime=new AgentRuntime(engine,store,runtime.config);
+    await turn({t1:{action:'wait'},t2:{action:'say',word:'yes'}},{t1:false,t2:true});
+    await turn({t1:{action:'wait'},t2:{action:'wait'}},{t1:false,t2:false});
+    engine.setEntityEnabled('t2',false);engine.step();engine.setEntityEnabled('t2',true);engine.step();
+    await turn({t1:{action:'wait'},t2:{action:'wait'}},{t1:true,t2:true});
+    assert.deepEqual(runtime.minds.get('t1')!.notes,[]);
+  }finally{store.close();p.close();}
+});
+
+test('unheard speech does not dismiss a social hint',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  engine.entity('t1').yaw=90;engine.entity('t2').yaw=270;
+  try{
+    r.clock.pump();await until(()=>p.requests.length===2);
+    const t1=p.requests.find(request=>request.id==='t1')!;
+    assert.ok(JSON.parse(t1.body.messages.at(-1).content).hints.some((hint:string)=>hint.includes('good to greet')));
+    engine.entity('t2').position=[30,1,.5];for(const request of p.requests)respond(request,request.id==='t1'?{action:'say',word:'hey'}:{action:'wait'});
+    await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.match(engine.entity('t1').lastAction!.message,/nobody/);assert.deepEqual(r.runtime.minds.get('t1')!.lastSpoken,{});
+    engine.entity('t2').position=[1.5,1,.5];r.clock.pump();await until(()=>p.requests.length===4);
+    const next=p.requests.slice(2).find(request=>request.id==='t1')!;
+    assert.ok(JSON.parse(next.body.messages.at(-1).content).hints.some((hint:string)=>hint.includes('good to greet')));
+    for(const request of p.requests.slice(2))respond(request,{action:'wait'});
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('every hundred decisions requires an optional reflection before acting, without advancing time or inventing notes',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);r.runtime.minds.get('t1')!.turns=99;
+    r.clock.pump();await until(()=>p.requests.length===1);
+    assert.match(JSON.parse(p.requests[0].body.messages.at(-1).content).reflection,/anything you want to keep/);
+    assert.equal(p.requests[0].body.tools.some((tool:any)=>tool.function.name==='walk'),false);
+    respond(p.requests[0],{action:'wait'});await until(()=>p.requests.length===2);assert.equal(engine.tick,0);
+    respondTool(p.requests[1],'reflect',{remember:false});await until(()=>p.requests.length===3);
+    assert.equal(engine.tick,0);assert.equal(p.requests[2].body.tools.some((tool:any)=>tool.function.name==='walk'),true);
+    assert.equal(p.requests[2].body.tools.some((tool:any)=>tool.function.name==='reflect'),false);
+    respond(p.requests[2],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.deepEqual(r.runtime.minds.get('t1')!.notes,[]);assert.equal(r.runtime.minds.get('t1')!.turns,100);
+    assert.equal((store.eventsAt(engine.tick,'t1').find(event=>event.type==='reflection')!.data as any).note,null);
+    r.clock.pump();await until(()=>p.requests.length===4);assert.equal(JSON.parse(p.requests[3].body.messages.at(-1).content).reflection,undefined);
+    respond(p.requests[3],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    r.runtime.minds.get('t1')!.turns=199;r.clock.pump();await until(()=>p.requests.length===5);
+    const note='I want to investigate the wood near the shore.';
+    respondTool(p.requests[4],'journal',{note});await until(()=>p.requests.length===6);
+    assert.equal(engine.tick,40);assert.deepEqual(r.runtime.minds.get('t1')!.notes,[],'Reflection notes remain staged until the shared commit.');
+    respond(p.requests[5],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.deepEqual(store.memoryAt(engine.tick,'t1'),[note]);
+    const reflections=store.eventsAt(engine.tick,'t1').filter(event=>event.type==='reflection');
+    assert.deepEqual(reflections.map(event=>(event.data as any).turn),[100,200]);
+    assert.equal((reflections[1].data as any).note,note);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
 test('both decisions share one instant; response order and 90 seconds of waiting cannot move the duck or physics',async()=>{
   const simulate=async(first:string)=>{
     const p=await provider(), engine=world(), store=new Store(':memory:',engine.module.manifest), r=run(engine,store,p.url);

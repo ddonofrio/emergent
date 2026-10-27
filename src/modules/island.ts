@@ -63,6 +63,11 @@ export const island: WorldModule = {
   encounterMessage(observer,other,metres){
     if(observer.kind==='troglodyte'&&other.kind==='troglodyte')return `You see ${other.name}, another Troglodyte, ${metres.toFixed(1)} metres away. You can use say to speak to them if you wish.`;
   },
+  agentHints(observation,learned){
+    const inventory=observation.self.inventory,stack=inventory?.stacks.findIndex(item=>item.kind==='wood')??-1;
+    if(stack<0||[...learned].some(knowledge=>knowledge.startsWith('wood-shape:')))return [];
+    return [`The wood you carry looks as though striking it could shape it into useful things. ${inventory!.selected===stack?'You can experiment with strike_held.':`Use hold with stack=${stack} to take it in your hands, then experiment with strike_held.`}`];
+  },
   canEnter(entity, feet) {
     return waterLevel - feet[1] > entity.height / 2
       ? { ok: false, message: 'Refused: the water would rise above half my height.' }

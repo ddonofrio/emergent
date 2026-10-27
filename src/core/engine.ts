@@ -107,10 +107,22 @@ export class Engine {
     const navigation = this.navigationReport(e);
     const items = clone(this.bodies.filter(b => this.visible(e, b.position)));
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
+    const emptyHands=!this.held(e);
+    const interactions = {
+      hit: emptyHands ? blocks.filter(block=>{
+        const target=block.slice(0,3) as Vec3;
+        return distance(eye,center(target))<=3&&this.voxels.clearLine(eye,center(target),true)&&!this.standingOn(target);
+      }).sort((a,b)=>Number(b[3]==='wood')-Number(a[3]==='wood')||(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0))
+        .slice(0,2).map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
+      pickup: emptyHands ? items.filter(item=>distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents).ok)
+        .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).slice(0,3).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
+      speak: entities.filter(other=>this.canSpeakTo(e,this.entity(other.id))).map(({id,name})=>({id,name})),
+    };
     return { tick: this.tick, time: this.time, self: clone(e), blocks: [...samples.values()].slice(0,maxBlocks), surfaces: [...surfaces.values()], entities,
       items, heard: clone((this.inbox.get(id) ?? []).filter(m => this.tick - m.tick < 1200)),
       encounters:clone((this.encounterNotices.get(id)??[]).map(notice=>({...notice,canSpeakNow:this.canSpeakTo(e,this.entity(notice.otherId))}))),
       navigation,
+      interactions,
       description, truncated: blocks.length > maxBlocks };
   }
   acknowledgeEncounters(id:string,notices:EncounterNotice[]){
@@ -144,7 +156,7 @@ export class Engine {
         const jump=path.jump&&Math.abs(turn)<=90?{...path.jump,angle:turn}:undefined;
         return {...path,turn,options:path.options?.filter(option=>option!=='jump'||!!jump),approach:path.approach?{...path.approach,angle:turn}:undefined,jump};
       });
-      return {description:observation.description,viewAngle:angle,bodyYaw:yaw,navigation:{...observation.navigation,paths}};
+      return {description:observation.description,viewAngle:angle,bodyYaw:yaw,navigation:{...observation.navigation,paths},interactions:observation.interactions};
     }
     finally { entity.yaw = yaw; }
   }
@@ -164,7 +176,8 @@ export class Engine {
     const held = this.held(e);
     parts.push(held ? `You hold ${held.count > 1 ? `${held.count} x ` : ''}${held.kind}${held.contents ? ` containing ${held.contents}` : ''}.` : 'Your hands are empty.');
     const nearbyWood=surfaces.find(surface=>surface.kind==='wood'&&distance(this.eye(e),center(surface.nearest))<=3);
-    if(held&&nearbyWood)parts.push('Your hands are occupied. Store or place what you hold before striking the nearby wood.');
+    if(held?.kind==='wood')parts.push('You can experiment on the wood in your hands with strike_held, or place, throw, or store it.');
+    else if(held&&nearbyWood)parts.push('Your hands are occupied. Store or place what you hold before striking the nearby wood.');
     const forward = navigation.paths.find(path => path.turn === 0)!;
     if (forward.issue) {
       parts.push(`${forward.issue.message} It is about ${forward.clearance.toFixed(1)} m ahead.`);
@@ -291,6 +304,9 @@ export class Engine {
     this.event(id, result.ok ? 'action' : 'rejected', result.message, { action, result });
     return result;
   }
+  private standingOn(target:Vec3) {
+    return this.entities.find(other=>this.active(other)&&Math.floor(other.position[0])===target[0]&&Math.floor(other.position[2])===target[2]&&Math.abs(other.position[1]-(target[1]+1))<.05);
+  }
   private execute(e: Entity, a: Action): ActionResult {
     if (e.motion) return fail('Wait until your movement finishes.');
     if (a.action === 'wait') { e.status = 'idle'; return ok('Waiting and watching.'); }
@@ -346,11 +362,18 @@ export class Engine {
         this.inbox.set(other.id, inbox.slice(-16));
       }
       e.speech = { word: a.word!, until: this.time + 4 };
-      return ok(`Said "${a.word}". Heard by ${recipients.map(r => r.name).join(', ') || 'nobody'}.`);
+      return {ok:true,message:`Said "${a.word}". Heard by ${recipients.map(r => r.name).join(', ') || 'nobody'}.`,feedback:{recipientIds:recipients.map(recipient=>recipient.id)}};
     }
     if (a.action === 'pickup') {
       const body = this.bodies.find(b => b.id === a.itemId);
-      if (!body || distance(this.eye(e), body.position) > 3 || !this.voxels.clearLine(this.eye(e), body.position)) return fail('The item is not within clear reach.');
+      if(!body){
+        const settled=this.recentEvents.findLast(event=>event.type==='settled'&&(event.data as {itemId?:string})?.itemId===a.itemId);
+        const target=(settled?.data as {target?:Vec3}|undefined)?.target;
+        const kind=target&&this.voxels.get(target);
+        if(target&&kind&&this.visible(e,center(target),true))return fail(`That item has settled into ${kind} terrain at block [${target.join(',')}]. It is no longer loose; you can hit the block when it is within reach and your hands are empty.`);
+        return fail('That item is no longer loose here. Use look and the current interactions.pickup item IDs; raw loose blocks can settle into terrain.');
+      }
+      if (distance(this.eye(e), body.position) > 3 || !this.voxels.clearLine(this.eye(e), body.position)) return fail('The loose item is not within clear arm reach (3 metres). Use look for current interactions.pickup targets.');
       const result = this.canHold(e, body.kind,body.contents);
       if (!result.ok) return result;
       this.addInventory(e, body.kind, body.contents??(body.water?'water':undefined),true); this.bodies = this.bodies.filter(b => b !== body);
@@ -400,21 +423,22 @@ export class Engine {
     if (a.action === 'hit') {
       if(this.held(e))return fail('You cannot strike the world while holding an object. Store, place, or throw it first.');
       if (!kind) return fail('There is nothing to hit.');
-      const supported=this.entities.find(other=>this.active(other)&&Math.floor(other.position[0])===target[0]&&Math.floor(other.position[2])===target[2]&&Math.abs(other.position[1]-(target[1]+1))<.05);
+      const supported=this.standingOn(target);
       if(supported)return fail(`You cannot strike that block because ${supported.name} is standing on it.`);
       const voxel=key(target),damage=(this.blockDamage.get(voxel)??0)+1;
       if(damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return ok(damage===1?`You strike the ${kind}. Thin cracks appear across it.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`);}
-      this.blockDamage.delete(voxel);this.voxels.set(target,null);this.collapseUnsupportedTree(target);this.wakeBodies();this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
+      this.blockDamage.delete(voxel);this.voxels.set(target,null);const sawCollapse=this.collapseUnsupportedTree(target,e);this.wakeBodies();this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
       const heldResult=this.canHold(e,kind);
       if(heldResult.ok)this.addInventory(e,kind,undefined,true);
       else this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind,position:center(target),velocity:[0,0,0],resting:false});
-      return ok(heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`);
+      const result=heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`;
+      return ok(result+(sawCollapse?' The unsupported part of the tree falls into loose blocks.':''));
     }
     if (a.action === 'fill') {
       const held=this.held(e);if(!held||held.kind!=='bucket'||held.contents)return fail('You need to hold an empty bucket.');
       if(!kind&&point[1]<this.module.manifest.waterLevel){held.contents='water';return ok('You lower the bucket into the water and lift it full.');}
       if(kind!=='dirt'&&kind!=='sand')return fail('The bucket can currently be filled from water, dirt, or sand.');
-      const supported=this.entities.find(other=>this.active(other)&&Math.floor(other.position[0])===target[0]&&Math.floor(other.position[2])===target[2]&&Math.abs(other.position[1]-(target[1]+1))<.05);
+      const supported=this.standingOn(target);
       if(supported)return fail(`You cannot take that ${kind}; ${supported.name} is standing on it.`);
       this.voxels.set(target,null);this.blockDamage.delete(key(target));held.contents=kind;return ok(`You fill the bucket with one block of ${kind}.`);
     }
@@ -450,8 +474,9 @@ export class Engine {
     if(e.controller!=='agent')return;
     if(issue.kind==='water')this.discover(e.id,'deep-water-limit',knowledgeDescription('deep-water-limit'),{issue});
   }
-  private collapseUnsupportedTree(removed:Vec3){
+  private collapseUnsupportedTree(removed:Vec3,observer:Entity){
     const treeKinds=new Set(['wood','leaves']),visited=new Set<string>();
+    let sawCollapse=false;
     for(const offset of faces){
       const seed=removed.map((value,index)=>value+offset[index]) as Vec3,seedKind=this.voxels.get(seed);if(!seedKind||!treeKinds.has(seedKind)||visited.has(key(seed)))continue;
       const component:Vec3[]=[],queue=[seed];visited.add(key(seed));
@@ -459,9 +484,11 @@ export class Engine {
       const componentKeys=new Set(component.map(key));
       const supported=component.some(point=>{const below:[number,number,number]=[point[0],point[1]-1,point[2]];return this.voxels.solid(below)&&!componentKeys.has(key(below));});
       if(supported)continue;
+      if(component.some(point=>this.visible(observer,center(point),true)))sawCollapse=true;
       for(const point of component){const kind=this.voxels.get(point)!;this.voxels.set(point,null);this.blockDamage.delete(key(point));this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind,position:center(point),velocity:[0,0,0],resting:false});}
       if(component.length)this.event('world','collapse',`An unsupported tree section collapsed into ${component.length} loose blocks.`,{origin:removed,count:component.length});
     }
+    return sawCollapse;
   }
   step(beforePhysics?: () => void) {
     this.tick++;
@@ -509,7 +536,7 @@ export class Engine {
     for(const body of this.bodies){
       if(!body.resting||!rawBlock(body.kind)||body.contents)continue;
       const target:[number,number,number]=[Math.floor(body.position[0]),Math.floor(body.position[1]),Math.floor(body.position[2])];
-      if(this.inside(target)&&!this.voxels.get(target)){this.voxels.set(target,body.kind);fixed.add(body.id);this.event('world','settled',`A thrown ${body.kind} settled into the terrain.`,{itemId:body.id,target});if(body.owner)this.discover(body.owner,'thrown-blocks-settle','Discovered that thrown blocks settle and become part of the terrain.',{material:body.kind,target});}
+      if(this.inside(target)&&!this.voxels.get(target)){this.voxels.set(target,body.kind);fixed.add(body.id);this.event('world','settled',`A ${body.owner?'thrown':'loose'} ${body.kind} settled into the terrain.`,{itemId:body.id,target,kind:body.kind});if(body.owner)this.discover(body.owner,'thrown-blocks-settle','Discovered that thrown blocks settle and become part of the terrain.',{material:body.kind,target});}
     }
     if(fixed.size)this.bodies=this.bodies.filter(body=>!fixed.has(body.id));
     this.bodies = this.bodies.filter(body => {

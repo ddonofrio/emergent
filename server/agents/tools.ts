@@ -13,7 +13,7 @@ export interface WorldTool {
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
 }
 const vector: JsonSchemaNode = { type: 'array', items: { type: 'number' }, description: 'Exactly three numbers: [x,y,z].' };
-export function worldTools(engine: Engine, id: string, memory: Memory): WorldTool[] {
+export function worldTools(engine: Engine, id: string, memory: Memory, options: {reflection?:boolean} = {}): WorldTool[] {
   const tool = (name: string, description: string, parameters: JsonSchemaNode, physical: boolean, run: (args: any) => unknown): WorldTool => {
     assertSupportedJsonSchema(parameters);
     return { name, description, parameters, physical, output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
@@ -40,13 +40,13 @@ export function worldTools(engine: Engine, id: string, memory: Memory): WorldToo
   if(!held){
     tools.push(action('run','Run across visible clear terrain. Maximum 24 metres. Running stops before unsafe terrain or collisions.',movement(24),'run'));
     tools.push(action('jump',jumpDescription,jumpParameters,'jump'));
-    tools.push(action('hit','Strike a visible block within 3 metres. Every block cracks on the first two hits and breaks on the third. A supporting block under a creature cannot be struck.',target,'hit'));
-    tools.push(action('pickup','Pick up a visible loose item within 3 metres.',{type:'object',required:['itemId'],additionalProperties:false,properties:{itemId:{type:'string'}}},'pickup'));
+    tools.push(action('hit','Strike a visible block within 3 metres. Use the exact block coordinates in current interactions.hit targets. Every block cracks on the first two hits and breaks on the third. A supporting block under a creature cannot be struck.',target,'hit'));
+    tools.push(action('pickup','Pick up a visible loose item within 3 metres. Use a current interactions.pickup itemId; a raw item that has settled into terrain must be hit as a block instead.',{type:'object',required:['itemId'],additionalProperties:false,properties:{itemId:{type:'string'}}},'pickup'));
   }else if(['dirt','grass','sand','stone','wood','leaves','plant'].includes(held.kind)){
     tools.push(action('jump',jumpDescription,jumpParameters,'jump'));
     tools.push(action('place','Place one held block into an empty supported voxel within 3 metres.',target,'place'));
     tools.push(action('throw','Throw one held block. It follows physics and fixes itself into terrain after settling on land.',{type:'object',properties:{force:{type:'number'}},additionalProperties:false},'throw'));
-    if(held.kind==='wood')tools.push(action('strike_held','Strike a chosen surface point on the raw held block. Different points may reveal different forms.',{type:'object',required:['impact'],additionalProperties:false,properties:{impact:vector}},'strike_held'));
+    if(held.kind==='wood')tools.push(action('strike_held','Strike a chosen surface point on the raw held block. Different points may reveal different forms. Impact uses local coordinates from 0 to 1 on each axis; a surface point has at least one coordinate equal to 0 or 1.',{type:'object',required:['impact'],additionalProperties:false,properties:{impact:vector}},'strike_held'));
     tools.push(action('store','Put the held stack into inventory, leaving your hands empty.',noArgs,'store'));
   }else{
     tools.push(action('run','Run across visible clear terrain. Maximum 24 metres.',movement(24),'run'));
@@ -62,7 +62,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory): WorldToo
   if(entity.inventory?.stacks.length)tools.push(action('hold','Select an inventory stack to hold. Stack indexes are zero-based in the inventory description.',{type:'object',required:['stack'],additionalProperties:false,properties:{stack:{type:'number'}}},'hold'));
   tools.push(action('say','Say one word from your small vocabulary. It reaches agents within 10 metres through clear space.',{type:'object',required:['word'],additionalProperties:false,properties:{word:{type:'string',enum:engine.module.manifest.vocabulary}}},'say'));
   tools.push(action('wait','Deliberately spend this action waiting and watching.',noArgs,'wait'));
-  tools.push(tool('journal', `Freely write a private note of up to 300 characters about goals, plans, things you want to do, or observations worth remembering. Recent conversations fade, so notes help you resume an intention later. Optional example: "I want to return to the tree and investigate its wood." Writing takes no world time or physical action. Your latest ${PRIVATE_NOTE_LIMIT} notes are included in future decisions and survive server restarts; older notes are forgotten.`, { type: 'object', required: ['note'], additionalProperties: false, properties: { note: { type: 'string' } } },false, ({ note }: { note: string }) => {
+  const journal=tool('journal', `Freely write a private note of up to 300 characters about goals, plans, things you want to do, or observations worth remembering. Recent conversations fade, so notes help you resume an intention later. Optional example: "I want to return to the tree and investigate its wood." Writing takes no world time or physical action. Your latest ${PRIVATE_NOTE_LIMIT} notes are included in future decisions and survive server restarts; older notes are forgotten.`, { type: 'object', required: ['note'], additionalProperties: false, properties: { note: { type: 'string' } } },false, ({ note }: { note: string }) => {
       if (!note.trim() || note.length > 300) return { ok: false, message: 'A memory note must contain 1..300 characters.' };
       const value=note.trim();
       if(memory.notes.includes(value))return {ok:true,message:'That note is already in private memory.'};
@@ -70,6 +70,12 @@ export function worldTools(engine: Engine, id: string, memory: Memory): WorldToo
       if(learned.includes(value))return {ok:true,message:'That fact is already retained as learned knowledge.'};
       memory.notes.push(value); memory.notes.splice(0, Math.max(0, memory.notes.length - PRIVATE_NOTE_LIMIT));
       return { ok: true, message: 'Remembered.' };
-    }));
+    });
+  tools.push(journal);
+  if(options.reflection)tools.push(tool('reflect','Answer the periodic private reflection. Use remember=false to decline without adding a note, or remember=true with a note of 1..300 characters to save a goal, plan, or intention. This takes no world time.',{type:'object',required:['remember'],additionalProperties:false,properties:{remember:{type:'boolean'},note:{type:'string'}}},false,({remember,note}:{remember:boolean;note?:string})=>{
+    if(!remember)return note?.trim()?{ok:false,message:'To save a note, choose remember=true.'}:{ok:true,message:'Reflection complete. You chose not to add a private note.'};
+    if(!note)return {ok:false,message:'Provide a note to remember, or choose remember=false.'};
+    return journal.invoke({note});
+  }));
   return tools;
 }

@@ -14,6 +14,46 @@ function fixture(blocks: Block[] = [], entities = [entity()]): Engine {
   const module: WorldModule = { ...island, generate: () => ({ blocks: [...floor,...blocks], entities }) };
   return new Engine(module);
 }
+
+test('local interaction targets are actionable, exclude supporting blocks and refresh with the hands',()=>{
+  const engine=fixture([[0,1,2,'wood'],[0,2,2,'stone'],[0,3,2,'stone'],[0,1,4,'wood']]);
+  engine.bodies.push({id:'near',kind:'arrow',position:[-.5,1.6,1.5],velocity:[0,0,0],resting:true},{id:'far',kind:'arrow',position:[4.5,1.6,6.5],velocity:[0,0,0],resting:true});
+  const targets=engine.observe('t1').interactions;
+  assert.ok(targets.hit.length>0);assert.ok(targets.hit.length<=2);assert.equal(targets.hit[0].kind,'wood');
+  for(const hit of targets.hit){
+    assert.notDeepEqual(hit.target,[0,0,0]);assert.notDeepEqual(hit.target,[0,1,4]);
+    const copy=new Engine(engine.module,engine.state());assert.equal(copy.act('t1',{action:'hit',target:hit.target}).ok,true);
+  }
+  assert.deepEqual(targets.pickup.map(item=>item.itemId),['near']);
+  assert.ok(engine.observeAt('t1').interactions.pickup.some(item=>item.itemId==='near'));
+  engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+  const held=engine.observe('t1');assert.deepEqual(held.interactions.hit,[]);assert.deepEqual(held.interactions.pickup,[]);
+  assert.match(held.description,/experiment.*strike_held/);assert.doesNotMatch(held.description,/Store or place.*before striking/);
+});
+
+test('breaking a tree reports its visible collapse along with the collected block',()=>{
+  const engine=fixture([[0,1,1,'wood'],[0,2,1,'wood'],[0,3,1,'wood']]);
+  engine.entity('t1').position=[.5,1,-.5];
+  for(let hit=0;hit<2;hit++)engine.act('t1',{action:'hit',target:[0,1,1]});
+  const result=engine.act('t1',{action:'hit',target:[0,1,1]});
+  assert.equal(result.ok,true);assert.match(result.message,/pick it up.*unsupported part of the tree falls/);
+  assert.equal(engine.bodies.length,2);assert.equal(engine.held(engine.entity('t1'))?.kind,'wood');
+});
+
+test('pickup explains visible settling without disclosing a hidden settlement location',()=>{
+  const engine=fixture();
+  engine.bodies.push({id:'settling',kind:'leaves',position:[.5,1.3,1.5],velocity:[0,0,0],resting:true});
+  assert.ok(engine.observe('t1').interactions.pickup.some(item=>item.itemId==='settling'));
+  engine.step();
+  assert.equal(engine.bodies.length,0);
+  const result=engine.act('t1',{action:'pickup',itemId:'settling'});
+  assert.equal(result.ok,false);assert.match(result.message,/settled into leaves terrain at block \[0,1,1\].*no longer loose/);
+  assert.ok(engine.observe('t1').interactions.hit.some(item=>item.kind==='leaves'));
+  for(let y=1;y<=4;y++)engine.voxels.set([0,y,2],'stone');
+  engine.voxels.set([0,1,4],'wood');engine.event('world','settled','A loose wood settled into the terrain.',{itemId:'hidden',target:[0,1,4],kind:'wood'});
+  const hidden=engine.act('t1',{action:'pickup',itemId:'hidden'});
+  assert.equal(hidden.ok,false);assert.match(hidden.message,/Use look/);assert.doesNotMatch(hidden.message,/\[0,1,4\]/);
+});
 test('generated plants never replace tree roots and all nine trunks reach the terrain',()=>{
   const {blocks}=island.generate(),columns=new Map<string,number[]>();
   for(const [x,y,z,kind] of blocks)if(kind==='wood'){const column=`${x},${z}`,heights=columns.get(column)??[];heights.push(y);columns.set(column,heights);}
