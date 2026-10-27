@@ -87,16 +87,44 @@ export class Engine {
     const difference = Math.atan2(Math.sin(angle - e.yaw * Math.PI / 180), Math.cos(angle - e.yaw * Math.PI / 180));
     return (d < 1.6 || Math.abs(difference) <= this.module.manifest.perception.fieldOfView * Math.PI / 360) && this.voxels.clearLine(eye, point, ignoreEnd);
   }
+  private blockSurfaces(target:Vec3,eye:Vec3) {
+    return faces.flatMap(face=>{
+      if(this.voxels.solid(target.map((v,i)=>v+face[i]) as Vec3))return [];
+      const surface=target.map((v,i)=>v+.5+face[i]*.5001) as Vec3;
+      return face.reduce((sum,v,i)=>sum+v*(eye[i]-surface[i]),0)>0?[surface]:[];
+    });
+  }
+  private blockInReach(e:Entity,target:Vec3) {
+    const eye=this.eye(e);
+    return this.blockSurfaces(target,eye).some(point=>distance(eye,point)<=3&&this.voxels.clearLine(eye,point));
+  }
+  private cellOccupied(target:Vec3) {
+    const point=center(target);
+    return this.entities.some(other=>this.active(other)&&Math.abs(other.position[0]-point[0])<.8&&Math.abs(other.position[2]-point[2])<.8&&target[1]<other.position[1]+other.height&&target[1]+1>other.position[1]);
+  }
+  private hasSupport(target:Vec3,finished=false) {
+    return finished?this.voxels.solid([target[0]+.5,target[1]-.01,target[2]+.5]):faces.some(d=>this.voxels.solid(target.map((v,i)=>v+d[i]) as Vec3));
+  }
+  private containerTargets(e:Entity) {
+    const place:Vec3[]=[],fill:Vec3[]=[],empty:Vec3[]=[],held=this.held(e),eye=this.eye(e);
+    if(!held)return {place,fill,empty};
+    for(let x=Math.floor(eye[0])-3;x<=Math.floor(eye[0])+3;x++)for(let y=Math.floor(eye[1])-3;y<=Math.floor(eye[1])+3;y++)for(let z=Math.floor(eye[2])-3;z<=Math.floor(eye[2])+3;z++){
+      const target:Vec3=[x,y,z],point=center(target),kind=this.voxels.get(target);
+      if(!this.inside(target))continue;
+      const clear=!kind&&distance(eye,point)<=3&&this.visible(e,point);
+      if(clear&&!held.contents&&!this.cellOccupied(target)&&this.hasSupport(target,!rawBlock(held.kind)))place.push(target);
+      if(held.kind!=='bucket')continue;
+      if(!held.contents&&((clear&&point[1]<this.module.manifest.waterLevel)||((kind==='sand'||kind==='dirt')&&!this.standingOn(target)&&this.blockInReach(e,target)&&this.blockSurfaces(target,eye).some(p=>this.visible(e,p)))))fill.push(target);
+      if(held.contents&&clear&&(held.contents==='water'||(!this.cellOccupied(target)&&this.hasSupport(target))))empty.push(target);
+    }
+    const nearest=(targets:Vec3[])=>targets.sort((a,b)=>distance(eye,center(a))-distance(eye,center(b))).slice(0,3);
+    return {place:nearest(place),fill:nearest(fill),empty:nearest(empty)};
+  }
   observe(id: string): Observation {
     const e = this.entity(id), eye = this.eye(e), { range, maxBlocks } = this.module.manifest.perception;
     const blocks = this.voxels.nearby(eye, range).filter(b => {
       const p = b.slice(0,3) as Vec3;
-      return faces.some(face => {
-        if (this.voxels.solid(p.map((v,i) => v+face[i]) as Vec3)) return false;
-        const surface = p.map((v,i) => v+.5+face[i]*.5001) as Vec3;
-        if (face.reduce((sum,v,i) => sum+v*(eye[i]-surface[i]),0) <= 0) return false;
-        return this.visible(e,surface);
-      });
+      return this.blockSurfaces(p,eye).some(surface=>this.visible(e,surface));
     })
       .sort((a, b) => distance(eye, center(a.slice(0, 3) as Vec3)) - distance(eye, center(b.slice(0, 3) as Vec3)));
     const surfaces = new Map<string,{kind:string;count:number;nearest:Vec3}>();
@@ -106,19 +134,20 @@ export class Engine {
     for (const surface of surfaces.values()) { const b = blocks.find(b => b[3]===surface.kind)!; samples.set(key(surface.nearest),b); }
     const entities = this.entities.filter(other => other.id !== id && this.active(other) && this.visible(e, this.eye(other),false,Math.max(20,this.module.manifest.perception.range))).map(({ id, name, kind, position }) => ({ id, name, kind, position: clone(position) }));
     const navigation = this.navigationReport(e);
-    const items = clone(this.bodies.filter(b => this.visible(e, b.position)));
+    const items = clone(this.bodies.filter(b => this.visible(e, b.position)).sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)));
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
     const emptyHands=!this.held(e);
     const interactions = {
       hit: emptyHands ? blocks.filter(block=>{
         const target=block.slice(0,3) as Vec3;
-        return distance(eye,center(target))<=3&&this.voxels.clearLine(eye,center(target),true)&&!this.standingOn(target);
-      }).sort((a,b)=>Number(b[3]==='wood')-Number(a[3]==='wood')||(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0))
+        return this.blockInReach(e,target)&&!this.standingOn(target);
+      }).sort((a,b)=>(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0)||Number(b[3]==='wood')-Number(a[3]==='wood'))
         .slice(0,2).map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
       pickup: emptyHands ? items.filter(item=>distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents).ok)
         .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).slice(0,3).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
       speak: entities.filter(other=>this.canSpeakTo(e,this.entity(other.id))).map(({id,name})=>({id,name})),
       follow: entities.filter(other=>this.canFollow(e,this.entity(other.id))).map(({id,name,position})=>({id,name,metres:Math.round(distance(e.position,position)*10)/10})),
+      ...this.containerTargets(e),
     };
     const followed=e.following&&this.entities.find(other=>other.id===e.following!.entityId);
     const tracking=followed&&this.active(followed)&&distance(e.position,followed.position)<=20&&this.voxels.clearLine(eye,this.eye(followed));
@@ -194,14 +223,9 @@ export class Engine {
     const parts: string[] = [];
     const held = this.held(e);
     parts.push(held ? `You hold ${held.count > 1 ? `${held.count} x ` : ''}${held.kind}${held.contents ? ` containing ${held.contents}` : ''}.` : 'Your hands are empty.');
-    const nearbyWood=surfaces.find(surface=>surface.kind==='wood'&&distance(this.eye(e),center(surface.nearest))<=3);
-    if(held?.kind==='wood')parts.push('You can experiment on the wood in your hands with strike_held, or place, throw, or store it.');
-    else if(held&&nearbyWood)parts.push('Your hands are occupied. Store or place what you hold before striking the nearby wood.');
     const forward = navigation.paths.find(path => path.turn === 0)!;
     if (forward.issue) {
       parts.push(`${forward.issue.message} It is about ${forward.clearance.toFixed(1)} m ahead.`);
-      if(forward.approach)parts.push(`You can first walk ${forward.approach.distance.toFixed(1)} m along the clear approach; that is not a jump distance.`);
-      if(forward.jump)parts.push(`A ${forward.jump.distance.toFixed(1)} m jump from here has a safe landing.`);
     }
     else parts.push(`The ground ahead is traversable for at least ${navigation.checkedDistance} m.`);
     for (const surface of surfaces.filter(surface => ['wood','plant','leaves','stone','sand'].includes(surface.kind)).slice(0,4)) {
@@ -292,8 +316,7 @@ export class Engine {
     if(issue?.target&&['rise','wall'].includes(issue.kind)){
       if(this.held(e))options.push('store');
       else{
-        const point=center(issue.target),supporter=this.entities.some(other=>this.active(other)&&Math.floor(other.position[0])===issue.target![0]&&Math.floor(other.position[2])===issue.target![2]&&Math.abs(other.position[1]-issue.target![1]-1)<.05);
-        if(!supporter&&distance(this.eye(e),point)<=3&&this.visible(e,point,true))options.push('hit');
+        if(!this.standingOn(issue.target)&&this.blockInReach(e,issue.target)&&this.blockSurfaces(issue.target,this.eye(e)).some(point=>this.visible(e,point)))options.push('hit');
       }
     }
     if(issue?.kind==='entity')options.push('wait','say');
@@ -351,7 +374,7 @@ export class Engine {
     }
     if (a.action === 'store') {
       if (!this.held(e)) return fail('Your hands are already empty.');
-      e.inventory!.selected = null; return ok('You put the held item away.');
+      e.inventory!.selected = null; return ok('Your hands are empty. Inventory space is unchanged.');
     }
     if (a.action === 'walk' || a.action === 'run') {
       const held=this.held(e), running=a.action==='run', maximum=running?24:16;
@@ -418,12 +441,7 @@ export class Engine {
     if(a.action==='strike_held'){
       const held=this.held(e);if(!held||held.kind!=='wood')return fail('Only a raw wood block can be worked this way.');
       if(!a.impact||a.impact.length!==3||!a.impact.every(v=>Number.isFinite(v)&&v>=0&&v<=1))return fail('Impact must be a local surface point in [0,1]^3.');
-      const [x,y,z]=a.impact,mid=(v:number)=>v>=.32&&v<=.68,edge=(v:number)=>v<=.18||v>=.82;
-      let made:string|undefined;
-      if(edge(x)&&edge(y)&&edge(z))made='arrow';
-      else if(y>=.82&&mid(x)&&mid(z))made='bucket';
-      else if(z>=.82&&mid(x)&&mid(y))made='spear';
-      else if(edge(x)&&mid(y)&&mid(z))made='knife';
+      const made=this.module.transformHit(held.kind,a.impact);
       if(!made)return ok('The strike leaves a notch in the wood, but its form does not change.');
       this.consume(e);this.addInventory(e,made,undefined,true);this.discover(e.id,`wood-shape:${made}`,`Discovered how to shape wood into a ${made}.`,{source:'wood',product:made,impact:a.impact});
       return ok(`The wood changes shape under the strike. You now hold a wooden ${made}.`);
@@ -431,13 +449,22 @@ export class Engine {
     const target = a.target;
     if (!Array.isArray(target) || target.length !== 3 || !target.every(Number.isInteger) || !this.inside(target)) return fail('Target must be an integer voxel coordinate inside the world.');
     const point = center(target);
-    if (distance(this.eye(e), point) > 3 || !this.voxels.clearLine(this.eye(e), point, true)) return fail('Target is beyond clear arm reach (3 metres).');
     const kind = this.voxels.get(target);
+    const surfaceAction=!!kind&&(a.action==='hit'||a.action==='fill');
+    if(surfaceAction){
+      if(!this.blockInReach(e,target)){
+        const nearest=target.map((v,i)=>Math.max(v,Math.min(v+1,this.eye(e)[i]))) as Vec3;
+        return fail(distance(this.eye(e),nearest)>3?'That block is farther than 3 metres from your hands.':'Another block hides the reachable surface. Move or look for an exposed face.');
+      }
+    }else{
+      if(distance(this.eye(e),point)>3)return fail('That cell is farther than 3 metres from your hands.');
+      if(!this.voxels.clearLine(this.eye(e),point,true))return fail('Another block obstructs that cell.');
+    }
     if (a.action === 'place') {
       const held=this.held(e);if(!held)return fail('Your hands are empty.');
       if(held.contents)return fail('Empty this object before placing it as a fixed object.');
       if (kind) return fail('That cell is occupied.');
-      if (this.entities.some(other => this.active(other) && Math.abs(other.position[0] - point[0]) < .8 && Math.abs(other.position[2] - point[2]) < .8 && target[1] < other.position[1] + other.height && target[1] + 1 > other.position[1])) return fail('A creature occupies that cell.');
+      if (this.cellOccupied(target)) return fail('A creature occupies that cell.');
       if(!rawBlock(held.kind)){
         if(!this.voxels.solid([target[0]+.5,target[1]-.01,target[2]+.5]))return fail('A placed object needs solid ground directly beneath it.');
         const placed=held.kind;this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:placed,position:[point[0],target[1]+.09,point[2]],velocity:[0,0,0],resting:true});this.consume(e);
@@ -452,7 +479,7 @@ export class Engine {
       const supported=this.standingOn(target);
       if(supported)return fail(`You cannot strike that block because ${supported.name} is standing on it.`);
       const voxel=key(target),damage=(this.blockDamage.get(voxel)??0)+1;
-      if(damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return ok(damage===1?`You strike the ${kind}. Thin cracks appear across it.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`);}
+      if(damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`);}
       this.blockDamage.delete(voxel);this.voxels.set(target,null);const sawCollapse=this.collapseUnsupportedTree(target,e);this.wakeBodies();this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
       const heldResult=this.canHold(e,kind);
       if(heldResult.ok)this.addInventory(e,kind,undefined,true);
@@ -472,6 +499,7 @@ export class Engine {
       const held=this.held(e);if(!held||held.kind!=='bucket'||!held.contents)return fail('You need to hold a non-empty bucket.');
       if(held.contents==='water'){held.contents=undefined;this.event(e.id,'splash','Emptied a bucket of water.',{position:point});return ok('You empty the water. It splashes and disperses.');}
       if(kind)return fail('That cell is occupied.');
+      if(this.cellOccupied(target))return fail('A creature occupies that cell.');
       if(!faces.some(d=>this.voxels.solid(target.map((v,i)=>v+d[i]) as Vec3)))return fail('The emptied material needs adjacent support.');
       const contents=held.contents;this.voxels.set(target,contents);held.contents=undefined;return ok(`You empty the bucket, placing one ${contents} block.`);
     }

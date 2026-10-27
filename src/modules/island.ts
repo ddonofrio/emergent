@@ -22,7 +22,7 @@ export const island: WorldModule = {
       knife: { color: '#a77a52', solid: true, floats: true },
       arrow: { color: '#ad8057', solid: true, floats: true },
     },
-    agentInstructions: 'You are a Troglodyte living on a small island surrounded by deep water. You are embodied here, curious, and quick to tire of repetition. You have no assigned goal. Explore, experiment with what you encounter, notice consequences, and follow whatever becomes interesting. You know only what you perceive, hear, remember, or discover through action. Other creatures may have intentions of their own. Use your small spoken vocabulary when communication seems useful. Tool results are reality: if an action fails, adapt rather than pretending it happened.',
+    agentInstructions: 'You are a curious Troglodyte living on an island, with no assigned task. Changes catch your attention: follow them to see what happens. You get bored when nothing new happens. Choose one available action. Trust the reported results; failed actions did not happen.',
   },
   generate() {
     const cells = new Map<string, Block>();
@@ -55,7 +55,13 @@ export const island: WorldModule = {
     return { blocks: [...cells.values()], entities: [entity('t1', 'Moss', 'troglodyte', -1, 0, '#e8b36d', 0), entity('t2', 'Flint', 'troglodyte', 2, -2, '#a5bff0', 180), entity('duck', 'Pebble', 'duck', -4, 4, '#f3e6bb', 90)] };
   },
   transformHit(kind, impact) {
-    return kind === 'wood' && impact.every(v => Math.abs(v - .5) <= .16) ? 'bucket' : null;
+    if(kind!=='wood')return null;
+    const [x,y,z]=impact,mid=(v:number)=>v>=.32&&v<=.68,edge=(v:number)=>v<=.18||v>=.82;
+    if(edge(x)&&edge(y)&&edge(z))return 'arrow';
+    if(y>=.82&&mid(x)&&mid(z))return 'bucket';
+    if(z>=.82&&mid(x)&&mid(y))return 'spear';
+    if(edge(x)&&mid(y)&&mid(z))return 'knife';
+    return null;
   },
   describeObstacle(issue) {
     if(issue.material==='wood'&&(issue.height??0)>1)return 'A tree trunk or tall wooden structure blocks your path.';
@@ -66,7 +72,17 @@ export const island: WorldModule = {
   agentHints(observation,learned){
     const inventory=observation.self.inventory,stack=inventory?.stacks.findIndex(item=>item.kind==='wood')??-1;
     if(stack<0||[...learned].some(knowledge=>knowledge.startsWith('wood-shape:')))return [];
-    return [`The wood you carry looks as though striking it could shape it into useful things. ${inventory!.selected===stack?'You can experiment with strike_held.':`Use hold with stack=${stack} to take it in your hands, then experiment with strike_held.`}`];
+    return [inventory!.selected===stack?'The wood in your hands looks shapeable; try strike_held.':`Your stored wood looks shapeable; use hold with stack=${stack} to examine it.`];
+  },
+  relevantKnowledge(observation,knowledge){
+    const inventory=observation.self.inventory,held=inventory?.selected===null||!inventory?undefined:inventory.stacks[inventory.selected];
+    const nearWater=observation.self.position[1]<=waterLevel+1||observation.navigation.paths.some(path=>path.issue?.kind==='water');
+    if(knowledge==='blocks-break-after-three-hits')return observation.interactions.hit.length>0;
+    if(knowledge==='deep-water-limit')return nearWater;
+    if(knowledge==='thrown-blocks-settle')return !!held&&['dirt','grass','sand','stone','wood','leaves','plant'].includes(held.kind);
+    if(knowledge==='nonfloating-objects-sink')return nearWater&&!!held;
+    if(knowledge.startsWith('wood-shape:'))return !!inventory?.stacks.some(stack=>stack.kind==='wood')||observation.surfaces.some(surface=>surface.kind==='wood');
+    return false;
   },
   respondToSpeech(listener){
     if(listener.kind==='duck')return 'quack';

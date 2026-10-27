@@ -11,6 +11,7 @@ import { ProviderChain, providersFromEnv, type ProviderConfig } from '../server/
 import { TurnClock } from '../server/turn-clock';
 import { advancePlayback, fastScrubSpeed } from '../src/view/playback-clock';
 import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS } from '../src/core/time';
+import { impactPoints } from '../server/agents/tools';
 
 function world() {
   const blocks: Block[] = [];
@@ -35,6 +36,7 @@ async function provider() {
 }
 function respond(request: Request, action: Action) {
   const {action:name,...argumentsValue}=action;
+  if(name==='strike_held')return respondTool(request,name,{point:Object.entries(impactPoints).find(([,point])=>JSON.stringify(point)===JSON.stringify(action.impact))?.[0]});
   respondTool(request,name,argumentsValue);
 }
 function respondTool(request:Request,name:string,argumentsValue:unknown){
@@ -83,6 +85,7 @@ test('following asks every world second; stopping stages a free normal action th
     r.clock.pump();await until(()=>p.requests.length===2);
     assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow']);
     const prompt=JSON.parse(p.requests[1].body.messages.at(-1).content);assert.equal(prompt.following.entityId,'duck');assert.ok(Math.abs(prompt.following.metres-3)<.01);
+    assert.equal(prompt.inventory,undefined);assert.equal(prompt.notes,undefined);assert.equal(prompt.hints,undefined);assert.equal(prompt.recent,undefined);
     const frozen=engine.state();r.advance(90000);assert.deepEqual(engine.state(),frozen);
     respond(p.requests[1],{action:'follow'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.equal(engine.tick,40);assert.ok(Math.abs(engine.entity('t1').position[2]-4.5)<1e-8);
@@ -119,7 +122,7 @@ test('a periodic reflection waits until following stops, then still permits the 
   }finally{r.clock.close();store.close();p.close();}
 });
 
-test('wood hints follow stored and held wood until a shape is discovered; discovery suggests an optional intention note once',async()=>{
+test('one wood hint follows stored and held wood until a shape is discovered',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
@@ -128,16 +131,15 @@ test('wood hints follow stored and held wood until a shape is discovered; discov
       r.clock.pump();await until(()=>p.requests.length===index+1);
       const prompt=JSON.parse(p.requests[index].body.messages.at(-1).content),hints=(prompt.hints??[]).join(' ');
       assert.ok(prompt.interactions);
-      if(index<3)assert.match(hints,/striking it could shape it into useful things/);
-      else assert.doesNotMatch(hints,/striking it could shape/);
+      if(index<3)assert.match(hints,/shapeable/);
+      else assert.doesNotMatch(hints,/shapeable/);
       if(index===1){assert.match(hints,/hold with stack=0/);assert.equal(p.requests[index].body.tools.some((tool:any)=>tool.function.name==='strike_held'),false);}
-      if(index===0||index===2){assert.match(prompt.perception,/experiment.*strike_held/);assert.doesNotMatch(prompt.perception,/Store or place.*before striking/);}
-      if(index===3)assert.match(hints,/Learned facts are already remembered.*journal/);
-      if(index===4)assert.doesNotMatch(hints,/discovered something new/);
+      assert.doesNotMatch(prompt.perception,/strike_held/);
+      assert.doesNotMatch(hints,/journal/);
       respond(p.requests[index],action);await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     }
     assert.deepEqual(r.runtime.minds.get('t1')!.notes,[],'No note or goal is invented automatically.');
-    assert.ok(store.eventsAt(engine.tick,'t1').some(event=>event.type==='observation'&&(event.data as any).hints.some((hint:string)=>hint.includes('striking it could shape'))));
+    assert.ok(store.eventsAt(engine.tick,'t1').some(event=>event.type==='observation'&&(event.data as any).hints.some((hint:string)=>hint.includes('shapeable'))));
   }finally{r.clock.close();store.close();p.close();}
 });
 
@@ -150,7 +152,7 @@ test('social hints repeat until heard speech, survive restart and return only fo
     await until(()=>p.requests.length===start+2);
     for(const request of p.requests.slice(start)){
       const prompt=JSON.parse(request.body.messages.at(-1).content);
-      assert.equal((prompt.hints??[]).some((hint:string)=>hint.includes('good to greet')),expected[request.id],request.id);
+      assert.equal((prompt.hints??[]).some((hint:string)=>hint.includes('greet or reply')),expected[request.id],request.id);
       respond(request,actions[request.id]);
     }
     const prepared=await pending;engine.step(()=>runtime.commit(prepared));for(let tick=1;tick<20;tick++)engine.step();
@@ -175,13 +177,13 @@ test('unheard speech does not dismiss a social hint',async()=>{
   try{
     r.clock.pump();await until(()=>p.requests.length===2);
     const t1=p.requests.find(request=>request.id==='t1')!;
-    assert.ok(JSON.parse(t1.body.messages.at(-1).content).hints.some((hint:string)=>hint.includes('good to greet')));
+    assert.ok(JSON.parse(t1.body.messages.at(-1).content).hints.some((hint:string)=>hint.includes('greet or reply')));
     engine.entity('t2').position=[30,1,.5];for(const request of p.requests)respond(request,request.id==='t1'?{action:'say',word:'hey'}:{action:'wait'});
     await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.match(engine.entity('t1').lastAction!.message,/nobody/);assert.deepEqual(r.runtime.minds.get('t1')!.lastSpoken,{});
     engine.entity('t2').position=[1.5,1,.5];r.clock.pump();await until(()=>p.requests.length===4);
     const next=p.requests.slice(2).find(request=>request.id==='t1')!;
-    assert.ok(JSON.parse(next.body.messages.at(-1).content).hints.some((hint:string)=>hint.includes('good to greet')));
+    assert.ok(JSON.parse(next.body.messages.at(-1).content).hints.some((hint:string)=>hint.includes('greet or reply')));
     for(const request of p.requests.slice(2))respond(request,{action:'wait'});
   }finally{r.clock.close();store.close();p.close();}
 });
@@ -193,6 +195,8 @@ test('every hundred decisions requires an optional reflection before acting, wit
     r.clock.pump();await until(()=>p.requests.length===1);
     assert.match(JSON.parse(p.requests[0].body.messages.at(-1).content).reflection,/anything you want to keep/);
     assert.equal(p.requests[0].body.tools.some((tool:any)=>tool.function.name==='walk'),false);
+    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['reflect']);
+    assert.equal(JSON.parse(p.requests[0].body.messages.at(-1).content).inventory,undefined);
     respond(p.requests[0],{action:'wait'});await until(()=>p.requests.length===2);assert.equal(engine.tick,0);
     respondTool(p.requests[1],'reflect',{remember:false});await until(()=>p.requests.length===3);
     assert.equal(engine.tick,0);assert.equal(p.requests[2].body.tools.some((tool:any)=>tool.function.name==='walk'),true);
@@ -204,7 +208,7 @@ test('every hundred decisions requires an optional reflection before acting, wit
     respond(p.requests[3],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     r.runtime.minds.get('t1')!.turns=199;r.clock.pump();await until(()=>p.requests.length===5);
     const note='I want to investigate the wood near the shore.';
-    respondTool(p.requests[4],'journal',{note});await until(()=>p.requests.length===6);
+    respondTool(p.requests[4],'reflect',{remember:true,note});await until(()=>p.requests.length===6);
     assert.equal(engine.tick,40);assert.deepEqual(r.runtime.minds.get('t1')!.notes,[],'Reflection notes remain staged until the shared commit.');
     respond(p.requests[5],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.deepEqual(store.memoryAt(engine.tick,'t1'),[note]);
@@ -353,9 +357,29 @@ test('look returns perception inside the same frozen decision before a physical 
   try{
     engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
     respondTool(p.requests[0],'look',{angle:90});await until(()=>p.requests.length===2);
-    assert.equal(engine.tick,0);assert.ok(p.requests[1].body.messages.some((message:any)=>message.role==='tool'&&JSON.parse(message.content).description));
+    assert.equal(engine.tick,0);assert.ok(p.requests[1].body.messages.some((message:any)=>message.role==='tool'&&JSON.parse(message.content).perception));
     respond(p.requests[1],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');assert.equal(engine.tick,0);r.advance(1000);
     assert.equal(engine.time,1);assert.equal(r.runtime.minds.get('t1')!.modelTurns,2);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('crack attention and the last result lead the next decision and disappear after the block breaks',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);engine.act('t1',{action:'hit',target:[0,1,1]});
+    for(let index=0;index<2;index++){
+      r.clock.pump();await until(()=>p.requests.length===index+1);
+      const request=p.requests[index],context=JSON.parse(request.body.messages.at(-1).content);
+      assert.deepEqual(Object.keys(context).slice(0,2),['attention','lastResult']);
+      assert.match(context.attention,/wood block at \[0,1,1\].*same block/);
+      assert.equal(request.body.tools[0].function.name,'hit');
+      respond(request,{action:'hit',target:[0,1,1]});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    }
+    assert.ok(store.eventsAt(engine.tick,'t1').some(event=>event.type==='observation'&&(event.data as any).attention?.includes('same block')));
+    r.clock.pump();await until(()=>p.requests.length===3);
+    assert.equal(JSON.parse(p.requests[2].body.messages.at(-1).content).attention,undefined);
+    assert.equal(p.requests[2].body.tools.some((tool:any)=>tool.function.name==='hit'),false);
+    respond(p.requests[2],{action:'wait'});
   }finally{r.clock.close();store.close();p.close();}
 });
 
@@ -363,7 +387,8 @@ test('journal is freely available within a frozen decision and persists notes fo
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
-    assert.match(p.requests[0].body.messages[0].content,/freely use journal/);
+    assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='journal').function.description,/Freely save/);
+    assert.doesNotMatch(p.requests[0].body.messages[0].content,/journal/);
     for(let index=0;index<3;index++){
       respondTool(p.requests[index],'journal',{note:`I want to explore area ${index}.`});await until(()=>p.requests.length===index+2);
       assert.equal(engine.tick,0);
@@ -371,9 +396,39 @@ test('journal is freely available within a frozen decision and persists notes fo
     }
     respond(p.requests[3],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.deepEqual(store.memoryAt(engine.tick,'t1'),Array.from({length:3},(_,index)=>`I want to explore area ${index}.`));
-    r.clock.pump();await until(()=>p.requests.length===5);assert.match(p.requests[4].body.messages[0].content,/I want to explore area 2\./);
+    r.clock.pump();await until(()=>p.requests.length===5);assert.ok(JSON.parse(p.requests[4].body.messages.at(-1).content).notes.includes('I want to explore area 2.'));
     respond(p.requests[4],{action:'wait'});
   }finally{r.clock.close();store.close();p.close();}
+});
+
+test('invalid item IDs are repaired before committing and valid choices are rechecked against the shared world',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);
+    engine.bodies.push({id:'near-arrow',kind:'arrow',position:[-.5,1.3,1.5],velocity:[0,0,0],resting:true});
+    r.clock.pump();await until(()=>p.requests.length===1);
+    assert.deepEqual(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='pickup').function.parameters.properties.itemId.enum,['near-arrow']);
+    respondTool(p.requests[0],'pickup',{itemId:'arrow'});await until(()=>p.requests.length===2);
+    assert.equal(engine.tick,0);assert.equal(engine.entity('t1').inventory,null);
+    assert.equal(JSON.parse(p.requests[1].body.messages.at(-1).content).ok,false);
+    respondTool(p.requests[1],'pickup',{itemId:'near-arrow'});await until(()=>r.clock.status().phase==='advancing');
+    engine.bodies=engine.bodies.filter(body=>body.id!=='near-arrow');r.advance(1000);
+    assert.equal(engine.entity('t1').lastAction!.ok,false);assert.match(engine.entity('t1').lastAction!.message,/no longer loose/);
+    assert.equal(engine.entity('t1').inventory,null);assert.equal(r.runtime.minds.get('t1')!.turns,1);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('resuming trims private notes to ten and removes obsolete perceptions from working history',()=>{
+  const engine=world(),store=new Store(':memory:',engine.module.manifest);
+  try{
+    const notes=Array.from({length:20},(_,index)=>`note ${index}`);
+    store.record(engine.frame(),engine.state(),[['t1',{notes,turns:4,modelTurns:4,cycles:[[{role:'user',content:'old landscape and stale item IDs'}]]}]]);
+    const runtime=new AgentRuntime(engine,store,{providers:[],maxTurns:null});
+    assert.deepEqual(runtime.minds.get('t1')!.notes,notes.slice(-10));
+    assert.doesNotMatch(JSON.stringify(runtime.minds.get('t1')!.cycles),/old landscape|stale item IDs/);
+    store.record(engine.frame(),engine.state(),runtime.persistence());
+    assert.deepEqual(store.loadMind<{notes:string[]}>('t1')!.notes,notes.slice(-10));
+  }finally{store.close();}
 });
 
 test('encounter notices reach both prompts and are acknowledged only at the shared commit',async()=>{
@@ -384,7 +439,7 @@ test('encounter notices reach both prompts and are acknowledged only at the shar
   const r=run(engine,store,p.url,null);
   try{
     r.clock.pump();await until(()=>p.requests.length===2);
-    for(const request of p.requests){const prompt=JSON.parse(request.body.messages.at(-1).content);assert.equal(prompt.encounters.length,1);assert.match(prompt.encounters[0].message,/another Troglodyte.*use say/);assert.equal(prompt.encounters[0].canSpeakNow,true);}
+    for(const request of p.requests){const prompt=JSON.parse(request.body.messages.at(-1).content);assert.equal(prompt.interactions.speak.length,1);assert.match(prompt.hints.join(' '),/greet or reply/);assert.equal(prompt.encounters,undefined);}
     respond(p.requests.find(request=>request.id==='t1')!,{action:'wait'});await until(()=>r.clock.status().agents.t1?.state==='ready');assert.equal(engine.observe('t1').encounters.length,1);
     respond(p.requests.find(request=>request.id==='t2')!,{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.equal(engine.observe('t1').encounters.length,0);assert.equal(engine.observe('t2').encounters.length,0);
@@ -395,8 +450,10 @@ test('encounter notices reach both prompts and are acknowledged only at the shar
 test('authoritative discoveries enter future prompts as persistent learned knowledge',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
-    engine.setEntityEnabled('t2',false);engine.discoveries.set('t1',new Set(['thrown-blocks-settle']));r.clock.pump();await until(()=>p.requests.length===1);
-    assert.match(p.requests[0].body.messages[0].content,/Learned knowledge: \["Thrown blocks settle and become part of the terrain\."\]/);
+    engine.setEntityEnabled('t2',false);engine.discoveries.set('t1',new Set(['thrown-blocks-settle','deep-water-limit']));
+    engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};r.clock.pump();await until(()=>p.requests.length===1);
+    assert.deepEqual(JSON.parse(p.requests[0].body.messages.at(-1).content).learned,['Thrown blocks settle and become part of the terrain.','The island ends at deep water. I cannot leave it because the water would rise above half my height.']);
+    assert.doesNotMatch(p.requests[0].body.messages[0].content,/Learned knowledge/);
     respond(p.requests[0],{action:'wait'});
   }finally{r.clock.close();store.close();p.close();}
 });
@@ -428,7 +485,7 @@ test('a carrying reminder persists through turns, failed uses and waiting until 
     for(const [index,action] of actions.entries()){
       r.clock.pump();await until(()=>p.requests.length===index+1);
       const prompt=JSON.parse(p.requests[index].body.messages.at(-1).content);
-      if(index>=2&&index<=5){assert.match(prompt.reminder,/still holding a wood block/i);assert.match(prompt.reminder,/place it, throw it, work it/);}
+      if(index>=2&&index<=5){assert.match(prompt.reminder,/still holding a wood block/i);assert.match(prompt.reminder,/strike_held/);assert.ok(!(prompt.hints??[]).some((hint:string)=>hint.includes('shapeable')));}
       else assert.equal(prompt.reminder,undefined);
       respond(p.requests[index],action);await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
       if(index===0)assert.equal((r.runtime.minds.get('t1') as any).carriedMoves,9,'A failed movement preserves the count before the reminder is active.');
@@ -522,7 +579,7 @@ test('long motion takes two world turns and results enter the next model context
     await until(()=>r.clock.status().phase==='advancing'); r.advance(1000);
     assert.ok(Math.abs(engine.entity('t1').position[2]-2.5)<1e-8); assert.ok(engine.entity('t1').motion);
     r.clock.pump();await until(()=>p.requests.length===3);
-    assert.equal(p.requests[2].id,'t2'); assert.ok(p.requests[2].body.messages.some((m:any)=>m.role==='tool' && JSON.parse(m.content).ok));
+    assert.equal(p.requests[2].id,'t2');assert.equal(JSON.parse(p.requests[2].body.messages.at(-1).content).recent[0].action,'wait');assert.equal(p.requests[2].body.messages.some((m:any)=>m.role==='tool'),false);
     r.advance(600000); assert.equal(engine.time,1); assert.ok(Math.abs(engine.entity('t1').position[2]-2.5)<1e-8);
     respond(p.requests[2],{action:'wait'}); await until(()=>r.clock.status().phase==='advancing'); r.advance(1000);
     assert.equal(engine.time,2); assert.ok(Math.abs(engine.entity('t1').position[2]-4.5)<1e-8); assert.equal(engine.entity('t1').motion,undefined);

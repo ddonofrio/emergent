@@ -36,6 +36,9 @@ export interface InteractionTargets {
   pickup: { itemId: string; kind: string; metres: number }[];
   speak: { id: string; name: string }[];
   follow: { id: string; name: string; metres: number }[];
+  place: Vec3[];
+  fill: Vec3[];
+  empty: Vec3[];
 }
 export interface Observation {
   tick: number; time: number; self: Entity; blocks: Block[];
@@ -56,6 +59,7 @@ export interface WorldModule {
   describeObstacle?(issue: MovementIssue): string | undefined;
   encounterMessage?(observer:Entity,other:Entity,metres:number):string|undefined;
   agentHints?(observation:Observation,learned:ReadonlySet<string>):string[];
+  relevantKnowledge?(observation:Observation,knowledge:string):boolean;
   respondToSpeech?(listener:Entity,speaker:Entity,word:string):string|undefined;
 }
 export const key = (p: Vec3) => p.join(',');

@@ -1,1 +1,1 @@
-export const PRIVATE_NOTE_LIMIT = 20;
+export const PRIVATE_NOTE_LIMIT = 10;

@@ -6,6 +6,7 @@ import type { Block, Entity, WorldModule } from '../src/core/types';
 import { Store } from '../server/store';
 import { worldTools } from '../server/agents/tools';
 import { apply } from '../server/agents/harness-plugin';
+import { compactView, inventoryContext, relevantKnowledge } from '../server/agents/context';
 
 const entity = (id = 't1', x = .5, z = .5): Entity => ({ id, name: id, kind: 'troglodyte', controller: 'agent', position: [x,1,z], height: 2, yaw: 0, inventory: null, color: '#ffffff', status: 'idle' });
 function fixture(blocks: Block[] = [], entities = [entity()]): Engine {
@@ -92,7 +93,77 @@ test('local interaction targets are actionable, exclude supporting blocks and re
   assert.ok(engine.observeAt('t1').interactions.pickup.some(item=>item.itemId==='near'));
   engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
   const held=engine.observe('t1');assert.deepEqual(held.interactions.hit,[]);assert.deepEqual(held.interactions.pickup,[]);
-  assert.match(held.description,/experiment.*strike_held/);assert.doesNotMatch(held.description,/Store or place.*before striking/);
+  assert.match(held.description,/You hold wood/);assert.doesNotMatch(held.description,/strike_held|Store or place/);
+});
+
+test('a visible trunk face can be struck even when its centre is hidden by the upper trunk',()=>{
+  const engine=fixture([[0,1,1,'wood'],[0,2,1,'wood']]);
+  assert.equal(engine.voxels.clearLine(engine.eye(engine.entity('t1')),[.5,1.5,1.5],true),false);
+  assert.ok(engine.observe('t1').interactions.hit.some(hit=>hit.target.join(',')==='0,1,1'));
+  for(let strike=0;strike<3;strike++)assert.equal(engine.act('t1',{action:'hit',target:[0,1,1]}).ok,true);
+  assert.equal(engine.held(engine.entity('t1'))?.kind,'wood');
+  const hidden=fixture([[0,1,1,'stone'],[0,2,1,'stone'],[0,3,1,'stone'],[0,1,2,'wood']]);
+  assert.match(hidden.act('t1',{action:'hit',target:[0,1,2]}).message,/hides.*surface/);
+  assert.match(hidden.act('t1',{action:'hit',target:[0,0,7]}).message,/farther than 3 metres/);
+});
+
+test('full inventories omit pickup, storing only frees hands, and arguments select real local items and stacks',()=>{
+  const engine=fixture(),actor=engine.entity('t1'),memory={notes:[]};
+  engine.bodies.push({id:'near-arrow',kind:'arrow',position:[.5,1.2,1.5],velocity:[0,0,0],resting:true});
+  actor.inventory={stacks:[{kind:'wood',count:63},{kind:'sand',count:1}],selected:0,capacity:64};
+  assert.equal((worldTools(engine,'t1',memory).find(tool=>tool.name==='store')!.invoke({}) as any).ok,true);
+  const inventory=inventoryContext(engine.observe('t1'));
+  assert.equal(inventory.used,64);assert.equal(inventory.free,0);assert.equal(inventory.hand,null);
+  assert.equal(worldTools(engine,'t1',memory).some(tool=>tool.name==='pickup'),false);
+  const hold=worldTools(engine,'t1',memory).find(tool=>tool.name==='hold')!;
+  assert.equal((hold.invoke({stack:99}) as any).ok,false);assert.equal((hold.invoke({stack:1}) as any).ok,true);
+  assert.deepEqual(worldTools(engine,'t1',memory).find(tool=>tool.name==='hold')!.parameters.properties!.stack.enum,[0]);
+  actor.inventory=null;
+  const pickup=worldTools(engine,'t1',memory).find(tool=>tool.name==='pickup')!;
+  assert.equal((pickup.invoke({itemId:'arrow'}) as any).ok,false);
+  assert.equal((pickup.invoke({itemId:'near-arrow'}) as any).ok,true);
+});
+
+test('offered place and bucket targets are executable and shaping points do not reveal recipes',()=>{
+  for(const stack of [{kind:'wood',count:1},{kind:'arrow',count:1},{kind:'bucket',count:1},{kind:'bucket',count:1,contents:'sand'},{kind:'bucket',count:1,contents:'water'}]){
+    const engine=fixture([[0,1,2,'sand']]);engine.entity('t1').inventory={stacks:[stack],selected:0,capacity:64};
+    const targets=engine.observe('t1').interactions;
+    for(const action of ['place','fill','empty'] as const){
+      assert.equal(worldTools(engine,'t1',{notes:[]}).some(tool=>tool.name===action),targets[action].length>0);
+      for(const target of targets[action]){const copy=new Engine(engine.module,engine.state());assert.equal(copy.act('t1',{action,target}).ok,true,`${action} at ${target}`);}
+    }
+  }
+  const engine=fixture();engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+  const strike=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='strike_held')!;
+  assert.doesNotMatch(JSON.stringify({description:strike.description,parameters:strike.parameters}),/bucket|knife|spear|arrow/);
+  assert.equal((strike.invoke({point:'top_center'}) as any).ok,true);
+  assert.equal(engine.held(engine.entity('t1'))?.kind,'bucket');
+  assert.equal(worldTools(engine,'t1',{notes:[]}).some(tool=>tool.name==='strike_held'),false);
+});
+
+test('context selects relevant learned facts without forgetting authoritative discoveries',()=>{
+  const engine=fixture();engine.entity('t1').position[1]=4;
+  const facts=['deep-water-limit','thrown-blocks-settle','wood-shape:bucket'];engine.discoveries.set('t1',new Set(facts));
+  assert.deepEqual(relevantKnowledge(engine,engine.observe('t1')),[]);
+  engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+  assert.deepEqual(relevantKnowledge(engine,engine.observe('t1')),['Thrown blocks settle and become part of the terrain.','Wood can be shaped into a bucket.']);
+  assert.deepEqual([...engine.discoveries.get('t1')!],facts);
+});
+
+test('visible cracks take priority over fresh wood and lose attention when unreachable or broken',()=>{
+  const engine=fixture([[0,1,2,'wood'],[-1,1,2,'wood'],[1,1,0,'plant']]),memory={notes:[]};
+  const before=worldTools(engine,'t1',memory).map(tool=>tool.name);
+  assert.equal(engine.act('t1',{action:'hit',target:[1,1,0]}).ok,true);
+  const observation=engine.observe('t1'),view=compactView(observation);
+  assert.deepEqual(observation.interactions.hit[0].target,[1,1,0]);
+  assert.match(view.attention!,/plant block at \[1,1,0\].*visible cracks.*same block/);
+  const tools=worldTools(engine,'t1',memory).map(tool=>tool.name);
+  assert.equal(tools[0],'hit');assert.deepEqual([...tools].sort(),[...before].sort(),'Attention does not remove other choices.');
+  engine.entity('t1').position=[6.5,1,-6.5];assert.equal(compactView(engine.observe('t1')).attention,undefined);
+  engine.entity('t1').position=[.5,1,.5];engine.act('t1',{action:'hit',target:[1,1,0]});
+  assert.match(compactView(engine.observe('t1')).attention!,/deep cracks.*close to breaking/);
+  engine.act('t1',{action:'hit',target:[1,1,0]});engine.act('t1',{action:'store'});
+  assert.equal(compactView(engine.observe('t1')).attention,undefined);
 });
 
 test('breaking a tree reports its visible collapse along with the collected block',()=>{
@@ -169,7 +240,7 @@ test('navigation separates distant approaches from possible jumps and respects o
   assert.ok(forward.approach);assert.ok(forward.options!.includes('walk'));assert.equal(forward.jump,undefined);assert.equal(forward.options!.includes('hit'),false);assert.equal(forward.options!.includes('jump'),false);
   const near=fixture([[0,1,1,'wood']]);near.entity('t1').inventory={stacks:[{kind:'grass',count:1}],selected:0,capacity:64};
   const observation=near.observe('t1'),tools=worldTools(near,'t1',{notes:[]}).map(tool=>tool.name);
-  assert.match(observation.description,/hands are occupied.*Store or place/);
+  assert.match(observation.description,/You hold grass/);
   for(const path of observation.navigation.paths){for(const option of path.options??[])assert.ok(tools.includes(option),`Unavailable option ${option}`);if(path.jump){const copy=new Engine(near.module,near.state());assert.equal(copy.act('t1',{action:'jump',...path.jump}).ok,true);}}
   assert.ok(observation.navigation.paths[1].options!.includes('store'));assert.equal(observation.navigation.paths[1].options!.includes('hit'),false);
   const tree=fixture([[0,1,1,'wood'],[0,2,1,'wood'],[0,3,1,'wood']]);assert.match(tree.observe('t1').description,/tree trunk/);assert.doesNotMatch(tree.observe('t1').description,/wood wall/);
@@ -418,20 +489,20 @@ test('SQLite replays exact edits, dynamics and events, including same-tick resta
   assert.ok(store.eventsAt(4).length>=3);
   store.close();
 });
-test('SQLite reconstructs the last twenty private memory notes at a recorded instant',()=>{
+test('SQLite reconstructs the last ten private memory notes at a recorded instant',()=>{
   const engine=fixture(),store=new Store(':memory:',engine.module.manifest);store.record(engine.frame(),engine.state());
   for(let index=0;index<22;index++)engine.event('t1','memory',`memory ${index}`);store.record(engine.frame());
-  assert.deepEqual(store.memoryAt(0,'t1'),Array.from({length:20},(_,index)=>`memory ${index+2}`));store.close();
+  assert.deepEqual(store.memoryAt(0,'t1'),Array.from({length:10},(_,index)=>`memory ${index+12}`));store.close();
 });
 test('the Harness schema guard validates contextual embodied tools', async () => {
   const engine = fixture([[1,1,0,'wood']]), memory = {notes:[] as string[]}, tools=worldTools(engine,'t1',memory);
-  assert.deepEqual(tools.map(t=>t.name),['look','walk','turn','run','jump','hit','pickup','say','wait','journal']);
+  assert.deepEqual(tools.map(t=>t.name),['look','walk','turn','run','jump','hit','wait','journal']);
   const invalid = await tools.find(tool=>tool.name==='walk')!.execute({distance:'8'}) as {ok:boolean};
   assert.equal(invalid.ok,false);
   const journal=tools.find(tool=>tool.name==='journal')!;for(let i=0;i<23;i++)await journal.execute({note:`note ${i}`});
-  assert.deepEqual(memory.notes,Array.from({length:20},(_,index)=>`note ${index+3}`));
-  await journal.execute({note:'note 22'});assert.equal(memory.notes.length,20,'Duplicate private notes must not be stored twice.');
-  engine.discoveries.set('t1',new Set(['thrown-blocks-settle']));await journal.execute({note:'Thrown blocks settle and become part of the terrain.'});assert.equal(memory.notes.length,20,'Learned knowledge must not be duplicated as a private note.');
+  assert.deepEqual(memory.notes,Array.from({length:10},(_,index)=>`note ${index+13}`));
+  await journal.execute({note:'note 22'});assert.equal(memory.notes.length,10,'Duplicate private notes must not be stored twice.');
+  engine.discoveries.set('t1',new Set(['thrown-blocks-settle']));await journal.execute({note:'Thrown blocks settle and become part of the terrain.'});assert.equal(memory.notes.length,10,'Learned knowledge must not be duplicated as a private note.');
   let registered=0; apply({tools:{register(tool){assert.equal(typeof tool.output.render,'function');registered++;return()=>{};}}},{engine,entityId:'t1',memory});
   assert.equal(registered,tools.length);
   for(let hit=0;hit<3;hit++)engine.act('t1',{action:'hit',target:[1,1,0]});

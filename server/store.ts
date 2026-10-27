@@ -98,6 +98,8 @@ function compatibleManifest(recorded: string, current: ModuleManifest) {
     const previous=JSON.parse(recorded) as ModuleManifest;
     // Day length is presentation metadata; ticks remain the authoritative net time.
     previous.daySeconds=current.daySeconds;
+    // Agent wording does not change recorded geometry or replay compatibility.
+    previous.agentInstructions=current.agentInstructions;
     return JSON.stringify(previous)===JSON.stringify(current);
   } catch { return false; }
 }
