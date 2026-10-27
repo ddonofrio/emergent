@@ -9,11 +9,13 @@ export class WorldView {
   readonly renderer: THREE.WebGLRenderer;
   readonly controls: OrbitControls;
   private cells = new Map<string, string>();
+  private damage = new Map<string, number>();
   private chunks = new Map<string, Set<string>>();
   private meshes = new Map<string, THREE.InstancedMesh>();
   private creatures = new Map<string, THREE.Group>();
-  private objects = new Map<string, THREE.Mesh>();
-  private held = new Map<string, THREE.Mesh>();
+  private objects = new Map<string, THREE.Object3D>();
+  private held = new Map<string, THREE.Group>();
+  private punches = new Map<string, { start: number; until: number }>();
   private effects: { mesh: THREE.Mesh; until: number; start: number }[] = [];
   private sea: THREE.Mesh;
   private seabed: THREE.Mesh;
@@ -76,7 +78,7 @@ export class WorldView {
     else { this.cells.delete(k); this.chunks.get(chunk)?.delete(k); }
   }
   load(state: WorldState, manifest: ModuleManifest) {
-    this.manifest = manifest; this.cells.clear(); this.chunks.clear();
+    this.manifest = manifest; this.cells.clear(); this.chunks.clear(); this.punches.clear(); this.damage=new Map(Object.entries(state.blockDamage??{}));
     this.sea.position.y = manifest.waterLevel + .015; this.seabed.position.y = manifest.bounds.min[1];
     for (const effect of this.effects) { this.scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose(); } this.effects = [];
     for (const mesh of this.meshes.values()) { this.scene.remove(mesh); mesh.dispose(); } this.meshes.clear();
@@ -91,11 +93,16 @@ export class WorldView {
       this.setCell(k,kind); const p = unkey(k); dirty.add(this.chunk(p));
       for (const offset of neighbors) dirty.add(this.chunk(p.map((v,i) => v+offset[i]) as Vec3));
     }
+    const nextDamage=new Map(Object.entries(frame.blockDamage??{}));
+    for(const voxel of new Set([...this.damage.keys(),...nextDamage.keys()]))if(this.damage.get(voxel)!==nextDamage.get(voxel))dirty.add(this.chunk(unkey(voxel)));
+    this.damage=nextDamage;
     for (const chunk of dirty) this.buildChunk(chunk);
     this.prior = snap ? frame : this.current;
     this.interpolationMs = Math.max(1, (frame.time - (this.prior?.time ?? frame.time)) * 1000 / speed);
     this.current = frame; this.received = performance.now(); this.syncEntities(frame.entities);
     for (const event of frame.events) {
+      const action=(event.data as {action?:{action?:string}}|undefined)?.action?.action;
+      if(event.type==='action'&&action==='hit')this.punches.set(event.actor,{start:event.time,until:event.time+.55});
       if (event.type !== 'splash' && event.type !== 'discovery') continue;
       const data = event.data as { position?: Vec3; target?: Vec3 };
       const position = data.position ?? data.target; if (!position) continue;
@@ -116,7 +123,7 @@ export class WorldView {
       dummy.position.set(p[0]+.5,p[1]+.5,p[2]+.5); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1);
       if (kind === 'plant') { dummy.scale.set(.18,.55,.18); dummy.position.y = p[1]+.27; dummy.rotation.z = Math.sin(p[0])* .2; }
       dummy.updateMatrix(); mesh.setMatrixAt(index,dummy.matrix);
-      const color = new THREE.Color(this.manifest!.materials[kind]?.color ?? '#ffffff'); color.multiplyScalar(.94 + .1 * (Math.sin(p[0]*12.98 + p[2]*78.23 + p[1]*37.7)*.5+.5)); mesh.setColorAt(index,color);
+      const color = new THREE.Color(this.manifest!.materials[kind]?.color ?? '#ffffff'); color.multiplyScalar((.94 + .1 * (Math.sin(p[0]*12.98 + p[2]*78.23 + p[1]*37.7)*.5+.5))*(1-(this.damage.get(k)??0)*.22)); mesh.setColorAt(index,color);
     });
     mesh.castShadow = true; mesh.receiveShadow = true; mesh.computeBoundingSphere(); this.meshes.set(chunk,mesh); this.scene.add(mesh);
   }
@@ -135,6 +142,22 @@ export class WorldView {
       material.transparent = !enabled; material.opacity = enabled ? 1 : .22; material.depthWrite = enabled;
     });
   }
+  private heldVisual(kind: string, color: string) {
+    const visual=new THREE.Group();visual.userData.kind=kind;visual.position.set(.36,1,.38);
+    const material=(value:string)=>{const result=new THREE.MeshStandardMaterial({color:value,roughness:.86});result.userData.activeColor=value;return result;};
+    if(kind==='arrow'){
+      const shaft=new THREE.Mesh(new THREE.CylinderGeometry(.025,.025,.9,8),material(color));shaft.rotation.x=Math.PI/2;shaft.castShadow=true;visual.add(shaft);
+      const tip=new THREE.Mesh(new THREE.ConeGeometry(.075,.18,8),material('#6f756f'));tip.rotation.x=Math.PI/2;tip.position.z=.53;tip.castShadow=true;visual.add(tip);
+      const fletching=this.box(visual,[.16,.035,.18],[0,0,-.42],'#d8c7a0');fletching.rotation.z=Math.PI/4;
+    }else{
+      const item=new THREE.Mesh(this.cube,material(color));item.scale.setScalar(.42);item.castShadow=true;visual.add(item);
+    }
+    return visual;
+  }
+  private disposeItemVisual(visual: THREE.Object3D) {
+    visual.parent?.remove(visual);
+    visual.traverse(object=>{if(!(object instanceof THREE.Mesh))return;if(object.geometry!==this.cube)object.geometry.dispose();const materials=Array.isArray(object.material)?object.material:[object.material];for(const material of materials)material.dispose();});
+  }
   private syncEntities(entities: Entity[]) {
     for (const entity of entities) {
       if (this.creatures.has(entity.id)) continue;
@@ -148,7 +171,8 @@ export class WorldView {
         this.box(group,[.07,.07,.03],[-.11,1.55,.22],'#25392d'); this.box(group,[.07,.07,.03],[.11,1.55,.22],'#25392d');
         const left = this.box(group,[.2,.57,.24],[-.17,.29,0],'#566552'); left.name = 'leg-left';
         const right = this.box(group,[.2,.57,.24],[.17,.29,0],'#566552'); right.name = 'leg-right';
-        this.box(group,[.16,.6,.22],[-.39,.95,0],'#d9b98d'); this.box(group,[.16,.6,.22],[.39,.95,0],'#d9b98d');
+        this.box(group,[.16,.6,.22],[-.39,.95,0],'#d9b98d');
+        const rightArm=new THREE.Group();rightArm.name='arm-right';rightArm.position.set(.39,1.25,0);this.box(rightArm,[.16,.6,.22],[0,-.3,0],'#d9b98d');group.add(rightArm);
       }
       this.creatures.set(entity.id,group); this.scene.add(group);
       const label = document.createElement('button'); label.className = 'entity-label'; label.textContent = entity.name; label.addEventListener('click', () => this.onSelect(entity.id)); this.container.append(label); this.labels.set(entity.id,label);
@@ -172,9 +196,10 @@ export class WorldView {
         const group = this.creatures.get(e.id)!; const previous = this.prior?.entities.find(p => p.id === e.id) ?? e;
         const enabled = e.enabled !== false;
         let held = this.held.get(e.id);
-        if (e.inventory) {
-          if (!held) { held = new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial()); held.scale.setScalar(.42); held.position.set(.36,1,.38); held.castShadow=true; group.add(held); this.held.set(e.id,held); group.userData.enabled = undefined; }
-          const material = held.material as THREE.MeshStandardMaterial, color = this.manifest!.materials[e.inventory.kind]?.color ?? '#ffffff'; material.userData.activeColor = color; material.color.set(color); if (!enabled) group.userData.enabled = undefined;
+        const carried=e.inventory?.selected===null||!e.inventory?undefined:e.inventory.stacks[e.inventory.selected];
+        if (carried) {
+          const color=this.manifest!.materials[carried.kind]?.color??'#ffffff';
+          if (!held || held.userData.kind!==carried.kind) { if(held)this.disposeItemVisual(held);held=this.heldVisual(carried.kind,color);group.add(held);this.held.set(e.id,held);group.userData.enabled=undefined; }
           held.visible = true;
         } else if (held) held.visible = false;
         this.styleEntity(group,enabled);
@@ -182,6 +207,8 @@ export class WorldView {
         const turn = Math.atan2(Math.sin((e.yaw-previous.yaw)*Math.PI/180),Math.cos((e.yaw-previous.yaw)*Math.PI/180)); group.rotation.y = previous.yaw*Math.PI/180+turn*alpha;
         const walking = e.motion && distanceSquared(e.position,previous.position) > .00001;
         for (const name of ['leg-left','leg-right']) { const leg = group.getObjectByName(name); if (leg) leg.rotation.x = walking ? Math.sin(visualTime*9)*(name === 'leg-left' ? .32 : -.32) : 0; }
+        const rightArm=group.getObjectByName('arm-right'),punch=this.punches.get(e.id);
+        if(rightArm){if(punch&&visualTime<=punch.until){const phase=Math.max(0,Math.min(1,(visualTime-punch.start)/(punch.until-punch.start)));rightArm.rotation.x=-Math.sin(Math.PI*phase)*1.8;}else{rightArm.rotation.x=0;if(punch)this.punches.delete(e.id);}}
         const label = this.labels.get(e.id)!; const projected = group.position.clone().add(new THREE.Vector3(0,e.height+.7,0)).project(this.camera);
         label.style.display = Math.abs(projected.x)>1 || Math.abs(projected.y)>1 || projected.z>1 ? 'none' : 'block';
         label.style.left = `${(projected.x*.5+.5)*this.container.clientWidth}px`; label.style.top = `${(-projected.y*.5+.5)*this.container.clientHeight}px`;
@@ -193,12 +220,16 @@ export class WorldView {
         }
       }
       const ids = new Set(this.current.bodies.map(b => b.id));
-      for (const [id,mesh] of this.objects) if (!ids.has(id)) { this.scene.remove(mesh); (mesh.material as THREE.Material).dispose(); this.objects.delete(id); }
+      for (const [id,object] of this.objects) if (!ids.has(id)) { this.disposeItemVisual(object); this.objects.delete(id); }
       for (const b of this.current.bodies) {
-        let mesh = this.objects.get(b.id);
-        if (!mesh) { mesh = new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial({ color: this.manifest!.materials[b.kind]?.color ?? '#ffffff' })); mesh.scale.setScalar(.56); mesh.castShadow = true; this.scene.add(mesh); this.objects.set(b.id,mesh); }
-        const previous = this.prior?.bodies.find(p => p.id === b.id) ?? b; mesh.position.set(...previous.position).lerp(new THREE.Vector3(...b.position),alpha);
-        if (!b.resting) mesh.rotation.set(visualTime*2,visualTime*.8,0);
+        let object = this.objects.get(b.id);
+        if (!object) {
+          const color=this.manifest!.materials[b.kind]?.color??'#ffffff';
+          if(b.kind==='arrow'){object=this.heldVisual(b.kind,color);object.position.set(0,0,0);}else{const mesh=new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial({color}));mesh.scale.setScalar(.56);mesh.castShadow=true;object=mesh;}
+          this.scene.add(object);this.objects.set(b.id,object);
+        }
+        const previous = this.prior?.bodies.find(p => p.id === b.id) ?? b; object.position.set(...previous.position).lerp(new THREE.Vector3(...b.position),alpha);
+        if (!b.resting) object.rotation.set(visualTime*2,visualTime*.8,0);
       }
       this.effects = this.effects.filter(effect => {
         if (this.current!.time >= effect.until) { this.scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose(); return false; }

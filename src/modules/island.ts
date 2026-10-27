@@ -1,4 +1,5 @@
 import type { Block, Entity, Vec3, WorldModule } from '../core/types';
+import { WORLD_DAY_SECONDS } from '../core/time';
 
 const waterLevel = 0;
 export const island: WorldModule = {
@@ -6,7 +7,7 @@ export const island: WorldModule = {
     id: 'first-shore', version: 1, name: 'First Shore', seed: 731,
     description: 'Two curious minds. One finite island. No assigned objective.',
     bounds: { min: [-64, -32, -64], max: [64, 64, 64] }, waterLevel, gravity: 9.81,
-    daySeconds: 600, vocabulary: ['hey', 'look', 'come', 'yes', 'no', 'give', 'help'],
+    daySeconds: WORLD_DAY_SECONDS, vocabulary: ['hey', 'look', 'come', 'yes', 'no', 'give', 'help'],
     perception: { range: 18, fieldOfView: 120, maxBlocks: 96 },
     materials: {
       grass: { color: '#74955a', solid: true, floats: false },
@@ -17,6 +18,9 @@ export const island: WorldModule = {
       leaves: { color: '#477b51', solid: true, floats: true },
       plant: { color: '#94ad61', solid: false, floats: true },
       bucket: { color: '#b98b58', solid: true, floats: true, stackLimit: 1, vessel: true },
+      spear: { color: '#9b714d', solid: true, floats: true },
+      knife: { color: '#a77a52', solid: true, floats: true },
+      arrow: { color: '#ad8057', solid: true, floats: true },
     },
     agentInstructions: 'You are a Troglodyte living on a small island surrounded by deep water. You are embodied here, curious, and quick to tire of repetition. You have no assigned goal. Explore, experiment with what you encounter, notice consequences, and follow whatever becomes interesting. You know only what you perceive, hear, remember, or discover through action. Other creatures may have intentions of their own. Use your small spoken vocabulary when communication seems useful. Tool results are reality: if an action fails, adapt rather than pretending it happened.',
   },
@@ -40,7 +44,8 @@ export const island: WorldModule = {
       }
     }
     for (let x = -35; x <= 35; x += 4) for (let z = -35; z <= 35; z += 5) {
-      if (Math.sin(x * 17 + z * 31) > .4 && Math.hypot(x, z) > 6 && Math.hypot(x, z) < 35) put(x, surface.get(`${x},${z}`)!, z, 'plant');
+      const y=surface.get(`${x},${z}`)!;
+      if (Math.sin(x * 17 + z * 31) > .4 && Math.hypot(x, z) > 6 && Math.hypot(x, z) < 35 && !cells.has(`${x},${y},${z}`)) put(x, y, z, 'plant');
     }
     for (const [x,z] of [[2,2], [-3,-2], [4,1]]) put(x, surface.get(`${x},${z}`)!, z, 'wood');
     const entity = (id: string, name: string, kind: string, x: number, z: number, color: string, yaw: number): Entity => ({
@@ -51,6 +56,12 @@ export const island: WorldModule = {
   },
   transformHit(kind, impact) {
     return kind === 'wood' && impact.every(v => Math.abs(v - .5) <= .16) ? 'bucket' : null;
+  },
+  describeObstacle(issue) {
+    if(issue.material==='wood'&&(issue.height??0)>1)return 'A tree trunk or tall wooden structure blocks your path.';
+  },
+  encounterMessage(observer,other,metres){
+    if(observer.kind==='troglodyte'&&other.kind==='troglodyte')return `You see ${other.name}, another Troglodyte, ${metres.toFixed(1)} metres away. You can use say to speak to them if you wish.`;
   },
   canEnter(entity, feet) {
     return waterLevel - feet[1] > entity.height / 2

@@ -1,13 +1,15 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Engine } from '../../src/core/engine';
 import { clone, distance, type Action, type Observation } from '../../src/core/types';
+import { knowledgeDescription } from '../../src/core/knowledge';
+import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import type { Store } from '../store';
 import { ProviderChain, type ProviderConfig, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
 
 interface Message { role: 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
-interface Mind extends Memory { turns: number; modelTurns: number; cycles: Message[][]; lastResult?: unknown; }
+interface Mind extends Memory { turns: number; modelTurns: number; cycles: Message[][]; lastResult?: unknown; carriedMoves?: number; carryingReminder?: string; emptyHandMoves?: number; }
 export interface PreparedDecision {
   id: string;
   observation: Observation;
@@ -18,6 +20,8 @@ export interface PreparedDecision {
   attempts: number;
   provider: string;
   model: string;
+  reminder?: string;
+  cycle: Message[];
   usage?: unknown;
 }
 export interface PreparedTurn { tick: number; decisions: PreparedDecision[]; }
@@ -34,7 +38,8 @@ export class AgentRuntime {
     this.mode = this.inference.enabled ? 'llm' : 'demo';
     for (const entity of engine.entities.filter(e => e.controller === 'agent')) {
       const saved = store.loadMind<Mind>(entity.id);
-      this.minds.set(entity.id, saved ? { ...saved, modelTurns: saved.modelTurns ?? 0 } : { notes: [], turns: 0, modelTurns: 0, cycles: [] });
+      this.minds.set(entity.id, saved ? { ...saved, notes:saved.notes.slice(-PRIVATE_NOTE_LIMIT), modelTurns: saved.modelTurns ?? 0 } : { notes: [], turns: 0, modelTurns: 0, cycles: [] });
+      if(engine.discoveries.get(entity.id)?.delete('unsafe-terrain-edge'))engine.event(entity.id,'knowledge-correction','Removed the generic terrain-edge discovery; only the deep-water island boundary is learned.',{removed:'unsafe-terrain-edge'});
       if (!engine.active(entity)) entity.status = 'disabled';
       else if (!entity.motion) entity.status = 'idle';
     }
@@ -56,7 +61,7 @@ export class AgentRuntime {
       if (cached) { report(id, { state: 'ready' }); return cached; }
       mind.turns++;
       const prepared = this.mode === 'demo'
-        ? { id, mind, observation, content: null, calls: [{ id: 'demo-' + tick + '-' + id, type: 'function' as const, function: { name: 'act', arguments: JSON.stringify(demoAction(observation, mind.turns, id)) } }], latencyMs: 0, attempts: 0, provider: 'demo', model: 'demo' }
+        ? this.demoDecision(id,mind,observation,tick)
         : await this.request(id, mind, observation, signal, report);
       signal.throwIfAborted();
       // Ready decisions survive outages, pause/resume and process restarts.
@@ -67,36 +72,63 @@ export class AgentRuntime {
     signal.throwIfAborted();
     return { tick, decisions };
   }
+  private demoDecision(id:string,mind:Mind,observation:Observation,tick:number):PreparedDecision{
+    const action=demoAction(observation,mind.turns,id),name=action.action,args={...action} as Record<string,unknown>;delete args.action;
+    const call={id:'demo-'+tick+'-'+id,type:'function' as const,function:{name,arguments:JSON.stringify(args)}};
+    const cycle:Message[]=[{role:'user',content:JSON.stringify({perception:observation.description,navigation:observation.navigation})},{role:'assistant',content:null,tool_calls:[call]}];
+    return{id,mind,observation,content:null,calls:[call],cycle,latencyMs:0,attempts:0,provider:'demo',model:'demo'};
+  }
   private async request(id: string, mind: Mind, observation: Observation, signal: AbortSignal, report: Report): Promise<PreparedDecision> {
     const started = Date.now(), tools = worldTools(this.engine, id, mind);
+    const learnedKnowledge=[...(this.engine.discoveries.get(id)??[])].map(knowledgeDescription).filter(knowledge=>!mind.notes.includes(knowledge));
     const system = `${this.engine.module.manifest.agentInstructions}
 Your name is ${observation.self.name}.
 Words you can say: ${this.engine.module.manifest.vocabulary.join(', ')}.
 Private memory: ${JSON.stringify(mind.notes)}
-Last action result: ${JSON.stringify(mind.lastResult ?? null)}
-Decide what to do now. Use at most one physical action and two supporting calls. Remember only what may matter later.`;
-    const request = {
-      messages: [{ role: 'system', content: system }, ...mind.cycles.flat(), { role: 'user', content: JSON.stringify(observation) }],
-      tools: tools.map(({ name, description, parameters }) => ({ type: 'function', function: { name, description, parameters } })),
-      max_tokens: 900,
-    };
-    let attempts = 0;
-    while (true) {
-      signal.throwIfAborted();
-      attempts++;
-      report(id, { state: attempts === 1 ? 'thinking' : 'waiting', attempts, message: 'Waiting for an inference provider; world time is held.' });
-      try {
-        const answer = await this.inference.complete(request, signal, (provider, index) => {
-          report(id, { state: index ? 'waiting' : 'thinking', attempts, message: `${index ? 'Falling back to' : 'Trying'} ${provider.name}; world time is held.` });
-        });
-        signal.throwIfAborted();
-        mind.modelTurns++;
-        return { id, mind, observation, content: answer.content, calls: answer.calls, latencyMs: Date.now() - started, attempts, provider: answer.provider, model: answer.model, ...(answer.usage === undefined ? {} : { usage: answer.usage }) };
-      } catch (error) {
-        signal.throwIfAborted();
-        report(id, { state: 'waiting', attempts, message: error instanceof Error ? error.message : 'Inference providers unavailable.' });
-        await delay(Math.min(10000, (this.config.retryDelayMs ?? 1000) * 2 ** Math.min(attempts - 1, 4)), undefined, { signal });
+Learned knowledge: ${JSON.stringify(learnedKnowledge)}
+Last action result: ${JSON.stringify(observation.self.lastAction ?? mind.lastResult ?? null)}
+You may freely use journal to keep optional private notes about goals, plans, or things you want to do. Recent conversations fade; a note lets you resume an intention later. For example: "Return to the tree and investigate its wood." Your latest ${PRIVATE_NOTE_LIMIT} notes are remembered; older entries are forgotten. Writing takes no world time.
+Choose one embodied action. You may call look or journal first and will receive their results before choosing. Do not invent outcomes.`;
+    delete mind.carryingReminder;
+    const held=observation.self.inventory?.selected===null||!observation.self.inventory?undefined:observation.self.inventory.stacks[observation.self.inventory.selected];
+    let reminder=held&&(mind.carriedMoves??0)>=10?carryingReminder(held.kind,held.contents):undefined;
+    const eye:[number,number,number]=[observation.self.position[0],observation.self.position[1]+observation.self.height*.85,observation.self.position[2]];
+    if((mind.emptyHandMoves??0)>=10&&!held){
+      const reachable=observation.blocks.filter(block=>{
+        const point:[number,number,number]=[block[0]+.5,block[1]+.5,block[2]+.5];
+        return distance(eye,point)<=3&&this.engine.voxels.clearLine(eye,point,true);
+      });
+      const wood=reachable.find(block=>block[3]==='wood');
+      if(wood)reminder=`The wood within reach at block [${wood.slice(0,3).join(',')}] could be useful. You could try hit on it to see what happens.`;
+      else if(reachable.length)reminder='The blocks in this world look like they can be struck. A visible block is within reach; you could try hit.';
+      else reminder='The blocks in this world look like they can be struck. You could look for one within arm\'s reach and try hit.';
+    }
+    const initial={body:{position:observation.self.position,yaw:observation.self.yaw},perception:observation.description,navigation:observation.navigation,heard:observation.heard,inventory:observation.self.inventory,...(observation.encounters.length?{encounters:observation.encounters}:{}),...(reminder?{reminder}:{})};
+    const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
+    let attempts=0,supporting=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
+    const complete=async()=>{
+      while(true){
+        signal.throwIfAborted();attempts++;
+        report(id,{state:attempts===1?'thinking':'waiting',attempts,message:'Waiting for an inference provider; world time is held.'});
+        try{return await this.inference.complete({messages:[{role:'system',content:system},...mind.cycles.flat(),...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
+        catch(error){signal.throwIfAborted();report(id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});}
       }
+    };
+    while(true){
+      const answer=await complete();signal.throwIfAborted();mind.modelTurns++;provider=answer.provider;model=answer.model;usage=answer.usage;content=answer.content;
+      cycle.push({role:'assistant',content:answer.content,...(answer.calls.length?{tool_calls:answer.calls}:{})});
+      const physical:ToolCall[]=[];
+      for(const call of answer.calls){
+        const tool=tools.find(candidate=>candidate.name===call.function.name);let result:unknown;
+        if(!tool)result={ok:false,message:'Unknown tool.'};
+        else if(tool.physical){physical.push(call);continue;}
+        else if(tool.name!=='journal'&&supporting++>=2)result={ok:false,message:'Use at most two look calls before acting. Journal remains freely available.'};
+        else{try{result=tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{result={ok:false,message:'Invalid tool arguments.'};}}
+        cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
+      }
+      if(physical.length===1)return{id,mind,observation,content,calls:physical,cycle,latencyMs:Date.now()-started,attempts,provider,model,...(reminder?{reminder}:{}),...(usage===undefined?{}:{usage})};
+      if(physical.length>1){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action.'})});}
+      else if(!answer.calls.length)cycle.push({role:'user',content:'Choose one available physical action, or wait explicitly.'});
     }
   }
   commit(turn: PreparedTurn) {
@@ -110,30 +142,37 @@ Decide what to do now. Use at most one physical action and two supporting calls.
     for (const decision of decisions) {
       const { id, observation, content, calls } = decision;
       if (!this.engine.active(this.engine.entity(id))) continue;
-      const mind = clone(decision.mind), tools = worldTools(this.engine, id, mind);
+      const previousMind=this.minds.get(id)!,mind = clone(decision.mind), tools = worldTools(this.engine, id, mind);
       if (this.mode === 'llm') {
-        this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, turn: mind.turns });
+        this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, reminder:decision.reminder??null, turn: mind.turns });
         this.engine.event(id, 'decision', content?.slice(0, 500) || `Requested ${calls.length} tool calls.`, {
           provider: decision.provider, model: decision.model, latencyMs: decision.latencyMs, attempts: decision.attempts, usage: decision.usage ?? null, toolCalls: calls,
         });
       }
-      const cycle: Message[] = [{ role: 'user', content: JSON.stringify(observation) }, { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) }];
-      let acted = false;
-      for (const [index, call] of calls.entries()) {
+      const cycle:Message[]=clone(decision.cycle);
+      for (const call of calls) {
         let result: unknown;
         try {
-          if (index >= 3 || (call.function.name === 'act' && acted)) result = { ok: false, message: 'Turn limit: three tool calls and one physical action.' };
-          else {
-            if (call.function.name === 'act') acted = true;
-            const tool = tools.find(t => t.name === call.function.name);
-            result = tool ? tool.invoke(JSON.parse(call.function.arguments)) : { ok: false, message: 'Unknown tool.' };
-          }
+          const tool = tools.find(t => t.name === call.function.name && t.physical);
+          result = tool ? tool.invoke(JSON.parse(call.function.arguments)) : { ok: false, message: 'That physical action is not currently available.' };
         } catch { result = { ok: false, message: 'Invalid tool arguments.' }; }
         if (this.mode === 'llm') this.engine.event(id, 'tool-result', call.function.name, { callId: call.id, result });
         cycle.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
-        if (call.function.name === 'act') mind.lastResult = result;
+        mind.lastResult = result;
+        const held=observation.self.inventory?.selected===null||!observation.self.inventory?undefined:observation.self.inventory.stacks[observation.self.inventory.selected];
+        const succeeded=(result as {ok?:boolean})?.ok===true;
+        if(succeeded){
+          const moved=call.function.name==='walk'||call.function.name==='jump';
+          if(call.function.name==='hit')mind.emptyHandMoves=0;
+          else if(moved&&!held)mind.emptyHandMoves=Math.min(10,(mind.emptyHandMoves??0)+1);
+          const usedHeld=held&&['place','throw','strike_held','fill','empty','store'].includes(call.function.name);
+          if(moved&&held)mind.carriedMoves=Math.min(10,(mind.carriedMoves??0)+1);
+          else if(usedHeld||!held||(mind.carriedMoves??0)<10)mind.carriedMoves=0;
+        }
       }
+      this.engine.acknowledgeEncounters(id,observation.encounters??[]);
       if (this.mode === 'llm') {
+        for(const note of mind.notes.filter(note=>!previousMind.notes.includes(note)))this.engine.event(id,'memory',note,{notes:mind.notes});
         mind.cycles.push(cycle);
         while (mind.cycles.length > 4 || (JSON.stringify(mind.cycles).length > 24000 && mind.cycles.length > 1)) mind.cycles.shift();
       }
@@ -142,19 +181,26 @@ Decide what to do now. Use at most one physical action and two supporting calls.
   }
 }
 
+function carryingReminder(kind:string,contents?:string) {
+  if(kind==='wood')return 'You are still holding a wood block. You can place it, throw it, work it with strike_held, or store it.';
+  if(kind==='bucket')return contents?`You are still holding a bucket containing ${contents}. You can empty it, place it, throw it, or store it.`:'You are still holding an empty bucket. You can fill it, place it, throw it, or store it.';
+  if(['dirt','grass','sand','stone','leaves','plant'].includes(kind))return `You are still holding a ${kind} block. You can place it, throw it, or store it.`;
+  return `You are still holding a ${kind}. You can place it, throw it, or store it.`;
+}
+
 // Deliberately deterministic and labelled in the UI. This is a mechanical demo,
 // not evidence of LLM behavior. It uses exactly the same local observations/tools.
 function demoAction(o: Observation, turn: number, id: string): Action {
   const phase = (turn + (id === 't2' ? 4 : 0)) % 16;
   const eye = [o.self.position[0], o.self.position[1] + 1.5, o.self.position[2]] as [number,number,number];
   const nearby = o.blocks.filter(b => distance(eye, [b[0]+.5,b[1]+.5,b[2]+.5]) < 2.9);
-  if (o.self.inventory?.kind === 'bucket') return { action: 'throw', force: 3 };
-  if (o.self.inventory) return phase % 2 ? { action: 'throw', force: 7 } : { action: 'place', target: [Math.floor(o.self.position[0] + Math.sin(o.self.yaw * Math.PI / 180) * 2), Math.floor(o.self.position[1]), Math.floor(o.self.position[2] + Math.cos(o.self.yaw * Math.PI / 180) * 2)] };
+  const held=o.self.inventory?.selected===null||!o.self.inventory?undefined:o.self.inventory.stacks[o.self.inventory.selected];
+  if (held) return phase % 2 ? { action: 'throw', force: 7 } : { action: 'place', target: [Math.floor(o.self.position[0] + Math.sin(o.self.yaw * Math.PI / 180) * 2), Math.floor(o.self.position[1]), Math.floor(o.self.position[2] + Math.cos(o.self.yaw * Math.PI / 180) * 2)] };
   const wood = nearby.find(b => b[3] === 'wood');
-  if (wood) return { action: 'hit', target: wood.slice(0,3) as [number,number,number], impact: [.5,.5,.5] };
+  if (wood) return { action: 'hit', target: wood.slice(0,3) as [number,number,number] };
   if (phase === 0 || phase === 8) return { action: 'say', word: phase ? 'look' : 'hey' };
   if (phase === 2 && o.items.length) return { action: 'pickup', itemId: o.items[0].id };
-  if (phase === 6 && nearby.length) { const block = nearby.find(b => b[3] !== 'grass') ?? nearby[0]; return { action: 'remove', target: block.slice(0,3) as [number,number,number] }; }
+  if (phase === 6 && nearby.length) { const block = nearby.find(b => b[3] !== 'grass') ?? nearby[0]; return { action: 'hit', target: block.slice(0,3) as [number,number,number] }; }
   if (phase % 3 === 0) return { action: 'turn', angle: id === 't1' ? 57 : -73 };
-  return { action: 'move', distance: 2.5 };
+  return { action: 'walk', distance: 6 };
 }

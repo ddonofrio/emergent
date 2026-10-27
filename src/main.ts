@@ -1,8 +1,9 @@
 import './style.css';
 import { WorldView } from './view/world-view';
-import { advancePlayback } from './view/playback-clock';
-import type { TurnStatus } from './core/time';
+import { advancePlayback, fastScrubSpeed } from './view/playback-clock';
+import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, type TurnStatus } from './core/time';
 import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from './core/types';
+import { knowledgeDescription } from './core/knowledge';
 
 interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; agentsEnabled: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
@@ -23,9 +24,9 @@ app.innerHTML = `
         <div id="toast" role="status"></div>
       </div>
       <section class="timeline" aria-label="Recorded world timeline">
-        <div class="timeline-top"><div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span> Live</button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00.0</span></div><div class="timeline-right"><span id="record-status">Recording every 100 ms</span><select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div></div>
+        <div class="timeline-top"><div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span> Live</button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00:00.0</span><span id="time-to-live">LIVE</span></div><div class="timeline-right"><span id="record-status">Recording every 100 ms</span><select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div></div>
         <div class="scrubber"><div id="event-marks"></div><input id="seek" type="range" min="0" max="1" value="0" step="2" aria-label="Seek world history"></div>
-        <div class="timeline-labels"><span id="range-start">00:00</span><span>PAST <span class="timeline-line">─────────────────</span> WORLD TIME <span class="timeline-line">─────────────────</span> PRESENT</span><span id="range-end">00:00</span></div>
+        <div class="timeline-labels"><span id="range-start">00:00:00</span><span>PAST <span class="timeline-line">─────────────────</span> NET WORLD TIME <span class="timeline-line">─────────────────</span> PRESENT</span><span id="range-end">00:00:00</span></div>
       </section>
     </section>
     <aside class="inspector" aria-label="World inspector">
@@ -47,16 +48,21 @@ let meta: Metadata;
 let shown: WorldState;
 let liveDynamic: Omit<WorldState,'blocks'>;
 const liveCells = new Map<string,string>();
-let latest = 0, selected = 't1', isLive = true, playing = false, cursor = 0, events: WorldEvent[] = [], liveEvents: WorldEvent[] = [];
+let latest = 0, selected = 't1', isLive = true, playing = false, cursor = 0, scrubTarget: number | null = null, events: WorldEvent[] = [], liveEvents: WorldEvent[] = [];
 let epoch = 0, seekTimer: ReturnType<typeof setTimeout>, replayFrames: Frame[] = [], fetching = false, replayClock = 0, replayRequest = 0, lastPlayback = performance.now(), lastUi = 0, nextReplayFetch = 0, seeking = false;
 let activeTab = 'journal', dayCount = 0;
+let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[]}|undefined;
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
-function elapsed(tick: number) { const seconds = tick/20; return `${String(Math.floor(seconds/60)).padStart(2,'0')}:${(seconds%60).toFixed(1).padStart(4,'0')}`; }
-function dayOf(tick: number) { return Math.floor(tick / (meta.module.daySeconds*20))+1; }
-function clock(tick: number) { const minute = Math.floor((tick/20%meta.module.daySeconds)/meta.module.daySeconds*1440); return `${String(Math.floor(minute/60)).padStart(2,'0')}:${String(minute%60).padStart(2,'0')}`; }
+function dayOf(tick: number) { return worldTime(tick).day; }
+function clock(tick: number) { const value=worldTime(tick);return `${String(value.hour).padStart(2,'0')}:${String(value.minute).padStart(2,'0')}:${String(value.second).padStart(2,'0')}`; }
 function setConnection(connected: boolean) { $('connection').textContent = connected ? 'Connected' : 'Reconnecting'; $('connection-dot').classList.toggle('offline',!connected); }
-function selectEntity(id: string) { selected = id; view.select(id); renderInspector(); }
+function selectEntity(id: string) { selected = id; view.select(id); renderInspector(); if(activeTab==='details')void loadMemory(); }
+async function loadMemory(){
+  const request=++memoryRequest,actor=selected,tick=cursor;memoryView=undefined;renderDetails();
+  try{const response=await fetch(`/api/memory?tick=${tick}&actor=${encodeURIComponent(actor)}`);if(!response.ok)throw new Error();const notes=await response.json() as string[];if(request===memoryRequest){memoryView={actor,tick,notes};renderDetails();}}
+  catch{if(request===memoryRequest){memoryView={actor,tick,notes:[]};renderDetails();}}
+}
 function setBoot(boot: Boot) {
   meta = boot; latest = boot.latestTick; liveDynamic = boot.state; liveCells.clear();
   for (const [x,y,z,kind] of boot.state.blocks) liveCells.set(key([x,y,z]),kind);
@@ -83,28 +89,29 @@ stream.addEventListener('frame', event => {
     shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);
     if (frame.events.length) renderJournal();
   }
+  if(activeTab==='details'&&frame.events.some(event=>event.type==='memory'&&event.actor===selected))void loadMemory();
   if (performance.now()-lastUi > 200) { renderTimeline(); renderInspector(); lastUi = performance.now(); }
 });
 stream.onerror = () => setConnection(false);
 
 function goLive() {
   if (!meta || !liveDynamic) return;
-  epoch++; replayRequest++; fetching = false; seeking = false; clearTimeout(seekTimer); isLive = true; playing = false; replayFrames = [];
+  epoch++; replayRequest++; fetching = false; seeking = false; clearTimeout(seekTimer); isLive = true; playing = false; scrubTarget = null; replayFrames = [];
   shown = { ...liveDynamic, blocks: [...liveCells].map(([k,kind]) => [...unkey(k),kind]) };
-  cursor = latest; events = liveEvents; view.load(shown,meta.module); renderTimeline(); renderInspector(); renderJournal();
+  cursor = latest; events = liveEvents; view.load(shown,meta.module); renderTimeline(); renderInspector(); renderJournal();if(activeTab==='details')void loadMemory();
 }
 async function seek(tick: number) {
-  const request = ++epoch; replayRequest++; fetching = false; seeking = true; isLive = false; playing = false; replayFrames = []; view.hold();
+  const request = ++epoch; replayRequest++; fetching = false; seeking = true; isLive = false; playing = false; scrubTarget = null; replayFrames = []; view.hold();
   cursor = Math.min(latest,Math.max(0,tick)); renderTimeline();
   try {
     const response = await fetch(`/api/state?tick=${cursor}`); if (!response.ok) throw new Error('Could not load recorded history.');
     const data = await response.json() as Boot; if (request !== epoch) return;
-    shown = data.state; cursor = shown.tick; replayClock = cursor; seeking = false; events = data.events; view.load(shown,meta.module); renderTimeline(); renderInspector(); renderJournal();
+    shown = data.state; cursor = shown.tick; replayClock = cursor; seeking = false; events = data.events; view.load(shown,meta.module); renderTimeline(); renderInspector(); renderJournal();if(activeTab==='details')void loadMemory();
   } catch (error) { if (request === epoch) toast(error instanceof Error ? error.message : 'History unavailable.'); }
   finally { if (request === epoch) seeking = false; }
 }
 async function fetchReplay() {
-  if (fetching || seeking || isLive || !playing || performance.now() < nextReplayFetch || (replayFrames.at(-1)?.tick ?? cursor) >= latest) return;
+  if (fetching || seeking || isLive || (!playing && scrubTarget === null) || performance.now() < nextReplayFetch || (replayFrames.at(-1)?.tick ?? cursor) >= Math.min(latest,scrubTarget ?? latest)) return;
   const request = ++replayRequest, modeEpoch = epoch; fetching = true;
   nextReplayFetch = performance.now() + 200;
   try {
@@ -117,16 +124,19 @@ async function fetchReplay() {
 }
 function playback(now: number) {
   const dt = Math.min(now-lastPlayback,100); lastPlayback = now;
-  if (playing && !isLive) {
+  if ((playing || scrubTarget !== null) && !isLive) {
     if (replayFrames.length < 80) void fetchReplay();
     if (replayFrames.length) {
-      const speed = Number($<HTMLSelectElement>('speed').value);
-      replayClock = advancePlayback(replayClock, dt, speed, replayFrames.at(-1)!.tick);
-      let changed = false;
+      const destination = scrubTarget ?? replayFrames.at(-1)!.tick;
+      const speed = scrubTarget === null ? Number($<HTMLSelectElement>('speed').value) : fastScrubSpeed(replayClock,destination);
+      replayClock = advancePlayback(replayClock, dt, speed, Math.min(destination,replayFrames.at(-1)!.tick));
+      let changed = false,memoryChanged=false;
       while (replayFrames.length && replayFrames[0].tick <= replayClock) {
-        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] }; view.update(frame,false,speed); events = [...events,...frame.events].slice(-200); changed = true;
+        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] }; view.update(frame,false,speed); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
       }
       if (changed) { renderTimeline(); renderInspector(); renderJournal(); }
+      if(memoryChanged&&activeTab==='details')void loadMemory();
+      if (scrubTarget !== null && cursor >= scrubTarget) { scrubTarget = null; replayFrames = []; view.hold(); renderTimeline(); }
     }
     // Stay in replay at the recording edge. Only the Live button changes observer mode.
   }
@@ -136,11 +146,13 @@ requestAnimationFrame(playback);
 
 function renderTimeline() {
   if (!meta) return;
-  $('view-mode').textContent = isLive ? meta.runtime.phase === 'thinking' ? 'LIVE · WAITING FOR MODELS' : meta.runtime.phase === 'paused' ? 'LIVE · WORLD PAUSED' : 'LIVE OBSERVATION' : playing ? 'RECORDED PLAYBACK' : 'PAUSED OBSERVATION';
+  $('view-mode').textContent = isLive ? meta.runtime.phase === 'thinking' ? 'LIVE · WAITING FOR MODELS' : meta.runtime.phase === 'paused' ? 'LIVE · WORLD PAUSED' : 'LIVE OBSERVATION' : scrubTarget !== null ? 'FAST SCRUB PLAYBACK' : playing ? 'RECORDED PLAYBACK' : 'PAUSED OBSERVATION';
   $('view-mode').classList.toggle('past',!isLive); $('world-clock').textContent = `DAY ${String(dayOf(cursor)).padStart(3,'0')} · ${clock(cursor)}`;
   $('live').classList.toggle('active',isLive); $('play').textContent = isLive || playing ? 'Ⅱ' : '▶'; $('play').setAttribute('aria-label',isLive || playing ? 'Pause observation' : 'Play recording');
-  $('playback-time').textContent = elapsed(cursor); $('range-end').textContent = elapsed(latest);
-  const slider = $<HTMLInputElement>('seek'); slider.max = String(Math.max(2,latest)); slider.value = String(cursor); slider.style.setProperty('--progress',`${cursor/Math.max(1,latest)*100}%`);
+  $('playback-time').textContent = formatWorldDuration(cursor,true);
+  $('time-to-live').textContent = isLive ? 'LIVE' : `${formatWorldDuration(Math.max(0,latest-cursor))} TO LIVE`;
+  $('range-end').textContent = formatWorldDuration(latest);
+  const sliderTick=scrubTarget??cursor,slider = $<HTMLInputElement>('seek'); slider.max = String(Math.max(2,latest)); slider.value = String(sliderTick); slider.style.setProperty('--progress',`${sliderTick/Math.max(1,latest)*100}%`);
   const count = dayOf(latest);
   if (count !== dayCount) { const day = $<HTMLSelectElement>('day'); day.replaceChildren(); for (let i = 1;i<=count;i++) { const option = new Option(`Day ${String(i).padStart(3,'0')}`,String(i)); day.add(option); } dayCount = count; }
   $<HTMLSelectElement>('day').value = String(dayOf(cursor));
@@ -149,7 +161,7 @@ function renderTimeline() {
   $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
   $('record-status').textContent = isLive ? '1 turn = 1 world second' : playing && cursor >= latest ? 'Waiting for the next recorded turn' : 'World time · inference waits omitted';
   const marks = $('event-marks'); marks.replaceChildren();
-  for (const event of liveEvents.filter(e => ['discovery','lost','memory','agent-error'].includes(e.type))) {
+  for (const event of liveEvents.filter(e => ['discovery','lost','memory','encounter','agent-error'].includes(e.type))) {
     const mark = document.createElement('i'); mark.style.left = `${event.tick/Math.max(1,latest)*100}%`; mark.className = event.type; mark.title = event.message; marks.append(mark);
   }
 }
@@ -197,20 +209,26 @@ function renderDetails() {
   const e = shown.entities.find(e => e.id === selected); if (!e) return;
   const panel = $('details'); panel.replaceChildren();
   const title = document.createElement('h3'); title.textContent = `${e.name} / ${e.kind}`; panel.append(title);
-  const pairs = [['Position',e.position.map(v => v.toFixed(1)).join(' / ')],['Facing',`${Math.round(e.yaw)}°`],['State',e.status],['Inventory',e.inventory ? `${e.inventory.count} × ${e.inventory.kind}${e.inventory.kind === 'bucket' ? e.inventory.water ? ' · full' : ' · empty' : ''}` : 'Empty hands'],['Perception',`${meta.module.perception.range} m · ${meta.module.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
+  const held=e.inventory?.selected===null||!e.inventory?undefined:e.inventory.stacks[e.inventory.selected];
+  const inventory=e.inventory?.stacks.map((stack,index)=>`${index}: ${stack.count} × ${stack.kind}${stack.contents?` (${stack.contents})`:''}`).join(', ')??'Empty';
+  const pairs = [['Position',e.position.map(v => v.toFixed(1)).join(' / ')],['Facing',`${Math.round(e.yaw)}°`],['State',e.status],['Hands',held?`${held.kind}${held.contents?` · ${held.contents}`:''}`:'Empty'],['Inventory',inventory],['Perception',`${meta.module.perception.range} m · ${meta.module.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
   for (const [label,value] of pairs) { const row = document.createElement('div'); row.className = 'detail-row'; const a = document.createElement('span'); a.textContent = label; const b = document.createElement('span'); b.textContent = value; row.append(a,b); panel.append(row); }
   const focus = document.createElement('button'); focus.className = 'focus-button'; focus.textContent = `Follow ${e.name}`; focus.onclick = () => view.focus(e.id); panel.append(focus);
   const label = document.createElement('h4'); label.textContent = 'PRIVATE NOTES IN THIS RECORD'; panel.append(label);
-  const notes = events.filter(event => event.actor === selected && event.type === 'memory').slice(-12);
-  if (!notes.length) { const p = document.createElement('p'); p.className = 'muted'; p.textContent = 'No memory notes in the visible journal window.'; panel.append(p); }
-  for (const note of notes) { const p = document.createElement('p'); p.textContent = note.message; panel.append(p); }
+  if(memoryView?.actor!==selected){const p=document.createElement('p');p.className='muted';p.textContent='Loading private memory.';panel.append(p);}
+  else if(!memoryView.notes.length){const p=document.createElement('p');p.className='muted';p.textContent='No private memory notes yet.';panel.append(p);}
+  else for(const note of memoryView.notes){const p=document.createElement('p');p.textContent=note;panel.append(p);}
+  const knowledgeLabel=document.createElement('h4');knowledgeLabel.textContent='LEARNED KNOWLEDGE';panel.append(knowledgeLabel);
+  const learned=(shown.discoveries?.[selected]??[]).map(knowledgeDescription);
+  if(!learned.length){const p=document.createElement('p');p.className='muted';p.textContent='Nothing discovered yet.';panel.append(p);}
+  else for(const knowledge of learned){const p=document.createElement('p');p.textContent=knowledge;panel.append(p);}
 }
 function renderJournal() {
   const journal = $('journal'), wasAtTop = journal.scrollTop < 20; journal.replaceChildren();
   const visible = events.filter(e => e.type !== 'observation' && e.type !== 'tool-result').slice(-70).reverse(); $('event-count').textContent = String(visible.length);
   for (const event of visible) {
     const row = document.createElement('article'); row.className = `journal-entry ${event.type}`;
-    const time = document.createElement('button'); time.className = 'event-time'; time.textContent = elapsed(event.tick); time.title = 'Jump to this recorded moment'; time.onclick = () => void seek(event.tick);
+    const time = document.createElement('button'); time.className = 'event-time'; time.textContent = formatWorldDuration(event.tick); time.title = 'Jump to this recorded moment'; time.onclick = () => void seek(event.tick);
     const content = document.createElement('div'); const header = document.createElement('div'); header.className = 'event-heading';
     const actor = document.createElement('strong'); actor.textContent = shown?.entities.find(e => e.id === event.actor)?.name ?? 'World';
     const type = document.createElement('span'); type.textContent = event.type; header.append(actor,type);
@@ -228,8 +246,13 @@ $('play').onclick = () => {
   else { playing = !playing; replayClock = cursor; if (playing) void fetchReplay(); else view.hold(); }
   renderTimeline();
 };
-$<HTMLInputElement>('seek').oninput = event => { const tick = Number((event.target as HTMLInputElement).value); isLive = false; playing = false; seeking = true; view.hold(); epoch++; cursor = tick; clearTimeout(seekTimer); renderTimeline(); seekTimer = setTimeout(() => void seek(tick),90); };
-$<HTMLSelectElement>('day').onchange = event => void seek((Number((event.target as HTMLSelectElement).value)-1)*meta.module.daySeconds*20);
+$<HTMLInputElement>('seek').oninput = event => {
+  const tick=Number((event.target as HTMLInputElement).value);clearTimeout(seekTimer);
+  if(tick<=cursor){scrubTarget=null;playing=false;seeking=true;view.hold();renderTimeline();seekTimer=setTimeout(()=>void seek(tick),60);return;}
+  if(isLive){isLive=false;epoch++;replayRequest++;fetching=false;replayFrames=[];}
+  seeking=false;playing=false;scrubTarget=Math.min(latest,tick);replayClock=cursor;renderTimeline();void fetchReplay();
+};
+$<HTMLSelectElement>('day').onchange = event => void seek((Number((event.target as HTMLSelectElement).value)-1)*WORLD_DAY_SECONDS*20);
 $('overview').onclick = () => view.overview(); $('top-down').onclick = () => view.topDown(); $('follow').onclick = () => view.focus(selected);
 $('agent-toggle').onclick = async () => {
   try { const response = await fetch('/api/control',{ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentsEnabled: !meta.agentsEnabled }) }); if (!response.ok) throw new Error(); meta = await response.json(); renderTimeline(); }
@@ -237,7 +260,7 @@ $('agent-toggle').onclick = async () => {
 };
 for (const tab of ['journal','details']) $(tab+'-tab').onclick = () => {
   activeTab = tab; for (const name of ['journal','details']) { $(name).classList.toggle('hidden',name!==tab); $(name+'-tab').classList.toggle('active',name===tab); $(name+'-tab').setAttribute('aria-selected',String(name===tab)); }
-  if (tab === 'details') renderDetails();
+  if (tab === 'details') { renderDetails();void loadMemory(); }
 };
 $('help-button').onclick = () => $<HTMLDialogElement>('guide').showModal();
 $('close-guide').onclick = () => $<HTMLDialogElement>('guide').close();

@@ -7,6 +7,8 @@ export interface ProviderConfig {
   apiKey: string;
   baseUrl: string;
   model: string;
+  displayModel?: string;
+  modelDiscovery?: 'lm-studio';
   timeoutMs?: number;
   headers?: Record<string, string>;
 }
@@ -27,7 +29,7 @@ const positive = (value: string | undefined, fallback: number) => {
 
 export function providersFromEnv(env: NodeJS.ProcessEnv = process.env): ProviderConfig[] {
   const providers: ProviderConfig[] = [];
-  if (env.OPENROUTER_API_KEY?.trim()) providers.push({
+  if (env.OPENROUTER_ENABLED !== 'false' && env.OPENROUTER_API_KEY?.trim()) providers.push({
     id: 'openrouter',
     name: 'OpenRouter Free',
     apiKey: env.OPENROUTER_API_KEY.trim(),
@@ -41,7 +43,8 @@ export function providersFromEnv(env: NodeJS.ProcessEnv = process.env): Provider
     name: 'Local LM Studio',
     apiKey: env.LOCAL_LLM_API_KEY?.trim() || 'local-lm-studio',
     baseUrl: env.LOCAL_LLM_BASE_URL.trim(),
-    model: env.LOCAL_LLM_MODEL?.trim() || 'omnicoder-9b',
+    model: env.LOCAL_LLM_MODEL?.trim() || 'auto-detect loaded model',
+    modelDiscovery: 'lm-studio',
   });
   if (!providers.length && env.LLM_API_KEY?.trim()) providers.push({
     id: 'legacy',
@@ -57,14 +60,19 @@ export class ProviderChain {
   constructor(readonly providers: ProviderConfig[]) {}
   get enabled() { return this.providers.length > 0; }
   get cacheKey() { return this.providers.map(provider => `${provider.id}:${provider.model}`).join('->') || 'demo'; }
-  get label() { return this.providers.map(provider => `${provider.name} (${provider.model})`).join(' -> ') || 'Scripted demo'; }
+  get label() { return this.providers.map(provider => `${provider.name} (${provider.displayModel ?? provider.model})`).join(' -> ') || 'Scripted demo'; }
+
+  async refreshDiscoveredModels(signal: AbortSignal) {
+    await Promise.all(this.providers.filter(provider => provider.modelDiscovery === 'lm-studio').map(provider => this.discoverLmStudioModel(provider, signal)));
+  }
 
   async complete(request: CompletionRequest, signal: AbortSignal, onAttempt: (provider: ProviderConfig, index: number) => void): Promise<CompletionResult> {
     const failures: string[] = [];
     for (const [index, provider] of this.providers.entries()) {
       signal.throwIfAborted();
-      onAttempt(provider, index);
       try {
+        if (provider.modelDiscovery === 'lm-studio') await this.discoverLmStudioModel(provider, signal);
+        onAttempt(provider, index);
         return await this.request(provider, request, signal);
       } catch (error) {
         signal.throwIfAborted();
@@ -72,6 +80,29 @@ export class ProviderChain {
       }
     }
     throw new Error(`All inference providers are unavailable. ${failures.join(' ')}`);
+  }
+
+  private async discoverLmStudioModel(provider: ProviderConfig, signal: AbortSignal) {
+    const endpoint = new URL('/api/v1/models', provider.baseUrl).toString();
+    let response: Response;
+    try {
+      response = await fetch(endpoint, { headers: { Authorization: `Bearer ${provider.apiKey}`, ...provider.headers }, signal });
+    } catch {
+      signal.throwIfAborted();
+      throw new Error(`${provider.name} model discovery failed.`);
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`${provider.name} model discovery returned HTTP ${response.status}.`);
+    }
+    const payload = await response.json() as { models?: LmStudioModel[] };
+    const loaded = (payload.models ?? []).filter(model => (model.type === 'llm' || model.type === 'decision') && model.loaded_instances?.length);
+    if (!loaded.length) throw new Error(`${provider.name} has no loaded language model.`);
+    const preferred = loaded.find(model => matchesModel(model, provider.model)) ?? loaded[0];
+    const instance = preferred.loaded_instances![0];
+    if (!instance.id?.trim()) throw new Error(`${provider.name} returned a loaded model without an instance identifier.`);
+    provider.model = instance.id.trim();
+    provider.displayModel = preferred.selected_variant?.trim() || preferred.key?.trim() || preferred.display_name?.trim() || provider.model;
   }
 
   private async request(provider: ProviderConfig, request: CompletionRequest, signal: AbortSignal): Promise<CompletionResult> {
@@ -105,4 +136,19 @@ export class ProviderChain {
     }
     return { provider: provider.id, providerName: provider.name, model: payload.model ?? provider.model, content, calls, ...(payload.usage === undefined ? {} : { usage: payload.usage }) };
   }
+}
+
+interface LmStudioModel {
+  type?: string;
+  key?: string;
+  display_name?: string;
+  selected_variant?: string;
+  loaded_instances?: { id?: string }[];
+}
+
+function matchesModel(model: LmStudioModel, configured: string) {
+  if (!configured || configured === 'auto-detect loaded model') return false;
+  const needle = configured.toLowerCase();
+  return [model.key, model.display_name, model.selected_variant, ...(model.loaded_instances ?? []).map(instance => instance.id)]
+    .some(value => value?.toLowerCase() === needle || value?.toLowerCase().includes(needle));
 }

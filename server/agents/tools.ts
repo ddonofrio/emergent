@@ -1,19 +1,22 @@
 import { assertSupportedJsonSchema, validateJsonSchemaValue, type JsonSchemaNode } from '../../vendor/deepseek-harness/json-schema';
 import type { Engine } from '../../src/core/engine';
 import type { Action } from '../../src/core/types';
+import { knowledgeDescription } from '../../src/core/knowledge';
+import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 
 export interface Memory { notes: string[]; }
 export interface WorldTool {
   name: string; description: string; parameters: JsonSchemaNode;
+  physical: boolean;
   output: { schema: JsonSchemaNode; render(args: unknown, value: unknown): { type: 'text'; text: string }[] };
   execute(args: unknown, exec?: { signal?: AbortSignal }): Promise<unknown>;
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
 }
 const vector: JsonSchemaNode = { type: 'array', items: { type: 'number' }, description: 'Exactly three numbers: [x,y,z].' };
 export function worldTools(engine: Engine, id: string, memory: Memory): WorldTool[] {
-  const tool = (name: string, description: string, parameters: JsonSchemaNode, run: (args: any) => unknown): WorldTool => {
+  const tool = (name: string, description: string, parameters: JsonSchemaNode, physical: boolean, run: (args: any) => unknown): WorldTool => {
     assertSupportedJsonSchema(parameters);
-    return { name, description, parameters, output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    return { name, description, parameters, physical, output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
       async execute(args, exec) { return this.invoke(args, exec); },
       invoke(args, exec) {
         exec?.signal?.throwIfAborted();
@@ -22,16 +25,51 @@ export function worldTools(engine: Engine, id: string, memory: Memory): WorldToo
         return run(args);
       } };
   };
-  return [
-    tool('observe', 'Look at your current field of view. navigation reports collision-checked clearance forward and 45 degrees to either side. Its turn values are relative and must be performed before moving along that path. Occluded or distant objects are unknown. A fresh observation is also supplied before every turn.', { type: 'object', properties: {}, additionalProperties: false }, () => engine.observe(id)),
-    tool('act', 'Perform one embodied action. move: forward 0..8m; turn: relative degrees; remove/place/hit/fill/pour: integer target [x,y,z] within 3m. hit also needs impact in [0,1]^3. throw: force 1..12. pickup: itemId. say: one vocabulary word. Actions are checked against the current world. A rejected move returns local navigation alternatives; adapt instead of repeating it.', {
-      type: 'object', required: ['action'], additionalProperties: false,
-      properties: { action: { type: 'string', enum: ['move','turn','wait','remove','place','throw','pickup','hit','fill','pour','say'] }, distance: { type: 'number' }, angle: { type: 'number' }, target: vector, impact: vector, force: { type: 'number' }, itemId: { type: 'string' }, word: { type: 'string', enum: engine.module.manifest.vocabulary } },
-    }, (args: Action) => engine.act(id, args)),
-    tool('remember', 'Keep one short observation or intention in private memory. The last 12 notes survive context compaction and server restarts.', { type: 'object', required: ['note'], additionalProperties: false, properties: { note: { type: 'string' } } }, ({ note }: { note: string }) => {
-      if (!note.trim() || note.length > 300) return { ok: false, message: 'A memory note must contain 1..300 characters.' };
-      memory.notes.push(note); memory.notes.splice(0, Math.max(0, memory.notes.length - 12));
-      engine.event(id, 'memory', note); return { ok: true, message: 'Remembered.' };
-    }),
+  const action = (name:string,description:string,parameters:JsonSchemaNode,actionName:Action['action']) => tool(name,description,parameters,true,(args:Action)=>engine.act(id,{...args,action:actionName}));
+  const noArgs:JsonSchemaNode={type:'object',properties:{},additionalProperties:false};
+  const movement=(maximum:number):JsonSchemaNode=>({type:'object',required:['distance'],additionalProperties:false,properties:{distance:{type:'number',description:`Travel distance in metres, greater than 0 and at most ${maximum}.`},angle:{type:'number',description:'Degrees relative to your body facing, from -180 to 180: negative is left, positive is right.'}}});
+  const jumpParameters:JsonSchemaNode={type:'object',properties:{distance:{type:'number',description:'Jump length from your current position: 0.75 to 2.5 metres. Default 2. Never use a distant obstacle location as the jump length.'},angle:{type:'number',description:'Degrees relative to body facing, from -90 to 90.'}},additionalProperties:false};
+  const jumpDescription='Jump 0.75 to 2.5 metres from where you stand, onto a one-block rise or across a one-block gap. Approach distant obstacles on foot first. Walls two blocks high and unsafe landings are refused. You can jump while holding a block.';
+  const target:JsonSchemaNode={type:'object',required:['target'],additionalProperties:false,properties:{target:vector}};
+  const tools:WorldTool[]=[
+    tool('look','Look in a relative direction and receive a fresh, short embodied description. This does not turn your body or advance world time. Navigation turn, approach.angle and jump.angle remain relative to your body facing.',{type:'object',properties:{angle:{type:'number',description:'Relative viewing angle from -180 to 180 degrees.'}},additionalProperties:false},false,({angle=0}:{angle?:number})=>engine.observeAt(id,Math.max(-180,Math.min(180,angle)))),
+    action('walk','Walk carefully toward a relative direction. Maximum 16 metres. You can step down one block; stepping up needs a jump. Navigation approach is a walking distance; navigation jump is a checked jump from here.',movement(16),'walk'),
+    action('turn','Turn your body in place by relative degrees. Negative is left and positive is right; this also changes your forward view.',{type:'object',required:['angle'],properties:{angle:{type:'number',description:'Relative degrees from -360 to 360.'}},additionalProperties:false},'turn'),
   ];
+  const entity=engine.entity(id),held=engine.held(entity);
+  if(!held){
+    tools.push(action('run','Run across visible clear terrain. Maximum 24 metres. Running stops before unsafe terrain or collisions.',movement(24),'run'));
+    tools.push(action('jump',jumpDescription,jumpParameters,'jump'));
+    tools.push(action('hit','Strike a visible block within 3 metres. Every block cracks on the first two hits and breaks on the third. A supporting block under a creature cannot be struck.',target,'hit'));
+    tools.push(action('pickup','Pick up a visible loose item within 3 metres.',{type:'object',required:['itemId'],additionalProperties:false,properties:{itemId:{type:'string'}}},'pickup'));
+  }else if(['dirt','grass','sand','stone','wood','leaves','plant'].includes(held.kind)){
+    tools.push(action('jump',jumpDescription,jumpParameters,'jump'));
+    tools.push(action('place','Place one held block into an empty supported voxel within 3 metres.',target,'place'));
+    tools.push(action('throw','Throw one held block. It follows physics and fixes itself into terrain after settling on land.',{type:'object',properties:{force:{type:'number'}},additionalProperties:false},'throw'));
+    if(held.kind==='wood')tools.push(action('strike_held','Strike a chosen surface point on the raw held block. Different points may reveal different forms.',{type:'object',required:['impact'],additionalProperties:false,properties:{impact:vector}},'strike_held'));
+    tools.push(action('store','Put the held stack into inventory, leaving your hands empty.',noArgs,'store'));
+  }else{
+    tools.push(action('run','Run across visible clear terrain. Maximum 24 metres.',movement(24),'run'));
+    tools.push(action('jump',jumpDescription,jumpParameters,'jump'));
+    tools.push(action('place','Set the held finished object down on solid ground within 3 metres. It remains a loose object that can be picked up.',target,'place'));
+    tools.push(action('throw','Throw the held finished object.',{type:'object',properties:{force:{type:'number'}},additionalProperties:false},'throw'));
+    if(held.kind==='bucket'){
+      if(held.contents)tools.push(action('empty','Empty the held bucket at a target within 3 metres. Water disperses; dirt and sand become real blocks.',target,'empty'));
+      else tools.push(action('fill','Fill the held bucket from visible water, dirt, or sand within 3 metres. Dirt and sand are removed from the world.',target,'fill'));
+    }
+    tools.push(action('store','Put the held object into inventory, leaving your hands empty.',noArgs,'store'));
+  }
+  if(entity.inventory?.stacks.length)tools.push(action('hold','Select an inventory stack to hold. Stack indexes are zero-based in the inventory description.',{type:'object',required:['stack'],additionalProperties:false,properties:{stack:{type:'number'}}},'hold'));
+  tools.push(action('say','Say one word from your small vocabulary. It reaches agents within 10 metres through clear space.',{type:'object',required:['word'],additionalProperties:false,properties:{word:{type:'string',enum:engine.module.manifest.vocabulary}}},'say'));
+  tools.push(action('wait','Deliberately spend this action waiting and watching.',noArgs,'wait'));
+  tools.push(tool('journal', `Freely write a private note of up to 300 characters about goals, plans, things you want to do, or observations worth remembering. Recent conversations fade, so notes help you resume an intention later. Optional example: "I want to return to the tree and investigate its wood." Writing takes no world time or physical action. Your latest ${PRIVATE_NOTE_LIMIT} notes are included in future decisions and survive server restarts; older notes are forgotten.`, { type: 'object', required: ['note'], additionalProperties: false, properties: { note: { type: 'string' } } },false, ({ note }: { note: string }) => {
+      if (!note.trim() || note.length > 300) return { ok: false, message: 'A memory note must contain 1..300 characters.' };
+      const value=note.trim();
+      if(memory.notes.includes(value))return {ok:true,message:'That note is already in private memory.'};
+      const learned=[...(engine.discoveries.get(id)??[])].map(knowledgeDescription);
+      if(learned.includes(value))return {ok:true,message:'That fact is already retained as learned knowledge.'};
+      memory.notes.push(value); memory.notes.splice(0, Math.max(0, memory.notes.length - PRIVATE_NOTE_LIMIT));
+      return { ok: true, message: 'Remembered.' };
+    }));
+  return tools;
 }

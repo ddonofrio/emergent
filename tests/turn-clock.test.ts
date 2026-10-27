@@ -7,9 +7,10 @@ import { island } from '../src/modules/island';
 import type { Action, Block, Entity, Frame } from '../src/core/types';
 import { Store } from '../server/store';
 import { AgentRuntime } from '../server/agents/runtime';
-import { ProviderChain, type ProviderConfig } from '../server/agents/providers';
+import { ProviderChain, providersFromEnv, type ProviderConfig } from '../server/agents/providers';
 import { TurnClock } from '../server/turn-clock';
-import { advancePlayback } from '../src/view/playback-clock';
+import { advancePlayback, fastScrubSpeed } from '../src/view/playback-clock';
+import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS } from '../src/core/time';
 
 function world() {
   const blocks: Block[] = [];
@@ -33,8 +34,12 @@ async function provider() {
   return { requests, url:`http://127.0.0.1:${(server.address() as {port:number}).port}`, close(){server.closeAllConnections();server.close();} };
 }
 function respond(request: Request, action: Action) {
+  const {action:name,...argumentsValue}=action;
+  respondTool(request,name,argumentsValue);
+}
+function respondTool(request:Request,name:string,argumentsValue:unknown){
   request.response.setHeader('Content-Type','application/json');
-  request.response.end(JSON.stringify({choices:[{message:{content:null,tool_calls:[{id:'call-'+request.id,type:'function',function:{name:'act',arguments:JSON.stringify(action)}}]}}],usage:{total_tokens:42}}));
+  request.response.end(JSON.stringify({choices:[{message:{content:null,tool_calls:[{id:'call-'+request.id,type:'function',function:{name,arguments:JSON.stringify(argumentsValue)}}]}}],usage:{total_tokens:42}}));
 }
 async function until(predicate:()=>boolean) {
   const deadline=Date.now()+3000;
@@ -57,16 +62,16 @@ test('both decisions share one instant; response order and 90 seconds of waiting
     store.record(engine.frame(),engine.state()); const initial=engine.state();
     try {
       r.clock.pump(); await until(()=>p.requests.length===2);
-      for(const req of p.requests) assert.equal(JSON.parse(req.body.messages.at(-1).content).tick,0);
-      respond(p.requests.find(req=>req.id===first)!,{action:'remove',target:[0,1,1]});
+      for(const req of p.requests) assert.match(JSON.parse(req.body.messages.at(-1).content).perception,/hands are empty/i);
+      respond(p.requests.find(req=>req.id===first)!,{action:'hit',target:[0,1,1]});
       await until(()=>r.clock.status().agents[first]?.state==='ready');
       r.advance(90000);
       assert.deepEqual(engine.state(),initial); assert.equal(store.latestTick(),0); assert.equal(r.frames.length,0);
       assert.equal(r.runtime.minds.get(first)!.modelTurns,0);
-      respond(p.requests.find(req=>req.id!==first)!,{action:'remove',target:[0,1,1]});
+      respond(p.requests.find(req=>req.id!==first)!,{action:'hit',target:[0,1,1]});
       await until(()=>r.clock.status().phase==='advancing'); r.advance(1000);
       assert.equal(engine.time,1); assert.equal(r.frames.length,10);
-      assert.equal(engine.entity('t1').inventory?.kind,'wood'); assert.equal(engine.entity('t2').inventory,null);
+      assert.equal(engine.blockDamage.get('0,1,1'),2);assert.equal(engine.entity('t1').inventory,null);assert.equal(engine.entity('t2').inventory,null);
       assert.ok(Math.abs(engine.entity('duck').position[2]-1.5)<1e-8);
       assert.equal(store.loadPending(0,'t1','stub:stub-model'),undefined);
       assert.equal(store.eventsAt(0).length,0,'The initial snapshot must not contain a later decision.');
@@ -94,6 +99,34 @@ test('a stalled primary provider yields to the local fallback without advancing 
     assert.equal(result.provider,'local');
     assert.equal(result.model,'local-model');
   }finally{primary.close();local.close();}
+});
+
+test('OpenRouter can be disabled without removing its credential',()=>{
+  const providers=providersFromEnv({OPENROUTER_ENABLED:'false',OPENROUTER_API_KEY:'retained-secret',LOCAL_LLM_BASE_URL:'http://127.0.0.1:1234/v1'} as NodeJS.ProcessEnv);
+  assert.deepEqual(providers.map(provider=>provider.id),['local']);
+});
+
+test('LM Studio discovery uses the loaded instance and exposes its full variant in the UI label',async()=>{
+  let completionModel='';
+  const server=createServer(async(req,res)=>{
+    if(req.method==='GET'&&req.url==='/api/v1/models'){
+      res.setHeader('Content-Type','application/json');
+      res.end(JSON.stringify({models:[{type:'llm',key:'local-author/ornith-9b-instruct',display_name:'Ornith 9B Instruct',selected_variant:'local-author/ornith-9b-instruct@q6_k',loaded_instances:[{id:'ornith-loaded-instance'}]}]}));
+      return;
+    }
+    let body='';for await(const chunk of req)body+=chunk;
+    completionModel=JSON.parse(body).model;
+    res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify({model:completionModel,choices:[{message:{content:null,tool_calls:[{id:'wait',type:'function',function:{name:'wait',arguments:'{}'}}]}}]}));
+  });
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  const chain=new ProviderChain([{id:'local',name:'Local LM Studio',apiKey:'local',baseUrl:`http://127.0.0.1:${(server.address() as {port:number}).port}/v1`,model:'ornith',modelDiscovery:'lm-studio'}]);
+  try{
+    const result=await chain.complete({messages:[],tools:[],max_tokens:20},new AbortController().signal,()=>{});
+    assert.equal(completionModel,'ornith-loaded-instance');
+    assert.equal(result.model,'ornith-loaded-instance');
+    assert.match(chain.label,/local-author\/ornith-9b-instruct@q6_k/);
+  }finally{server.closeAllConnections();server.close();}
 });
 
 test('unlimited agents continue beyond old counters and an explicit cap never freezes physics',async()=>{
@@ -132,12 +165,176 @@ test('disabled agents request and consume no model turns',async()=>{
   }finally{r.clock.close();store.close();p.close();}
 });
 
+test('look returns perception inside the same frozen decision before a physical action',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
+    respondTool(p.requests[0],'look',{angle:90});await until(()=>p.requests.length===2);
+    assert.equal(engine.tick,0);assert.ok(p.requests[1].body.messages.some((message:any)=>message.role==='tool'&&JSON.parse(message.content).description));
+    respond(p.requests[1],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');assert.equal(engine.tick,0);r.advance(1000);
+    assert.equal(engine.time,1);assert.equal(r.runtime.minds.get('t1')!.modelTurns,2);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('journal is freely available within a frozen decision and persists notes for future prompts',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
+    assert.match(p.requests[0].body.messages[0].content,/freely use journal/);
+    for(let index=0;index<3;index++){
+      respondTool(p.requests[index],'journal',{note:`I want to explore area ${index}.`});await until(()=>p.requests.length===index+2);
+      assert.equal(engine.tick,0);
+      const result=JSON.parse(p.requests[index+1].body.messages.at(-1).content);assert.equal(result.ok,true);
+    }
+    respond(p.requests[3],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.deepEqual(store.memoryAt(engine.tick,'t1'),Array.from({length:3},(_,index)=>`I want to explore area ${index}.`));
+    r.clock.pump();await until(()=>p.requests.length===5);assert.match(p.requests[4].body.messages[0].content,/I want to explore area 2\./);
+    respond(p.requests[4],{action:'wait'});
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('encounter notices reach both prompts and are acknowledged only at the shared commit',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest);
+  engine.entity('t1').yaw=90;engine.entity('t2').yaw=270;
+  for(let tick=0;tick<20;tick++)engine.step();store.record(engine.frame(),engine.state());
+  const r=run(engine,store,p.url,null);
+  try{
+    r.clock.pump();await until(()=>p.requests.length===2);
+    for(const request of p.requests){const prompt=JSON.parse(request.body.messages.at(-1).content);assert.equal(prompt.encounters.length,1);assert.match(prompt.encounters[0].message,/another Troglodyte.*use say/);assert.equal(prompt.encounters[0].canSpeakNow,true);}
+    respond(p.requests.find(request=>request.id==='t1')!,{action:'wait'});await until(()=>r.clock.status().agents.t1?.state==='ready');assert.equal(engine.observe('t1').encounters.length,1);
+    respond(p.requests.find(request=>request.id==='t2')!,{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.observe('t1').encounters.length,0);assert.equal(engine.observe('t2').encounters.length,0);
+    r.clock.pump();await until(()=>p.requests.length===4);for(const request of p.requests.slice(2)){assert.equal(JSON.parse(request.body.messages.at(-1).content).encounters,undefined);respond(request,{action:'wait'});}
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('authoritative discoveries enter future prompts as persistent learned knowledge',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);engine.discoveries.set('t1',new Set(['thrown-blocks-settle']));r.clock.pump();await until(()=>p.requests.length===1);
+    assert.match(p.requests[0].body.messages[0].content,/Learned knowledge: \["Thrown blocks settle and become part of the terrain\."\]/);
+    respond(p.requests[0],{action:'wait'});
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('a restart removes the generic edge fact without learning the water boundary from gaps',()=>{
+  const engine=world(),store=new Store(':memory:',engine.module.manifest);
+  try{
+    engine.event('t1','blocked','No safe ground ahead.',{issue:{kind:'gap'}});store.record(engine.frame(),engine.state());
+    engine.discoveries.set('t1',new Set(['unsafe-terrain-edge']));
+    new AgentRuntime(engine,store,{providers:[],maxTurns:null});
+    assert.equal(engine.discoveries.get('t1')?.has('unsafe-terrain-edge'),false);
+    assert.equal(engine.discoveries.get('t1')?.has('deep-water-limit'),false);
+    assert.equal(engine.discoveries.has('t2'),false);
+    store.record(engine.frame(),engine.state());
+    const restored=new Engine(engine.module,store.stateAt(0));restored.nextEvent=store.maxEventId()+1;
+    new AgentRuntime(restored,store,{providers:[],maxTurns:null});
+    assert.equal(restored.frame().events.length,0);
+    assert.equal(store.eventsAt(0,'t1').filter(event=>event.type==='discovery').length,0);
+    assert.equal(store.eventsAt(0,'t1').filter(event=>event.type==='knowledge-correction').length,1);
+  }finally{store.close();}
+});
+
+test('a carrying reminder persists through turns, failed uses and waiting until the object is used',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+    (r.runtime.minds.get('t1') as any).carriedMoves=9;
+    const actions:Action[]=[{action:'jump',distance:.5},{action:'jump',distance:1,angle:-90},{action:'turn',angle:45},{action:'place',target:[0,0,0]},{action:'wait'},{action:'store'},{action:'wait'}];
+    for(const [index,action] of actions.entries()){
+      r.clock.pump();await until(()=>p.requests.length===index+1);
+      const prompt=JSON.parse(p.requests[index].body.messages.at(-1).content);
+      if(index>=2&&index<=5){assert.match(prompt.reminder,/still holding a wood block/i);assert.match(prompt.reminder,/place it, throw it, work it/);}
+      else assert.equal(prompt.reminder,undefined);
+      respond(p.requests[index],action);await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+      if(index===0)assert.equal((r.runtime.minds.get('t1') as any).carriedMoves,9,'A failed movement preserves the count before the reminder is active.');
+      if(index>=1&&index<5)assert.equal((r.runtime.minds.get('t1') as any).carriedMoves,10);
+    }
+    assert.equal((r.runtime.minds.get('t1') as any).carriedMoves,0);
+    assert.ok(store.eventsAt(engine.tick,'t1').filter(event=>event.type==='observation'&&(event.data as any).reminder).length>=4,'Delivered reminders must be recorded.');
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('a hit reminder stays in every decision after ten empty-handed moves until a successful hit',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);engine.voxels.set([0,1,1],null);
+    for(let index=0;index<=20;index++){
+      r.clock.pump();await until(()=>p.requests.length===index+1);
+      const prompt=JSON.parse(p.requests[index].body.messages.at(-1).content);
+      if(index>=10)assert.match(prompt.reminder,/blocks in this world look like they can be struck/i);
+      else assert.equal(prompt.reminder,undefined);
+      respond(p.requests[index],index===20?{action:'wait'}:{action:index%2?'walk':'jump',distance:1,angle:index===0?-90:90});
+      await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    }
+    r.clock.pump();await until(()=>p.requests.length===22);
+    assert.match(JSON.parse(p.requests[21].body.messages.at(-1).content).reminder,/try hit/);respond(p.requests[21],{action:'hit',target:[-1,0,1]});
+    await until(()=>r.clock.status().phase==='advancing');r.advance(1000);assert.equal(engine.entity('t1').lastAction?.ok,true);
+    r.clock.pump();await until(()=>p.requests.length===23);assert.equal(JSON.parse(p.requests[22].body.messages.at(-1).content).reminder,undefined);respond(p.requests[22],{action:'wait'});
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('the shared hit hint counter prioritizes reachable wood and ignores distant or hidden wood',async()=>{
+  for(const scenario of ['reachable','distant','hidden','held']){
+    const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+    try{
+      engine.setEntityEnabled('t2',false);
+      if(scenario==='distant'){engine.voxels.set([0,1,1],null);engine.voxels.set([0,1,5],'wood');}
+      if(scenario==='hidden'){engine.voxels.set([0,1,1],'stone');engine.voxels.set([0,2,1],'stone');engine.voxels.set([0,3,1],'stone');engine.voxels.set([0,1,3],'wood');}
+      if(scenario==='held')engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+      (r.runtime.minds.get('t1') as any).emptyHandMoves=10;
+      r.clock.pump();await until(()=>p.requests.length===1);
+      const reminder=JSON.parse(p.requests[0].body.messages.at(-1).content).reminder;
+      if(scenario==='reachable'){assert.match(reminder,/wood within reach at block \[0,1,1\] could be useful/);assert.match(reminder,/try hit/);}
+      else if(scenario==='held')assert.equal(reminder,undefined);
+      else assert.match(reminder,/blocks in this world look like they can be struck/);
+      respond(p.requests[0],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+      assert.equal((r.runtime.minds.get('t1') as any).emptyHandMoves,10);
+      r.clock.pump();await until(()=>p.requests.length===2);assert.equal(JSON.parse(p.requests[1].body.messages.at(-1).content).reminder,reminder);respond(p.requests[1],{action:'wait'});
+    }finally{r.clock.close();store.close();p.close();}
+  }
+});
+
+test('failed hits preserve the hit reminder count before and after activation',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);(r.runtime.minds.get('t1') as any).emptyHandMoves=9;
+    const actions:Action[]=[{action:'hit',target:[30,1,30]},{action:'walk',distance:1,angle:-90},{action:'turn',angle:90},{action:'hit',target:[30,1,30]},{action:'wait'},{action:'hit',target:[-2,0,1]},{action:'wait'}];
+    for(const [index,action] of actions.entries()){
+      r.clock.pump();await until(()=>p.requests.length===index+1);
+      const prompt=JSON.parse(p.requests[index].body.messages.at(-1).content);
+      if(index>=2&&index<=5)assert.match(prompt.reminder,/try hit/);else assert.equal(prompt.reminder,undefined);
+      respond(p.requests[index],action);await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+      const count=(r.runtime.minds.get('t1') as any).emptyHandMoves;
+      assert.equal(count,index===0?9:index<5?10:0);
+      assert.equal((store.loadMind('t1') as any).emptyHandMoves,count,'The active counter survives persistence.');
+      if(index===5)assert.equal(engine.entity('t1').lastAction?.ok,true);
+    }
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('carried movement does not advance the empty-handed hit reminder counter',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:64};
+    (r.runtime.minds.get('t1') as any).emptyHandMoves=9;
+    r.clock.pump();await until(()=>p.requests.length===1);respond(p.requests[0],{action:'jump',distance:1,angle:-90});
+    await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal((r.runtime.minds.get('t1') as any).emptyHandMoves,9);
+    r.clock.pump();await until(()=>p.requests.length===2);assert.equal(JSON.parse(p.requests[1].body.messages.at(-1).content).reminder,undefined);
+    respond(p.requests[1],{action:'store'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    r.clock.pump();await until(()=>p.requests.length===3);assert.equal(JSON.parse(p.requests[2].body.messages.at(-1).content).reminder,undefined);respond(p.requests[2],{action:'walk',distance:1,angle:90});
+    await until(()=>r.clock.status().phase==='advancing');r.advance(1000);r.clock.pump();await until(()=>p.requests.length===4);
+    assert.match(JSON.parse(p.requests[3].body.messages.at(-1).content).reminder,/try hit/);respond(p.requests[3],{action:'wait'});
+  }finally{r.clock.close();store.close();p.close();}
+});
+
 test('long motion takes two world turns and results enter the next model context',async()=>{
   const p=await provider(), engine=world(), store=new Store(':memory:',engine.module.manifest), r=run(engine,store,p.url);
   store.record(engine.frame(),engine.state());
   try {
     r.clock.pump(); await until(()=>p.requests.length===2);
-    for(const req of p.requests)respond(req,req.id==='t1'?{action:'move',distance:4}:{action:'turn',angle:90});
+    for(const req of p.requests)respond(req,req.id==='t1'?{action:'walk',distance:4}:{action:'wait'});
     await until(()=>r.clock.status().phase==='advancing'); r.advance(1000);
     assert.ok(Math.abs(engine.entity('t1').position[2]-2.5)<1e-8); assert.ok(engine.entity('t1').motion);
     r.clock.pump();await until(()=>p.requests.length===3);
@@ -154,7 +351,7 @@ test('provider outages retry without timeouts, world errors or consumed model tu
   store.record(engine.frame(),engine.state()); let resumed: ReturnType<typeof run>|undefined;
   try {
     r.clock.pump();await until(()=>p.requests.length===2);
-    respond(p.requests.find(req=>req.id==='t1')!,{action:'turn',angle:90});
+    respond(p.requests.find(req=>req.id==='t1')!,{action:'walk',distance:1,angle:90});
     const failed=p.requests.find(req=>req.id==='t2')!;failed.response.writeHead(503);failed.response.end();
     await until(()=>p.requests.filter(req=>req.id==='t2').length===2 && r.clock.status().agents.t1?.state==='ready');
     r.advance(24*60*60*1000);
@@ -173,7 +370,7 @@ test('restart halfway through a committed turn finishes only its remaining physi
   const p=await provider(), engine=world(), store=new Store(':memory:',engine.module.manifest), r=run(engine,store,p.url);
   store.record(engine.frame(),engine.state()); let resumed: ReturnType<typeof run>|undefined;
   try {
-    r.clock.pump();await until(()=>p.requests.length===2);for(const req of p.requests)respond(req,{action:'turn',angle:90});
+    r.clock.pump();await until(()=>p.requests.length===2);for(const req of p.requests)respond(req,{action:'walk',distance:1,angle:90});
     await until(()=>r.clock.status().phase==='advancing');r.advance(400);assert.equal(engine.tick,8);r.clock.close();
     const restored=new Engine(engine.module,store.stateAt(8));restored.nextEvent=store.maxEventId()+1;resumed=run(restored,store,p.url);
     resumed.advance(600);assert.equal(restored.tick,20);assert.equal(restored.entity('t1').yaw,90);assert.equal(p.requests.length,2);
@@ -198,4 +395,12 @@ test('playback consumes world time without accumulating a backlog at the recordi
   tick=advancePlayback(tick,50,1,22);assert.equal(tick,22);
   assert.equal(advancePlayback(0,1000,1,200),20);
   assert.equal(advancePlayback(0,1000,2,200),40);
+});
+
+test('net world time uses 24-hour days and fast scrubbing remains bounded',()=>{
+  const tick=(WORLD_DAY_SECONDS+3661.5)*20,value=worldTime(tick);
+  assert.deepEqual({day:value.day,hour:value.hour,minute:value.minute,second:value.second,tenth:value.tenth},{day:2,hour:1,minute:1,second:1,tenth:5});
+  assert.equal(formatWorldDuration(tick,true),'1d 01:01:01.5');
+  assert.equal(fastScrubSpeed(0,20),8);
+  assert.equal(fastScrubSpeed(0,20*1000),128);
 });

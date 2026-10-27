@@ -7,7 +7,7 @@ import { Engine } from '../src/core/engine';
 import { loadModule } from '../src/modules';
 import { Store } from './store';
 import { AgentRuntime } from './agents/runtime';
-import { providersFromEnv } from './agents/providers';
+import { ProviderChain, providersFromEnv } from './agents/providers';
 import { TurnClock } from './turn-clock';
 import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
 
@@ -23,7 +23,12 @@ const optionalTurnLimit = (value: string | undefined) => {
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error('AGENT_MAX_TURNS must be an optional positive integer.');
   return parsed;
 };
-const agents = new AgentRuntime(engine, store, { providers: providersFromEnv(), maxTurns: optionalTurnLimit(process.env.AGENT_MAX_TURNS) });
+const providers = providersFromEnv();
+if (providers.some(provider => provider.modelDiscovery)) {
+  try { await new ProviderChain(providers).refreshDiscoveredModels(AbortSignal.timeout(2000)); }
+  catch { /* Discovery is retried whenever the local fallback is needed. */ }
+}
+const agents = new AgentRuntime(engine, store, { providers, maxTurns: optionalTurnLimit(process.env.AGENT_MAX_TURNS) });
 engine.event('world', 'session', `World ${store.hasWorld() ? 'resumed' : 'created'} in ${agents.mode === 'demo' ? 'scripted demo' : 'LLM'} mode.`);
 store.record(engine.frame(), engine.state(), agents.persistence());
 const clients = new Set<ServerResponse>();
@@ -69,6 +74,7 @@ const server = createServer(async (req, res) => {
       if (!Number.isFinite(requestedTick) || requestedTick < 0) { json(res, { error: 'Invalid tick.' }, 400); return; }
       if (url.pathname === '/api/meta') { json(res, metadata()); return; }
       if (url.pathname === '/api/state') { json(res, { ...metadata(), state: store.stateAt(requestedTick), events: store.eventsAt(requestedTick) }); return; }
+      if (url.pathname === '/api/memory') { const actor=url.searchParams.get('actor')?.trim();if(!actor){json(res,{error:'Actor is required.'},400);return;}json(res,store.memoryAt(requestedTick,actor));return; }
       if (url.pathname === '/api/events') { json(res, store.eventsAt(requestedTick, url.searchParams.get('actor') ?? '', 120)); return; }
       if (url.pathname === '/api/frames') { json(res, store.framesAfter(requestedTick)); return; }
       if (url.pathname === '/api/stream') {

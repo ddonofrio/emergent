@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { deflateSync, inflateSync } from 'node:zlib';
 import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from '../src/core/types';
 import { CLOCK_VERSION } from '../src/core/time';
+import { PRIVATE_NOTE_LIMIT } from '../src/core/memory';
 
 const pack = (data: unknown) => deflateSync(JSON.stringify(data));
 const unpack = <T>(data: Uint8Array): T => JSON.parse(inflateSync(data).toString());
@@ -27,7 +28,7 @@ export class Store {
     }
     this.db.prepare('INSERT OR IGNORE INTO meta VALUES (?, ?)').run('clock', CLOCK_VERSION);
     const previous = this.db.prepare('SELECT value FROM meta WHERE key = ?').get('module') as { value: string } | undefined;
-    if (previous && previous.value !== JSON.stringify(manifest)) throw new Error('Module configuration changed. Use a new DATA_DIR to preserve the existing recording.');
+    if (previous && !compatibleManifest(previous.value,manifest)) throw new Error('Module configuration changed. Use a new DATA_DIR to preserve the existing recording.');
     this.db.prepare('INSERT OR IGNORE INTO meta VALUES (?, ?)').run('module', JSON.stringify(manifest));
   }
   latestTick() { return (this.db.prepare('SELECT MAX(tick) AS tick FROM frames').get() as { tick: number | null }).tick ?? 0; }
@@ -61,7 +62,7 @@ export class Store {
     for (const row of rows) {
       const frame = unpack<Frame>(row.data);
       for (const [k, kind] of frame.changes) { if (kind) cells.set(k, kind); else cells.delete(k); }
-      state = { tick: frame.tick, time: frame.time, entities: frame.entities, bodies: frame.bodies, lost: frame.lost, inbox: frame.inbox, blocks: [] };
+      state = { tick: frame.tick, time: frame.time, entities: frame.entities, bodies: frame.bodies, lost: frame.lost, inbox: frame.inbox, blockDamage: frame.blockDamage ?? {}, discoveries:frame.discoveries??{},contacts:frame.contacts??{},encounterNotices:frame.encounterNotices??{}, blocks: [] };
     }
     state.blocks = [...cells].map(([k, kind]) => [...unkey(k),kind]); return state;
   }
@@ -72,6 +73,13 @@ export class Store {
     const rows = (actor ? this.db.prepare('SELECT data FROM events WHERE tick <= ? AND actor = ? ORDER BY id DESC LIMIT ?').all(tick, actor, limit) : this.db.prepare('SELECT data FROM events WHERE tick <= ? ORDER BY id DESC LIMIT ?').all(tick, limit)) as { data: string }[];
     return rows.map(r => JSON.parse(r.data)).reverse();
   }
+  memoryAt(tick:number,actor:string,limit=PRIVATE_NOTE_LIMIT) {
+    const rows=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type = 'memory' ORDER BY id DESC LIMIT ?").all(tick,actor,limit) as {data:string}[];
+    const latest=rows[0]?JSON.parse(rows[0].data) as WorldEvent:undefined;
+    const notes=(latest?.data as {notes?:string[]}|undefined)?.notes;
+    if(notes)return notes.slice(-limit);
+    return rows.map(row=>(JSON.parse(row.data) as WorldEvent).message).reverse();
+  }
   loadMind<T>(id: string): T | undefined { const row = this.db.prepare('SELECT data FROM minds WHERE id = ?').get(id) as { data: string } | undefined; return row ? JSON.parse(row.data) : undefined; }
   loadPending<T>(tick: number, actor: string, model: string): T | undefined {
     const row = this.db.prepare('SELECT data FROM pending_decisions WHERE tick = ? AND actor = ? AND model = ?').get(tick, actor, model) as { data: string } | undefined;
@@ -81,4 +89,13 @@ export class Store {
     this.db.prepare('INSERT OR REPLACE INTO pending_decisions VALUES (?, ?, ?, ?)').run(tick, actor, model, JSON.stringify(value));
   }
   close() { this.db.close(); }
+}
+
+function compatibleManifest(recorded: string, current: ModuleManifest) {
+  try {
+    const previous=JSON.parse(recorded) as ModuleManifest;
+    // Day length is presentation metadata; ticks remain the authoritative net time.
+    previous.daySeconds=current.daySeconds;
+    return JSON.stringify(previous)===JSON.stringify(current);
+  } catch { return false; }
 }

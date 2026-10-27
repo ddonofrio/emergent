@@ -4,3 +4,7 @@ import { TICKS_PER_SECOND } from '../core/time';
 export function advancePlayback(tick: number, elapsedMs: number, speed: number, availableTick: number) {
   return Math.min(availableTick, tick + Math.max(0, elapsedMs) / 1000 * TICKS_PER_SECOND * speed);
 }
+
+export function fastScrubSpeed(tick: number, targetTick: number) {
+  return Math.min(128,Math.max(8,(Math.max(tick,targetTick)-tick)/TICKS_PER_SECOND*4));
+}
