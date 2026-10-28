@@ -16,7 +16,7 @@ export interface ProviderConfig {
   timeoutMs?: number;
   headers?: Record<string, string>;
 }
-export type ReasoningEffort = 'off' | 'on' | 'none' | 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high';
 export type ProviderStrategy = 'first-only' | 'round-robin' | 'fallback' | 'master-slaves';
 export interface ProviderHealth { state:'unknown'|'ok'|'bad'; detail:string; }
 export interface CompletionRequest { messages: unknown[]; tools: unknown[]; max_tokens: number; reasoning?: 'minimum' | 'maximum'; }
@@ -281,18 +281,18 @@ interface LmStudioModel {
 
 function normalizeReasoningOptions(options:string[]|undefined):ReasoningEffort[]|undefined {
   if(!options?.length)return undefined;
-  const normalized=options.filter(isReasoningEffort);
+  const normalized=options.flatMap(value=>value==='off'?['none' as const]:value==='on'?['high' as const]:isReasoningEffort(value)?[value]:[]);
   return [...new Set(normalized)];
 }
 
 function isReasoningEffort(value:string):value is ReasoningEffort {
-  return ['off','on','none','low','medium','high'].includes(value);
+  return ['none','low','medium','high'].includes(value);
 }
 
 function selectReasoningEffort(options:ReasoningEffort[],profile:'minimum'|'maximum') {
   const preference:ReasoningEffort[]=profile==='minimum'
-    ?['off','none','low','medium','on','high']
-    :['high','on','medium','low','none','off'];
+    ?['none','low','medium','high']
+    :['high','medium','low','none'];
   return preference.find(value=>options.includes(value));
 }
 

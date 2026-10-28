@@ -534,7 +534,7 @@ test('LM Studio discovery uses the loaded instance and exposes its full variant 
   try{
     const result=await chain.complete({messages:[],tools:[],max_tokens:20},new AbortController().signal,()=>{});
     assert.equal(completionModel,'ornith-loaded-instance');
-    assert.equal(reasoningEffort,'on');
+    assert.equal(reasoningEffort,'high');
     assert.equal(result.model,'ornith-loaded-instance');
     assert.match(chain.label,/local-author\/ornith-9b-instruct@q6_k/);
   }finally{server.closeAllConnections();server.close();}
