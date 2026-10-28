@@ -16,14 +16,13 @@ app.innerHTML = `
   <main id="main">
     <section class="observation-area" aria-label="World observation">
       <div class="world-toolbar"><div class="world-brand"><a class="brand" href="/" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent</a><span class="world-brand-divider" aria-hidden="true">|</span><h1 id="module-name">First Shore</h1></div><button id="settings-open" class="settings-open" title="Settings" aria-label="Open settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.25a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z"/><path d="m19.4 13.5 1.1.85-1.1 1.9-1.35-.45a7.8 7.8 0 0 1-1.55.9l-.25 1.4h-2.2l-.25-1.4a7.8 7.8 0 0 1-1.55-.9l-1.35.45-1.1-1.9 1.1-.85a7 7 0 0 1 0-1.8l-1.1-.85 1.1-1.9 1.35.45a7.8 7.8 0 0 1 1.55-.9l.25-1.4h2.2l.25 1.4a7.8 7.8 0 0 1 1.55.9l1.35-.45 1.1 1.9-1.1.85a7 7 0 0 1 0 1.8Z" transform="translate(-1.4 -1.5)"/></svg></button></div>
-      <div id="world" class="world"><div class="loading" id="loading"><span class="loader"></span>Opening the observatory…</div>
-        <div class="world-top"><span class="glass-tag" id="view-mode">LIVE OBSERVATION</span><span class="glass-tag world-clock" id="world-clock">DAY 001 · 00:00</span></div>
-        <div class="camera-tools"><button id="overview" title="Overview" aria-label="Overview">◈</button><button id="top-down" title="Top view" aria-label="Top view">⊞</button><button id="follow" title="Follow selected inhabitant" aria-label="Follow selected inhabitant">◎</button></div>
-        <div class="world-bottom"><div class="scale"><span>N ↑</span><i></i><span>100 m / ISLAND DIAMETER</span></div><div class="camera-hint">DRAG Orbit <b>·</b> SCROLL Zoom <b>·</b> WASD + Q/E Fly</div></div>
-        <div id="toast" role="status"></div>
-      </div>
+      <div id="world" class="world"><div class="loading" id="loading"><span class="loader"></span>Opening the observatory…</div></div>
       <section class="timeline" aria-label="Recorded world timeline">
-        <div class="timeline-top"><div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span> Live</button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00:00.0</span><span id="time-to-live">LIVE</span></div><div class="timeline-right"><select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div></div>
+        <div class="timeline-top">
+          <div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span> Live</button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00:00.0</span><span id="time-to-live">LIVE</span></div>
+          <div class="timeline-view-controls"><div class="camera-tools"><button id="overview" title="Overview" aria-label="Overview">◈</button><button id="top-down" title="Top view" aria-label="Top view">⊞</button><button id="follow" title="Follow selected inhabitant" aria-label="Follow selected inhabitant">◎</button></div></div>
+          <div class="timeline-right"><select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div>
+        </div>
         <div class="scrubber"><div id="event-marks"></div><input id="seek" type="range" min="0" max="1" value="0" step="2" aria-label="Seek world history"></div>
         <div class="timeline-labels"><span id="range-start">00:00:00</span><span id="range-end">00:00:00</span></div>
       </section>
@@ -31,7 +30,7 @@ app.innerHTML = `
     <aside id="debug-panel" class="debug-panel collapsed" aria-label="Debug and journal">
       <header class="panel-heading"><button id="debug-toggle" class="panel-toggle" type="button" aria-expanded="false" aria-label="Expand debug panel" title="Expand debug panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg><span>Debug</span></button></header>
       <div class="debug-content">
-        <section class="turn-status-section"><h2>Turn status</h2><ul id="provider-status-list" class="provider-status-list" aria-label="Configured models"></ul><p id="provider-algorithm" class="provider-algorithm"></p><p id="provider-current-status" class="provider-current-status empty" role="status" aria-hidden="true"></p><p id="turn-status" role="status">One turn = one world second</p></section>
+        <section class="turn-status-section"><h2>Turn status</h2><ul id="provider-status-list" class="provider-status-list" aria-label="Configured models"></ul><p id="provider-algorithm" class="provider-algorithm"></p><p id="provider-current-status" class="provider-current-status empty" role="status" aria-hidden="true"></p><p id="turn-status" role="status">One turn = one world second</p><div id="toast" role="status"></div></section>
         <section class="journal-section"><header class="journal-heading"><h2>Journal</h2><span id="event-count">0</span></header><div id="journal" class="journal"><p class="empty">Waiting for the first trace.</p></div></section>
       </div>
     </aside>
@@ -168,7 +167,6 @@ function showSettings(open:boolean){
   if(open)void loadLlmSettings();
 }
 function dayOf(tick: number) { return worldTime(tick).day; }
-function clock(tick: number) { const value=worldTime(tick);return `${String(value.hour).padStart(2,'0')}:${String(value.minute).padStart(2,'0')}:${String(value.second).padStart(2,'0')}`; }
 function renderProviderStatus(config:LlmConfig|undefined=meta?.llmConfig??llmConfig){
   const providers=config?.providers??[],list=$('provider-status-list');list.replaceChildren();
   for(const provider of providers){
@@ -288,8 +286,6 @@ requestAnimationFrame(playback);
 
 function renderTimeline() {
   if (!meta) return;
-  $('view-mode').textContent = isLive ? meta.runtime.phase === 'thinking' ? 'LIVE · WAITING FOR MODELS' : meta.runtime.phase === 'paused' ? 'LIVE · WORLD PAUSED' : 'LIVE OBSERVATION' : scrubTarget !== null ? 'FAST SCRUB PLAYBACK' : playing ? 'RECORDED PLAYBACK' : 'PAUSED OBSERVATION';
-  $('view-mode').classList.toggle('past',!isLive); $('world-clock').textContent = `DAY ${String(dayOf(cursor)).padStart(3,'0')} · ${clock(cursor)}`;
   $('live').classList.toggle('active',isLive); $('play').textContent = isLive || playing ? 'Ⅱ' : '▶'; $('play').setAttribute('aria-label',isLive || playing ? 'Pause observation' : 'Play recording');
   $('playback-time').textContent = formatWorldDuration(cursor,true);
   $('time-to-live').textContent = isLive ? 'LIVE' : `${formatWorldDuration(Math.max(0,latest-cursor))} TO LIVE`;

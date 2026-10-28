@@ -20,10 +20,8 @@ export class WorldView {
   private effects: { mesh: THREE.Mesh; until: number; start: number }[] = [];
   private sea: THREE.Mesh;
   private seabed: THREE.Mesh;
-  private labels = new Map<string, HTMLButtonElement>();
   private cube = new THREE.BoxGeometry(1,1,1);
   private blockMaterial = new THREE.MeshStandardMaterial({ roughness: .94, metalness: 0 });
-  private ring = new THREE.Mesh(new THREE.RingGeometry(.65,.73,48), new THREE.MeshBasicMaterial({ color: '#e0f7ad', side: THREE.DoubleSide, depthWrite: false }));
   private manifest?: ModuleManifest;
   private current?: Pick<WorldState,'entities'|'bodies'|'time'>;
   private prior?: Pick<WorldState,'entities'|'bodies'|'time'>;
@@ -54,7 +52,6 @@ export class WorldView {
     const sea = this.sea = new THREE.Mesh(new THREE.PlaneGeometry(800,800), new THREE.MeshStandardMaterial({ color: '#588c8a', transparent: true, opacity: .84, roughness: .38, metalness: .12 }));
     sea.rotation.x = -Math.PI / 2; sea.position.y = .015; sea.receiveShadow = true; this.scene.add(sea);
     const seabed = this.seabed = new THREE.Mesh(new THREE.PlaneGeometry(800,800), new THREE.MeshBasicMaterial({ color: '#345f66' })); seabed.rotation.x = -Math.PI / 2; seabed.position.y = -32; this.scene.add(seabed);
-    this.ring.rotation.x = -Math.PI / 2; this.scene.add(this.ring);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true; this.controls.dampingFactor = .08; this.controls.minDistance = 2; this.controls.maxDistance = 260; this.controls.maxPolarAngle = Math.PI * .92;
     this.overview();
@@ -245,7 +242,6 @@ export class WorldView {
         this.triangle(group,[[.05,.34,-.202],[0,.285,-.202],[-.05,.34,-.202]],spotColor);
       }
       this.creatures.set(entity.id,group); this.scene.add(group);
-      const label = document.createElement('button'); label.className = 'entity-label'; label.textContent = entity.name; label.addEventListener('click', () => this.onSelect(entity.id)); this.container.append(label); this.labels.set(entity.id,label);
     }
   }
   select(id: string) { this.selected = id; }
@@ -261,7 +257,6 @@ export class WorldView {
     const alpha = Math.min(1,(now-this.received)/this.interpolationMs);
     if (this.current) {
       const visualTime = (this.prior?.time ?? this.current.time) + (this.current.time - (this.prior?.time ?? this.current.time)) * alpha;
-      this.ring.visible = false;
       for (const e of this.current.entities) {
         const group = this.creatures.get(e.id)!; const previous = this.prior?.entities.find(p => p.id === e.id) ?? e;
         const enabled = e.enabled !== false;
@@ -281,15 +276,7 @@ export class WorldView {
         const leftArm=group.getObjectByName('arm-left'),rightArm=group.getObjectByName('arm-right'),punch=this.punches.get(e.id);
         if(leftArm)leftArm.rotation.x=walking?-gait*.3:0;
         if(rightArm){if(punch&&visualTime<=punch.until){const phase=Math.max(0,Math.min(1,(visualTime-punch.start)/(punch.until-punch.start)));rightArm.rotation.x=-Math.sin(Math.PI*phase)*1.8;}else{rightArm.rotation.x=walking?gait*.3:0;if(punch)this.punches.delete(e.id);}}
-        const label = this.labels.get(e.id)!; const projected = group.position.clone().add(new THREE.Vector3(0,e.height+.7,0)).project(this.camera);
-        label.style.display = Math.abs(projected.x)>1 || Math.abs(projected.y)>1 || projected.z>1 ? 'none' : 'block';
-        label.style.left = `${(projected.x*.5+.5)*this.container.clientWidth}px`; label.style.top = `${(-projected.y*.5+.5)*this.container.clientHeight}px`;
-        label.classList.toggle('selected',e.id === this.selected); label.classList.toggle('disabled',!enabled); label.textContent = !enabled ? `${e.name} · disabled` : e.speech ? `${e.name} · ${e.speech.word}` : e.name;
-        if (e.id === this.selected && enabled) {
-          this.ring.visible = true;
-          this.ring.position.copy(group.position).add(new THREE.Vector3(0,.06,0));
-          if (this.following) { const next = group.position.clone().add(new THREE.Vector3(0,1,0)); const delta = next.clone().sub(this.controls.target); this.camera.position.add(delta); this.controls.target.copy(next); }
-        }
+        if (e.id === this.selected && enabled && this.following) { const next = group.position.clone().add(new THREE.Vector3(0,1,0)); const delta = next.clone().sub(this.controls.target); this.camera.position.add(delta); this.controls.target.copy(next); }
       }
       const ids = new Set(this.current.bodies.map(b => b.id));
       for (const [id,object] of this.objects) if (!ids.has(id)) { this.disposeItemVisual(object); this.objects.delete(id); }

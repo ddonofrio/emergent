@@ -353,7 +353,7 @@ test('walking and running step down one block without inventing a gap',()=>{
 });
 test('walk accepts absolute map x and y while the engine derives bearing, distance and terrain height',()=>{
   const engine=fixture(),walk=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='walk')!;
-  const result=walk.invoke({x:3.5,y:4.5}) as {ok:boolean;feedback?:Record<string,any>};
+  const result=walk.invoke({x:3.5,y:4.5,z:99}) as {ok:boolean;feedback?:Record<string,any>};
   assert.equal(result.ok,true);assert.deepEqual(result.feedback?.requestedMapTarget,{x:3.5,y:4.5});
   const destination=engine.entity('t1').motion!.destination;
   assert.ok(Math.abs(destination[0]-3.5)<1e-9&&destination[1]===1&&Math.abs(destination[2]-4.5)<1e-9);

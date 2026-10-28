@@ -72,12 +72,12 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
     tool('do_not_reply','Choose not to reply. Close the communication menu without speaking or spending world time.',noArgs,false,()=>({ok:true,message:'You chose not to reply. Choose another action.'})),
   ];
   const movement=(maximum:number)=>object({distance:{type:'number',description:`Metres: greater than 0, at most ${maximum}.`},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right.'}},['distance']);
-  const walkMovement=object({distance:{type:'number',description:'Relative travel distance in metres: greater than 0, at most 32. Use with optional angle, or omit when using x and y.'},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right. Use only with distance.'},x:{type:'number',description:'Absolute horizontal map X coordinate. Use together with y instead of distance and angle.'},y:{type:'number',description:'Absolute horizontal map Y coordinate (world Z). Use together with x instead of distance and angle.'}});
+  const walkMovement=object({distance:{type:'number',description:'Relative travel distance in metres: greater than 0, at most 32. Use with optional angle, or omit when using x and y.'},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right. Use only with distance.'},x:{type:'number',description:'Absolute horizontal map X coordinate. Use together with y instead of distance and angle.'},y:{type:'number',description:'Absolute horizontal map Y coordinate. Use together with x instead of distance and angle.'},z:{type:'number',description:'Optional elevation supplied with x and y. Accepted for convenience but ignored; the engine derives walking height from terrain.'}});
   const tools:WorldTool[]=[
     tool('look','Look without turning your body or spending time.',object({angle:{type:'number',description:'Body-relative viewing angle (-180..180 degrees).'}}),false,({angle=0}:{angle?:number})=>(options.concise?decisionView:compactView)(engine.observeAt(id,Math.max(-180,Math.min(180,angle))),options.goalCriterion)),
     action('find_material','Scan 360 degrees for visible materials. Returns the nearest block target, distance to its centre and body-relative angle per material; one world second.',noArgs,'find_material'),
     action('find_entity','Scan 360 degrees for visible living beings within 18 metres. Returns each ID, name, kind, distance and body-relative angle; one world second.',noArgs,'find_entity'),
-    action('walk','Walk using either relative distance and angle or absolute horizontal map coordinates x and y. The engine calculates the current bearing, distance and safe route; movement stops before obstacles or unsafe terrain.',walkMovement,'walk'),
+    action('walk','Walk using either relative distance and angle or absolute map coordinates x and y, optionally with z. The engine ignores z, derives walking height from terrain, and calculates the current bearing, distance and safe route; movement stops before obstacles or unsafe terrain.',walkMovement,'walk'),
     action('turn','Turn your body and forward view.',object({angle:{type:'number',description:'Degrees (-360..360); negative left, positive right.'}},['angle']),'turn'),
   ];
   if(view){
@@ -133,10 +133,11 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   tools.push(tool('journal',`Preserve an important insight, uncertainty, commitment, useful location or unfinished work for your future self. Your actions and discoveries are recorded automatically; your personal interpretation is not. Include the conditions of a memorable fact learned about the world. Label hypotheses and never generalize one unsuccessful test to every possible method. Append new information; use replace only to correct that specific old claim, not to keep the journal artificially short. ${PRIVATE_NOTE_LIMIT} notes; faithful compaction when full; no world time.`,object({note:{type:'string',description:'1..300 characters. State what was observed, under which conditions, and what remains uncertain.'},...(memory.notes.length?{replace:{type:'integer' as const,description:'Optional zero-based index of the specific claim corrected by this note. Omit to append.',enum:memory.notes.map((_,index)=>index)}}:{})},['note']),false,({note,replace}:{note:string;replace?:number})=>remember(note,replace)));
   for(const movement of tools.filter(tool=>tool.physical&&['walk','run','jump','turn'].includes(tool.name))){
     movement.validate=(args:unknown)=>{
-      const {distance,angle,x,y} = args as {distance?:number;angle?:number;x?:number;y?:number};
+      const {distance,angle,x,y,z} = args as {distance?:number;angle?:number;x?:number;y?:number;z?:number};
       if(movement.name==='walk'&&(x!==undefined||y!==undefined)){
         if(distance!==undefined||angle!==undefined)return 'Walk accepts either distance with an optional relative angle, or x and y, not both forms.';
         if(!Number.isFinite(x)||!Number.isFinite(y))return 'Absolute walking requires both finite map coordinates x and y.';
+        if(z!==undefined&&!Number.isFinite(z))return 'Optional map coordinate z must be finite.';
         return undefined;
       }
       const limit=movement.name==='jump'?90:movement.name==='turn'?360:180;

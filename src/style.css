@@ -117,6 +117,16 @@ main.focus-collapsed{--focus-panel-width:48px}
 .inspector .focus-section .details{padding-top:12px}
 @media(max-width:700px){.inspector .record-knowledge{max-height:35vh}}
 
+.timeline-top{position:relative;display:flex;justify-content:space-between;align-items:center;gap:12px}
+.timeline-view-controls{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:8px}
+.timeline-right{display:flex;align-items:center;gap:8px}
+.camera-tools{position:static;display:flex;flex-direction:row;gap:4px}
+.camera-tools button{width:30px;height:29px;border:1px solid var(--line);border-radius:3px;background:#1c2820;color:#aabcaa;backdrop-filter:none;font-size:17px}
+.camera-tools button:hover{background:#26352a;color:var(--lime)}
+.turn-status-section #toast{display:none;position:static;transform:none;max-width:none;margin:8px 0 0;padding:8px;border:1px solid #68855b;border-radius:3px;background:#162a20;color:#e3edd6;font-size:10px;opacity:1;pointer-events:auto}
+.turn-status-section #toast.visible{display:block}
+@media(max-width:700px){.timeline-top{display:grid;grid-template-columns:1fr auto;grid-template-rows:auto auto;gap:8px}.playback-controls{grid-column:1;grid-row:1}.timeline-view-controls{position:static;grid-column:1/-1;grid-row:2;justify-self:center;transform:none}.timeline-right{grid-column:2;grid-row:1}}
+
 .turn-status-section p{overflow-wrap:anywhere}.turn-status-section p.error{color:#e0a18c}
 
 .provider-status-list{display:grid;gap:6px;margin:11px 0 0;padding:0;list-style:none}.provider-status-row{display:flex;align-items:center;gap:8px;min-width:0;color:#c7d2c1;font-size:10px}.provider-status-dot{width:8px;height:8px;flex:0 0 8px;border-radius:50%;background:#d6b66f;box-shadow:0 0 7px #d6b66f35}.provider-status-dot.ok{background:#8fce91;box-shadow:0 0 7px #8fce9145}.provider-status-dot.bad{background:#e07d70;box-shadow:0 0 7px #e07d7045}.provider-status-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.provider-algorithm{margin:12px 0 0;padding-top:9px;border-top:1px solid var(--line);font:9px var(--mono);color:#9aaa92}.provider-current-status{height:60px;overflow-y:auto;overscroll-behavior:contain;margin:8px 0 0;color:#a7b69f;font:10px/15px var(--mono);overflow-wrap:anywhere}.provider-current-status.empty{visibility:hidden}.provider-current-status.error{color:#e0a18c}
