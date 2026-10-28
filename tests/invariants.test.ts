@@ -230,7 +230,7 @@ test('visible cracks take priority over fresh wood and lose attention when unrea
   assert.deepEqual(observation.interactions.hit[0].target,[1,1,0]);
   assert.match(view.attention!,/plant block at \[1,1,0\].*visible cracks.*same block/);
   const tools=worldTools(engine,'t1',memory).map(tool=>tool.name);
-  assert.equal(tools[0],'hit');assert.deepEqual([...tools].sort(),[...before].sort(),'Attention does not remove other choices.');
+  assert.equal(tools[0],'choose_action');assert.deepEqual([...tools].sort(),[...before].sort(),'Attention does not remove other choices.');
   engine.entity('t1').position=[6.5,1,-6.5];assert.equal(compactView(engine.observe('t1')).attention,undefined);
   engine.entity('t1').position=[.5,1,.5];engine.act('t1',{action:'hit',target:[1,1,0]});
   assert.match(compactView(engine.observe('t1')).attention!,/deep cracks.*close to breaking/);
@@ -845,10 +845,11 @@ test('agent language and new materials can extend a recording without changing i
   const directory=mkdtempSync(join(tmpdir(),'emergent-material-test-')),path=join(directory,'test.sqlite');
   try{
     const previous=structuredClone(island.manifest);
+    delete previous.planningInstructions;
     previous.materials.bucket.stackLimit=1;
     for(const kind of ['plank','shovel','door_half_up','door_half_down','door'])delete previous.materials[kind];
     new Store(path,previous).close();
-    const newLanguage=structuredClone(island.manifest);newLanguage.vocabulary=['A completely new idea'];newLanguage.agentInstructions='New instructions for future decisions.';
+    const newLanguage=structuredClone(island.manifest);newLanguage.vocabulary=['A completely new idea'];newLanguage.agentInstructions='New instructions for future decisions.';newLanguage.planningInstructions='New instructions for choosing future goals.';
     new Store(path,newLanguage).close();
     new Store(path,island.manifest).close();
     const incompatible=structuredClone(island.manifest);incompatible.materials.wood.floats=false;

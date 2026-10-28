@@ -130,10 +130,6 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   if(!availableOnly||targets!.speak.length)tools.push(tool('say','Open your available communication ideas. This takes no world time.',noArgs,false,()=>({ok:true,message:'Choose one idea to communicate, or use do_not_reply if you do not want to answer.',options:engine.module.manifest.vocabulary})));
   tools.push(action('wait','Wait and watch.',noArgs,'wait'));
   tools.push(tool('journal',`Preserve a memorable fact learned about the world: a durable rule, useful method, important location, or surprising property. Record the lesson rather than a single action or a completed-goal recap. Replace an outdated note when newer evidence corrects it. ${PRIVATE_NOTE_LIMIT} notes; new entries compact when full; takes no world time.`,object({note:{type:'string',description:'1..300 characters. Example: The sand path at [4,5,8] reaches the shore without a drop.'},...(memory.notes.length?{replace:{type:'integer' as const,description:'Optional zero-based index in notes to replace; the updated note becomes newest.',enum:memory.notes.map((_,index)=>index)}}:{})},['note']),false,({note,replace}:{note:string;replace?:number})=>remember(note,replace)));
-  if(targets?.hit.some(block=>block.cracks>0)){
-    const index=tools.findIndex(tool=>tool.name==='hit');
-    if(index>=0&&tools[index].physical)tools.unshift(...tools.splice(index,1));
-  }
   for(const movement of tools.filter(tool=>tool.physical&&['walk','run','jump','turn'].includes(tool.name))){
     movement.validate=(args:unknown)=>{
       const {distance,angle} = args as {distance?:number;angle?:number};

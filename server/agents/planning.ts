@@ -18,7 +18,7 @@ export function needsPlanReview(plan:AgentPlan|undefined,turn:number) {
 
 /** One goal and one observable milestone. Review cadence counts decisions, never tool calls. */
 export async function planDecision(options:{
-  name:string;turn:number;time:number;plan?:AgentPlan;context:unknown;
+  name:string;turn:number;time:number;plan?:AgentPlan;context:unknown;planningInstructions?:string;
   milestones:MilestoneOption[];actions:ReturnType<typeof recentActions>;
   signal:AbortSignal;retryDelayMs?:number;
   complete(request:CompletionRequest,signal:AbortSignal):Promise<CompletionResult>;
@@ -38,13 +38,13 @@ export async function planDecision(options:{
       type:'object',properties:{goal:{type:'string',description:'Short intent. One activity, without coordinates or tool arguments.'},milestone:{type:'string',enum:options.milestones.map(item=>item.id),description:'Choose one observable finish from milestoneOptions.'},explanation:{type:'string'}},required:['goal','milestone','explanation'],additionalProperties:false,
     };
     const instruction=reviewing
-      ? 'Review your current milestone using verifiedProgress. Only recorded effects prove completion. Finding is not collecting; holding is not placing. A blocked or abandoned prerequisite cannot be skipped to continue later construction. Choose an allowed outcome. Legacy plans without verifiable criteria must be abandoned and replaced. Explain briefly what changed or prevented progress.'
+      ? 'Review your current milestone using verifiedProgress. Only recorded effects on the required subject prove completion. Collecting another material does not advance this milestone. Finding is not collecting; holding is not placing. A blocked or abandoned prerequisite cannot be skipped to continue later construction. Choose an allowed outcome. Legacy plans without verifiable criteria must be abandoned and replaced. Explain briefly what changed or prevented progress.'
       : 'Choose your own short goal and exactly one milestone from milestoneOptions. The milestone is the entire current scope, not the start of an expanding list. Use curiosity and the current situation. Consider recent blockage before choosing movement or construction again. A previous goal is history, not an instruction to repeat it.';
     let saving=false;
     try{
       const answer=await options.complete({messages:[
-        {role:'system',content:`You are ${options.name}, planning your next activity in a physical world. ${instruction} Goal: at most 200 characters. Explanation: at most 300 characters. Call only ${name}. Planning consumes no world time. Reviews are every ${PLAN_REVIEW_INTERVAL} decisions.`},
-        {role:'user',content:JSON.stringify({situation:options.context,...(reviewing?{previousPlan:previous,verifiedProgress:{complete:!!evidence.length,evidence,legacy},allowedOutcomes:outcomes}:{milestoneOptions:options.milestones.map(({id,task})=>({id,task})),...(previous?{previousPlan:previous}:{})}),...(correction?{correction}:{})})},
+        {role:'system',content:`${options.planningInstructions?.replaceAll('{name}',options.name)??`You are ${options.name}, a curious agent planning your next activity in a physical world.`} ${instruction} Goal: at most 200 characters. Explanation: at most 300 characters. Call only ${name}. Planning consumes no world time. Reviews are every ${PLAN_REVIEW_INTERVAL} decisions.`},
+        {role:'user',content:JSON.stringify({...(reviewing?{requiredResult:previous!.steps.find(step=>step.status==='pending')?.task,verifiedProgress:{complete:!!evidence.length,evidence,legacy},allowedOutcomes:outcomes,previousPlan:previous}:{milestoneOptions:options.milestones.map(({id,task})=>({id,task})),...(previous?{previousPlan:previous}:{})}),situation:options.context,...(correction?{correction}:{})})},
       ],tools:[{type:'function',function:{name,description:reviewing?'Review one milestone using recorded evidence.':'Choose one finite, observable milestone.',parameters}}],max_tokens:700,reasoning:'maximum'},options.signal);
       options.signal.throwIfAborted();
       let args:any;

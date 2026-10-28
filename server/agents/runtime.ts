@@ -7,7 +7,7 @@ import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/cor
 import type { Store } from '../store';
 import { ProviderChain, type ProviderConfig, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
-import { compactResult, compactView, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded } from './context';
+import { compactResult, compactView, goalAffordances, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded } from './context';
 import { compactJournal } from './journal-compaction';
 import { needsPlanReview, planDecision } from './planning';
 import { milestoneEvidence, milestoneOptions } from './milestones';
@@ -170,7 +170,7 @@ export class AgentRuntime {
         .map(tool=>tool.name);
       const actions=recentActions(this.store.actionEventsAt(observation.tick,id,PLAN_REVIEW_INTERVAL*2),PLAN_REVIEW_INTERVAL*2);
       const context=abstractPlanningContext(this.engine,observation,mind,capabilities,actions.slice(-PLAN_REVIEW_INTERVAL));
-      staged.plan=await planDecision({name:observation.self.name,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,context,milestones:milestoneOptions(observation),actions,signal,retryDelayMs:this.config.retryDelayMs,
+      staged.plan=await planDecision({name:observation.self.name,planningInstructions:this.engine.module.manifest.planningInstructions,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,context,milestones:milestoneOptions(observation),actions,signal,retryDelayMs:this.config.retryDelayMs,
         complete:async(request,abort)=>{
           report(id,{state:'planning',message:'Planning a goal and reviewing steps; world time is held.'});
           const answer=await this.inference.complete(request,abort,(provider)=>report(id,{state:'planning',message:`Planning with ${provider.name}; world time is held.`}));
@@ -215,34 +215,12 @@ export class AgentRuntime {
       },
     };
     let tools = worldTools(this.engine, id, mind,{following,speechMenu,...journalOptions});
-    const discoveries=[...(this.engine.discoveries.get(id)??[])];
-    const hints=this.engine.module.agentHints?.(observation,new Set(discoveries))??[];
-    const knownDiscoveries=new Set(mind.knownDiscoveries??discoveries);
-    const firstWoodShape=knownDiscoveries.size!==discoveries.length&&!([...knownDiscoveries].some(fact=>fact.startsWith('wood-shape:')))
-      ?discoveries.find(fact=>fact.startsWith('wood-shape:')&&!knownDiscoveries.has(fact))
-      :undefined;
-    if(!following&&firstWoodShape){
-      const product=woodProductName(firstWoodShape.slice('wood-shape:'.length));
-      const made=product==='planks'?product:`${/^[aeiou]/.test(product)?'an':'a'} ${product}`;
-      hints.push(`You shaped wood into ${made} for the first time. Wood may have other useful forms besides ${product==='planks'?product:`the ${product}`}. You need more raw wood to test them. Consider this discovery when reviewing your plan; journal can preserve useful details for later investigation.`);
-    }
-    if(!following)mind.knownDiscoveries=discoveries;
-    mind.lastEncounters??={};
-    for(const notice of observation.encounters)mind.lastEncounters[notice.otherId]=Math.max(mind.lastEncounters[notice.otherId]??0,notice.tick);
-    const listeners=observation.interactions.speak.filter(other=>(mind.lastSpoken?.[other.id]??-1)<(mind.lastEncounters![other.id]??0));
-    if(listeners.length)hints.push(`You can greet or reply to ${listeners.map(other=>other.name).join(', ')} with say.`);
-    const system = ()=>[this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),'End this decision with exactly one physical action. You may use supporting tools first; call finish_goal alone to close a goal before acting. Prefer choose_action with a current choices ID. Facts and current results override your intentions. If blocked, use the navigation summary before repeating a move.',!following&&mind.notes.length?'Notes are past records, oldest first; your current plan takes priority. Use journal with replace for outdated notes. Old locations and directions may no longer apply.':undefined,journalHint].filter(Boolean).join('\n');
-    delete mind.carryingReminder;
-    const held=observation.self.inventory?.selected===null||!observation.self.inventory?undefined:observation.self.inventory.stacks[observation.self.inventory.selected];
-    let reminder=held&&(mind.carriedMoves??0)>=10?carryingReminder(held.kind,held.contents,observation.interactions.hit.length>0):undefined;
-    if((mind.emptyHandMoves??0)>=10&&!held){
-      const reachable=observation.interactions.hit;
-      const wood=reachable.find(block=>block.kind==='wood');
-      if(wood)reminder=`The wood within reach at block [${wood.target.join(',')}] could be useful. You could try hit on it to see what happens.`;
-      else if(reachable.length)reminder=`The blocks in this world look like they can be struck. You could try hit on the ${reachable[0].kind} at block [${reachable[0].target.join(',')}].`;
-      else reminder='The blocks in this world look like they can be struck. You could look for one within arm\'s reach and try hit.';
-    }
-    if(reminder&&held?.kind==='wood')hints.splice(0,hints.length,...hints.filter(hint=>!hint.includes('shapeable')));
+    const system = ()=>[
+      `CURRENT GOAL: ${mind.plan!.goal}\nREQUIRED RESULT: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??'Close or replace the finished goal.'}\n${milestoneEvidence(mind.plan!,actions).length?'STATUS: Achieved. Call finish_goal with completed now.':'STATUS: Not yet achieved. Choose the next action to achieve this result.'} Available tools and incidental objects are capabilities, not competing tasks.`,
+      this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),
+      'End this decision with exactly one physical action. You may use supporting tools first; call finish_goal alone to close a goal before acting. Prefer choose_action with a current choices ID. Facts and current results override your intentions. If blocked, use the navigation summary before repeating a move.',
+      !following&&mind.notes.length?'Notes are past records, oldest first; your current plan takes priority. Use journal with replace for outdated notes. Old locations and directions may no longer apply.':undefined,journalHint,
+    ].filter(Boolean).join('\n');
     const notes=()=>mind.notes.length?{notes:mind.notes}:{};
     const recent=historicalActions(actions),learned=relevantKnowledge(this.engine,observation);
     const lastResult=(observation.self.lastAction??mind.lastResult) as ActionResult|undefined;
@@ -250,15 +228,16 @@ export class AgentRuntime {
     const {attention,...view}=compactView(observation);
     const planContext=()=>{
       const plan=mind.plan!,elapsed=mind.turns-plan.reviewedTurn,reached=milestoneEvidence(plan,actions);
-      return {goal:plan.goal,currentStep:plan.steps.find(step=>step.status==='pending')?.task,reviewInDecisions:Math.max(0,PLAN_REVIEW_INTERVAL-elapsed),
+      const step=plan.steps.find(step=>step.status==='pending');
+      return {goal:plan.goal,currentStep:step?.task,criterion:step?.criterion,...(!following&&!reached.length?goalAffordances(this.engine.observeAt(id,viewAngle),step?.criterion):{}),reviewInDecisions:Math.max(0,PLAN_REVIEW_INTERVAL-elapsed),
         ...(plan.steps.length!==1||!plan.steps[0].criterion?{legacyPlan:'This older plan has no verifiable completion criterion. Use finish_goal with abandoned to replace it with one coherent milestone. Do not continue work whose prerequisite was abandoned.'}:{}),
         ...(reached.length?{milestoneReached:reached,instruction:'This milestone is achieved. Call finish_goal with completed now; do not repeat or enlarge it.'}:{}),
         ...(elapsed>0&&elapsed%PLAN_REMINDER_INTERVAL===0?{reviewReminder:'Check your goal against recorded progress. Use finish_goal if achieved or no longer useful; otherwise continue. This reminder does not call the planner.'}:{}),
       };
     };
     const terrainChanges=observation.terrainChanges.length?{terrainChanges:observation.terrainChanges.map(notice=>notice.message)}:{};
-    const normalContext=()=>rounded({...(attention?{attention}:{}),...(lastResult?{lastResult:compactResult(lastResult)}:{}),...(viewAngle?compactView(this.engine.observeAt(id,viewAngle)):view),plan:planContext(),progress:progressContext(recent),...notes(),body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...terrainChanges,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...(learned.length?{learned}:{}),...(recent.length?{recent:recent.slice(-4)}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{})});
-    const initial=following?{following:observation.following,plan:planContext(),...heard,...terrainChanges}:normalContext();
+    const normalContext=()=>rounded({plan:planContext(),...(attention?{attention}:{}),...(lastResult?{lastResult:compactResult(lastResult)}:{}),...(viewAngle?compactView(this.engine.observeAt(id,viewAngle)):view),progress:progressContext(recent),...notes(),body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...terrainChanges,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...(learned.length?{learned}:{}),...(recent.length?{recent:recent.slice(-4)}:{}),actionRequest:milestoneEvidence(mind.plan!,actions).length?'Call finish_goal with completed now.':`Choose one action toward this required result: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??'Close or replace the finished goal.'}`});
+    const initial=following?{plan:planContext(),following:observation.following,...heard,...terrainChanges}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
     let attempts=0,supporting=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
     const complete=async()=>{
@@ -294,6 +273,10 @@ export class AgentRuntime {
         else if(tool.name==='look'&&supporting++>=2)result={ok:false,message:'Use at most two look calls before acting. Journal remains freely available.'};
         else if(tool.name==='finish_goal'&&answer.calls.length!==1)result={ok:false,message:'Call finish_goal alone before choosing your next physical action.'};
         else{try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{signal.throwIfAborted();result={ok:false,message:'Invalid tool arguments.'};}}
+        if(call.function.name==='look'&&typeof (result as {viewAngle?:number})?.viewAngle==='number'){
+          viewAngle=(result as {viewAngle:number}).viewAngle;
+          result={plan:planContext(),...(result as object)};
+        }
         cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
         if(call.function.name==='finish_goal'&&(result as {ok?:boolean})?.ok){
           const finished=mind.plan!;
@@ -319,12 +302,11 @@ export class AgentRuntime {
         }
         if(call.function.name==='stop_follow'&&(result as {ok?:boolean})?.ok){
           following=false;stopFollowing=true;journalHint=mind.journalOffer;delete mind.journalOffer;journalOfferUsed??=journalHint;
-          mind.knownDiscoveries=discoveries;
           tools=worldTools(this.engine,id,mind,{following:false,viewAngle,speechMenu,...journalOptions});
         }
       }
       if(invalidPhysical){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'This response contains an invalid physical action. Choose exactly one valid physical action.'})});}
-      else if(physical.length===1)return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(journalOfferUsed?{journalOffer:journalOfferUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
+      else if(physical.length===1)return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(journalOfferUsed?{journalOffer:journalOfferUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
       else if(physical.length>1)for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action per response.'})});
       if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(normalContext())});
       else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose exactly one: follow or stop_follow.':'Choose exactly one available physical action.'});
@@ -393,13 +375,6 @@ export class AgentRuntime {
   }
 }
 
-function carryingReminder(kind:string,contents?:string,canDig=false) {
-  if(kind==='wood')return 'You are still holding a wood block; try shaping it with strike_held.';
-  if(kind==='shovel')return canDig?'Your shovel can remove the reachable soil with dig.':'You are holding a shovel. Look for reachable soil to dig.';
-  if(kind==='bucket')return contents?`Your bucket holds ${contents}; you can empty it.`:'Your empty bucket can carry material when fill is available.';
-  return `You are still holding ${kind}; you could place or throw it.`;
-}
-
 function goalLearningOffer(plan:AgentPlan) {
   return `You completed the goal "${plan.goal}". What memorable fact did you learn about the world? If you discovered a durable rule, useful method, important location, or surprising property, use journal now to preserve that lesson. Record the learned fact, not a recap of actions or merely that the goal is complete. Skip journal if nothing memorable was learned.`;
 }
@@ -423,6 +398,7 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
       },
     },
     capabilities,
+    suggestions:engine.module.agentHints?.(observation,engine.discoveries.get(observation.self.id)??new Set())??[],
     inventory:inventoryContext(observation),
     learned:relevantKnowledge(engine,observation),
     notes:mind.notes,
@@ -431,14 +407,6 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
     progress:progressContext(actions),
     ...(observation.following?{following:{name:observation.following.name}}:{}),
   });
-}
-
-function woodProductName(kind:string) {
-  if(kind==='plank')return 'planks';
-  if(kind==='door_half_up')return 'upper door half';
-  if(kind==='door_half_down')return 'lower door half';
-  if(kind==='door')return 'rustic door';
-  return kind.replaceAll('_',' ');
 }
 
 // Deliberately deterministic and labelled in the UI. This is a mechanical demo,

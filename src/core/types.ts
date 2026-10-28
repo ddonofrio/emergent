@@ -3,7 +3,7 @@ export type Block = [number, number, number, string];
 export interface Material { color: string; solid: boolean; floats: boolean; stackLimit?: number; vessel?: boolean; }
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
-export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }
+export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }
 export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'communicate'|'shape'; subject?:string; }
 export interface AgentPlan {
   goal: string;
@@ -41,6 +41,7 @@ export interface ModuleManifest {
   daySeconds: number; materials: Record<string, Material>; vocabulary: string[];
   perception: { range: number; fieldOfView: number; maxBlocks: number };
   agentInstructions: string;
+  planningInstructions?: string;
 }
 export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'find_material' | 'find_entity' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
 export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: number; clearance: number; approach?: { distance:number; angle:number }; jump?: { distance:number; angle:number }; }

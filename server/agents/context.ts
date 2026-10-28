@@ -1,6 +1,6 @@
 import type { Engine } from '../../src/core/engine';
 import { knowledgeDescription } from '../../src/core/knowledge';
-import { distance, type Action, type ActionResult, type Observation, type Vec3, type WorldEvent } from '../../src/core/types';
+import { distance, type Action, type ActionResult, type MilestoneCriterion, type Observation, type Vec3, type WorldEvent } from '../../src/core/types';
 import { impactPointName } from '../../src/core/impact-points';
 import { INVENTORY_STACKS, STACK_SIZE } from '../../src/core/inventory';
 import { RECENT_ACTION_LIMIT } from '../../src/core/memory';
@@ -10,11 +10,26 @@ import { actionChoices, directionLabel, localGeometry, type LocalView } from './
 export function rounded<T>(value:T):T {
   return JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='number'?Math.round(item*100)/100:item));
 }
+// Match only currently observed affordances; this neither finds hidden targets nor plans a route.
+export function goalAffordances(view:LocalView,criterion:MilestoneCriterion|undefined) {
+  if(!criterion)return {matchingReachableChoices:[] as string[]};
+  const subject=criterion.subject,choices=actionChoices(view);
+  const matching=choices.filter(({action})=>{
+    if(criterion.kind==='collect'&&action.action==='pickup')return view.interactions.pickup.some(item=>item.itemId===action.itemId&&item.kind===subject);
+    const target='target' in action?action.target:undefined;
+    if(['collect','strike'].includes(criterion.kind)&&['hit','dig'].includes(action.action)&&target)
+      return view.interactions.hit.some(block=>block.kind===subject&&block.target.every((value,index)=>value===target[index]));
+    return false;
+  });
+  return {matchingReachableChoices:matching.map(choice=>choice.id),
+    ...(matching.length?{interactionStatus:`${subject} is within reach. These choices act on the required material here.`}:{}),
+  };
+}
 export function compactView(view:LocalView) {
   const inventory=view.self?.inventory,held=inventory&&inventory.selected!==null?inventory.stacks[inventory.selected]:undefined;
   const blockAction=held?.kind==='shovel'?'dig':'hit';
   const cracked=view.interactions.hit.find(block=>block.cracks>0);
-  const attention=cracked?blockAction==='dig'?`The cracked ${cracked.kind} at [${cracked.target.join(',')}] is within reach of your shovel. Use dig to remove it.`:`The ${cracked.kind} block at [${cracked.target.join(',')}] ${cracked.cracks>=2?'has deep cracks and looks close to breaking':'has visible cracks; its surface is changing'}. Try hit on that same block again to see what happens.`:undefined;
+  const attention=cracked?blockAction==='dig'?`The cracked ${cracked.kind} at [${cracked.target.join(',')}] is within reach of your shovel. Use dig only if clearing it advances your current goal.`:`The ${cracked.kind} block at [${cracked.target.join(',')}] ${cracked.cracks>=2?'has deep cracks and looks close to breaking':'has visible cracks; its surface is changing'}. Further hits on the same block can continue this interaction if it advances your current goal.`:undefined;
   const blocked=view.navigation.paths.every(path=>path.clearance<.5);
   const jumps=view.navigation.paths.filter(path=>path.jump);
   const navigationSummary=blocked?`Walking is blocked in the three checked directions.${jumps.length?` A checked jump is available ${jumps.map(path=>directionLabel(path.turn)).join(' or ')}. Choose its option to cross the obstacle.`:' Look or turn to inspect another direction, or clear a reachable obstruction.'}`:undefined;

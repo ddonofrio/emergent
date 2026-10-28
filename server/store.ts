@@ -108,6 +108,7 @@ function compatibleManifest(recorded: string, current: ModuleManifest) {
     previous.daySeconds=current.daySeconds;
     // Agent wording does not change recorded geometry or replay compatibility.
     previous.agentInstructions=current.agentInstructions;
+    delete previous.planningInstructions;
     // Communication choices affect future decisions, not recorded state or replay.
     previous.vocabulary=current.vocabulary;
     // Inventory capacity changes affect future actions, not recorded terrain or replay.
@@ -115,6 +116,7 @@ function compatibleManifest(recorded: string, current: ModuleManifest) {
     // New products may extend the catalog; existing material behavior must match.
     if(Object.entries(previous.materials).some(([kind,material])=>JSON.stringify(material)!==JSON.stringify(current.materials[kind])))return false;
     previous.materials=current.materials;
-    return JSON.stringify(previous)===JSON.stringify(current);
+    const {planningInstructions:_,...replayManifest}=current;
+    return JSON.stringify(previous)===JSON.stringify(replayManifest);
   } catch { return false; }
 }

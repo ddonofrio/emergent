@@ -355,8 +355,11 @@ export class Engine {
     if (!point) {
       const target = this.blockingVoxel(e,x,z,from);
       if (target) {
-        let height=0; for(let y=Math.floor(from);this.voxels.get([target[0],y,target[2]]);y++) height++;
         const material=this.voxels.get(target);
+        if(target[1]>from+.05&&!this.voxels.solid([target[0]+.5,from+.05,target[2]+.5])){
+          return {issue:{kind:'overhang',target,material,message:`Low-hanging ${material??'solid material'} blocks your headroom. You cannot walk beneath it or jump through it.`}};
+        }
+        let height=0; for(let y=Math.floor(from);this.voxels.get([target[0],y,target[2]]);y++) height++;
         const issue:MovementIssue={kind:height<=1?'rise':'wall',target,material,height:Math.max(1,height),message:height<=1?`A one-block ${material??'solid'} rise blocks your path.`:`A ${Math.max(2,height)}-block ${material??'solid'} wall blocks your path.`};
         issue.message=this.module.describeObstacle?.(issue)??issue.message;
         return {issue};
@@ -408,7 +411,7 @@ export class Engine {
       const candidate=[1,1.5,2,2.5].find(d=>d>clearance+.25&&this.planJump(e,yaw,d).landing);
       if(candidate){jump={distance:candidate,angle};options.push('jump');}
     }
-    if(issue?.target&&['rise','wall'].includes(issue.kind)){
+    if(issue?.target&&['rise','wall','overhang'].includes(issue.kind)){
       const held=this.held(e),reachable=!this.standingOn(issue.target)&&this.blockInReach(e,issue.target)&&this.blockSurfaces(issue.target,this.eye(e)).some(point=>this.visible(e,point));
       if(held?.kind==='shovel'&&reachable&&['sand','dirt','grass'].includes(this.voxels.get(issue.target)!))options.push('dig');
       else if(held)options.push('store');
