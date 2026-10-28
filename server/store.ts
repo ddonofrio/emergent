@@ -82,6 +82,21 @@ export class Store {
     const outcomes=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND id > ? AND type IN ('arrived','blocked','collision','rebound-ended','follow-ended','follow-blocked','movement-response','scanned') ORDER BY id").all(tick,actor,actions[0].id) as {data:string}[];
     return [...actions,...outcomes.map(row=>JSON.parse(row.data) as WorldEvent)].sort((a,b)=>a.id-b.id);
   }
+  // Agent memory is rebuilt only from that actor's recorded experience, never observer state.
+  experienceEvents(tick:number,actor:string,afterId=0,limit=500):WorldEvent[] {
+    const rows=this.db.prepare(`SELECT id,tick,actor,type,
+      CASE WHEN type = 'observation' THEN json_object('self',json_extract(data,'$.data.observation.self'),
+        'surfaces',json_extract(data,'$.data.observation.surfaces'),'entities',json_extract(data,'$.data.observation.entities'),
+        'heard',json_extract(data,'$.data.observation.heard')) ELSE json_extract(data,'$.data') END AS payload,
+      json_extract(data,'$.message') AS message,json_extract(data,'$.time') AS time
+      FROM events WHERE actor = ? AND tick <= ? AND id > ?
+      AND type IN ('observation','action','rejected','arrived','blocked','collision','scanned','discovery','plan','encounter')
+      ORDER BY id LIMIT ?`).all(actor,tick,afterId,limit) as {id:number;tick:number;actor:string;type:string;payload:string|null;message:string;time:number}[];
+    return rows.map(row=>({id:row.id,tick:row.tick,actor:row.actor,type:row.type,time:row.time,day:0,message:row.message,...(row.payload?{data:JSON.parse(row.payload)}:{})}));
+  }
+  discoveriesSince(tick:number,actor:string,afterId:number):WorldEvent[] {
+    return (this.db.prepare("SELECT data FROM events WHERE actor = ? AND tick <= ? AND id > ? AND type = 'discovery' ORDER BY id LIMIT 20").all(actor,tick,afterId) as {data:string}[]).map(row=>JSON.parse(row.data));
+  }
   memoryAt(tick:number,actor:string,limit=PRIVATE_NOTE_LIMIT) {
     const rows=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type = 'memory' ORDER BY id DESC LIMIT ?").all(tick,actor,limit) as {data:string}[];
     const latest=rows[0]?JSON.parse(rows[0].data) as WorldEvent:undefined;

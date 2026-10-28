@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { projectFields, projectReply } from './agent-fixtures';
 import assert from 'node:assert/strict';
 import { planDecision, needsPlanReview } from '../server/agents/planning';
 import { milestoneEvidence } from '../server/agents/milestones';
@@ -12,7 +13,7 @@ const plan:AgentPlan={version:2,inventoryBaseline:{},goal:'Collect wood.',status
 const authored={goal:'Compare the shade on opposite sides of the tree.',successCondition:'I have observed both sides and can describe how their shade differs.',explanation:'I wonder whether the tree changes the light around it.'};
 const engine=new Engine(island);engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:640};
 const observation=engine.observe('t1');
-const answer=(name:string,args:unknown):CompletionResult=>({provider:'stub',providerName:'Stub',model:'stub',content:null,calls:[{id:'plan',type:'function',function:{name,arguments:JSON.stringify(args)}}]});
+const answer=(name:string,args:unknown):CompletionResult=>({provider:'stub',providerName:'Stub',model:'stub',content:null,calls:[{id:'plan',type:'function',function:{name,arguments:JSON.stringify(projectReply(name,args))}}]});
 const base=()=>({name:'Moss',turn:31,time:30,context:{},observation,actions:[],signal:AbortSignal.timeout(2000),retryDelayMs:1,waiting(){},save(_plan:AgentPlan){}});
 const recorded=(action:string,feedback:Record<string,unknown>,eventId=10)=>({eventId,atSecond:1,action,args:{},result:compactResult({ok:true,message:'Recorded effect.',feedback:{...(feedback.collected?{inventoryDelta:[{kind:feedback.collected,change:1}]}:{}),...feedback}})});
 
@@ -80,7 +81,7 @@ test('the planner authors goals outside any catalog and preserves its exact succ
   let calls=0;
   const next=await planDecision({...base(),async complete(request){
     const schema=(request.tools[0] as any).function.parameters;
-    assert.deepEqual(Object.keys(schema.properties),['goal','successCondition','explanation']);
+    assert.deepEqual(Object.keys(schema.properties),['direction','project','goal','successCondition','suggestedActions','explanation']);
     assert.equal(schema.properties.goal.enum,undefined);
     assert.equal(schema.properties.successCondition.enum,undefined);
     assert.doesNotMatch(JSON.stringify(request),/milestoneOptions|collect_wood|shape_wood/);
@@ -88,7 +89,7 @@ test('the planner authors goals outside any catalog and preserves its exact succ
     if(calls===2)return answer('set_plan',{...authored,successCondition:''});
     return answer('set_plan',authored);
   }});
-  assert.equal(calls,3);assert.equal(next.version,3);assert.equal(next.steps.length,1);assert.equal(next.steps[0].criterion,undefined);
+  assert.equal(calls,3);assert.equal(next.version,4);assert.equal(next.steps.length,1);assert.equal(next.steps[0].criterion,undefined);
   assert.equal(next.goal,authored.goal);assert.equal(next.steps[0].task,authored.successCondition);
   assert.equal(next.explanation,authored.explanation);
   assert.equal(needsPlanReview(next,32),false,'A free-text goal needs no programmed criterion.');

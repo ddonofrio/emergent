@@ -11,6 +11,11 @@ import { actionChoices, directionLabel, localGeometry, type LocalView } from './
 export function rounded<T>(value:T):T {
   return JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='number'?Math.round(item*100)/100:item));
 }
+export function bodyContext(view:{self:Observation['self'];viewAngle?:number}) {
+  const direction=(yaw:number)=>({x:Math.sin(yaw*Math.PI/180),z:Math.cos(yaw*Math.PI/180)});
+  return rounded({position:view.self.position,yaw:view.self.yaw,forwardXZ:direction(view.self.yaw),viewForwardXZ:direction(view.self.yaw+(view.viewAngle??0)),
+    coordinateFrame:'Coordinates are [x,y,z]; y is height. Yaw 0 faces +Z; yaw 90 faces +X. Movement angles are relative to your body, not your viewing direction. Looking does not turn your body.'});
+}
 // Match only currently observed affordances; this neither finds hidden targets nor plans a route.
 export function goalAffordances(view:LocalView,criterion:MilestoneCriterion|undefined) {
   if(!criterion)return {matchingReachableChoices:[] as string[]};
@@ -54,12 +59,14 @@ export function decisionView(view:Observation,criterion?:MilestoneCriterion) {
     .map(({kind,nearest})=>({material:kind,target:nearest}));
   const held=inventoryContext(view).holding;
   return rounded({
+    body:bodyContext(view),
     ...(compact.navigationSummary?{navigationSummary:compact.navigationSummary}:{}),
     ...(view.interactions.hit.some(block=>block.cracks>0)?{attention:'Cracks below are observed changes on those specific blocks.'}:{}),
     choices:compact.choices,perception:held==='empty'?'Your hands are empty.':`You hold ${held}.`,
     ...(compact.viewAngle===undefined?{}:{viewAngle:compact.viewAngle}),paths:compact.paths,
     surfaces:[...surfaces,...distant],
     creatures:view.entities.map(entity=>({id:entity.id,name:entity.name,position:entity.position})),
+    looseObjects:view.items.map(item=>({id:item.id,kind:item.kind,position:item.position,...(item.contents?{contents:item.contents}:{}),canPickUpNow:view.interactions.pickup.some(target=>target.itemId===item.id)})),
     interactions:{speak:view.interactions.speak,follow:view.interactions.follow},
     unknown:'Unseen space is unknown. Bearings are body-relative. Only current sightings give current locations.',
   });
@@ -92,8 +99,8 @@ export function inventoryContext(observation:Observation) {
   const held=inventory?.selected==null?undefined:inventory.stacks[inventory.selected];
   return {stackSlots:INVENTORY_STACKS,freeStackSlots:INVENTORY_STACKS-(inventory?.stacks.length??0),maxPerStack:STACK_SIZE,hand:inventory?.selected??null,holding:held?`${held.kind}${held.contents?` containing ${held.contents}`:''}`:'empty',...(inventory?.stacks.length?{stacks:inventory.stacks.map((stack,index)=>({index,...stack,ref:`hold_${stack.kind}${stack.contents?`_${stack.contents}`:''}`}))}:{})};
 }
-export function relevantKnowledge(engine:Engine,observation:Observation) {
-  return [...(engine.discoveries.get(observation.self.id)??[])].filter(fact=>engine.module.relevantKnowledge?.(observation,fact)??true).map(knowledgeDescription);
+export function relevantKnowledge(engine:Engine,observation:Observation,allLearned=false) {
+  return [...(engine.discoveries.get(observation.self.id)??[])].filter(fact=>allLearned||(engine.module.relevantKnowledge?.(observation,fact)??true)).map(knowledgeDescription);
 }
 export function compactResult(result:ActionResult) {
   const feedback=result.feedback??{};
@@ -187,12 +194,13 @@ export function historicalActions(actions:ReturnType<typeof recentActions>) {
 }
 
 export function planningActions(actions:ReturnType<typeof recentActions>) {
-  return historicalActions(actions).map(({atSecond,action,args,result,reaction})=>({
-    atSecond,action,
+  return historicalActions(actions).map(({eventId,atSecond,action,args,result,reaction})=>({
+    eventId,atSecond,action,args,
     ...(['target','itemId','entityId','point','stack'].some(key=>args[key]!==undefined)?{object:Object.fromEntries(['target','itemId','entityId','point','stack'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]))}:{}),
     result:{actionAccepted:result.ok,actionStatus:result.outcome,message:result.message,
       ...(result.material?{material:result.material}:{}),...(result.blockOutcome?{blockOutcome:result.blockOutcome}:{}),
       ...(result.materials?{materials:result.materials}:{}),...(result.entities?{entities:result.entities}:{}),
+      ...(result.shaped?{shaped:result.shaped}:{}),...(result.inventoryDelta?{inventoryDelta:result.inventoryDelta}:{}),
     },...(reaction?{reaction}:{}),
   }));
 }

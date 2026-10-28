@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { projectFields, projectReply } from './agent-fixtures';
 import assert from 'node:assert/strict';
 import { createServer, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
@@ -58,6 +59,11 @@ function respond(request: Request, action: Action) {
   respondTool(request,name,argumentsValue);
 }
 function respondTool(request:Request,name:string,argumentsValue:unknown){
+  argumentsValue=projectReply(name,argumentsValue);
+  if(name==='review_plan'&&request.body.tools[0].function.parameters.properties.project){
+    const previous=JSON.parse(request.body.messages[1].content).previousPlan;
+    argumentsValue={project:previous.project,suggestedActions:previous.suggestedActions,...argumentsValue as object};
+  }
   request.response.setHeader('Content-Type','application/json');
   request.response.end(JSON.stringify({choices:[{message:{content:null,tool_calls:[{id:'call-'+request.id,type:'function',function:{name,arguments:JSON.stringify(argumentsValue)}}]}}],usage:{total_tokens:42}}));
 }
@@ -122,7 +128,7 @@ test('planning holds time, reminds every five decisions and reviews after thirty
     }
     const review=await nextRequest();assert.equal(review.body.tools[0].function.name,'review_plan');
     const situation=JSON.parse(review.body.messages[1].content);
-    assert.equal(situation.situation.actionsSinceLastReview.length,5);assert.equal(situation.previousPlan.reviewedTurn,1);
+    assert.equal(situation.situation.recentActions.length,20);assert.equal(situation.previousPlan.reviewedTurn,1);
     assert.equal(situation.verifiedProgress,undefined);
     const scan=situation.availableEvidence.find((entry:any)=>entry.action==='find_material');assert.ok(scan);
     respondTool(review,'review_plan',{outcome:'complete',explanation:'The recorded scan shows the surroundings.',evidenceEventIds:[scan.eventId]});
@@ -159,12 +165,12 @@ test('early goal acknowledgment requires evidence, survives restart and resets t
     const achieved=await next();const evidence=JSON.parse(achieved.body.messages.at(-1).content).plan.availableEvidence;assert.ok(evidence.length);
     respondTool(achieved,'finish_goal',{outcome:'completed',reason:'The scan finished.',evidenceEventIds:[evidence[0].eventId]});
     const replacement=await next();assert.equal(p.planningRequests.length,2);assert.equal(engine.tick,20);
-    assert.equal(JSON.parse(replacement.body.messages.at(-1).content).plan.reviewInDecisions,30);
+    assert.equal(JSON.parse(replacement.body.messages.at(-1).content).plan.elapsedTaskDecisions,0);
     assert.equal(store.stateAt(20).entities.find(item=>item.id==='t1')!.plan!.reviewedTurn,1);
     r.clock.close();const restored=new Engine(engine.module,store.stateAt(20));restored.nextEvent=store.maxEventId()+1;
     resumed=run(restored,store,p.url,null);resumed.clock.pump();
     const afterRestart=await next();assert.equal(p.planningRequests.length,2,'The staged replacement must be reused.');
-    assert.equal(JSON.parse(afterRestart.body.messages.at(-1).content).plan.reviewInDecisions,30);
+    assert.equal(JSON.parse(afterRestart.body.messages.at(-1).content).plan.elapsedTaskDecisions,0);
     assert.equal(afterRestart.body.tools.some((tool:any)=>tool.function.name==='finish_goal'),false,'A second goal change is not offered in the same decision.');
     respond(afterRestart,{action:'wait'});await until(()=>resumed!.clock.status().phase==='advancing');resumed.advance(1000);
     assert.equal(restored.entity('t1').plan!.reviewedTurn,2);
@@ -380,7 +386,7 @@ test('execution foregrounds the assigned result and current matching targets wit
     const changed=p.requests[2];
     assert.match(changed.body.messages[0].content,/^CURRENT GOAL: Inspect the surroundings/);
     assert.doesNotMatch(changed.body.messages[0].content,/Collect wood/);
-    assert.equal(JSON.parse(changed.body.messages.at(-1).content).plan.reviewInDecisions,30);
+    assert.equal(JSON.parse(changed.body.messages.at(-1).content).plan.elapsedTaskDecisions,0);
     respond(changed,{action:'wait'});
   }finally{r.clock.close();store.close();p.close();}
 });
@@ -700,8 +706,8 @@ test('full journal compaction is staged, persists with ready decisions, and only
     assert.deepEqual(p.requests[7].body.tools.map((tool:any)=>tool.function.name),['submit_journal']);
     const current=JSON.parse(p.requests[7].body.messages[1].content).journal;
     assert.equal(current.length,10);
-    respondTool(p.requests[7],'submit_journal',{notes:current});await until(()=>p.requests.length===9);
-    const finalNotes=[...current.slice(1),'Shelter goal completed.'];
+    respondTool(p.requests[7],'submit_journal',{notes:[current[0]+' '+current[1],...current.slice(2)]});await until(()=>p.requests.length===9);
+    const finalNotes=[current[0]+' '+current[1],...current.slice(2),'Shelter goal completed.'];
     assert.deepEqual(JSON.parse(p.requests[8].body.messages.at(-1).content).notes,finalNotes);
     respond(p.requests[8],{action:'wait'});await until(()=>resumed!.clock.status().phase==='advancing');resumed.advance(1000);
     assert.deepEqual(store.memoryAt(restored.tick,'t1'),finalNotes);
@@ -714,15 +720,15 @@ test('journal favors durable world knowledge and persists notes for future promp
   try{
     engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
     assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='journal').function.description,/memorable fact learned about the world/i);
-    assert.match(p.requests[0].body.messages[0].content,/You chose your current goal and success condition/);
+    assert.match(p.requests[0].body.messages[0].content,/carrying out a task from your own plan/);
     assert.match(p.requests[0].body.messages[0].content,/Use current observations/);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/curious|curiosity/i);
     assert.match(p.planningRequests[0].body.messages[0].content,/You are t1, a curious Troglodyte/);
     assert.match(p.planningRequests[0].body.messages[0].content,/Decide for yourself what you want to do/);
     assert.doesNotMatch(p.planningRequests[0].body.messages[0].content,/Your mission is to complete/);
-    assert.match(p.requests[0].body.messages[0].content,/Use finish_goal when you judge it achieved/);
-    assert.match(p.requests[0].body.messages[0].content,/Labeled choices describe available physical actions/);
-    assert.doesNotMatch(p.requests[0].body.messages[0].content,/journal/);
+    assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='finish_goal').function.description,/completed: observed results/);
+    assert.match(p.requests[0].body.messages[0].content,/Prefer choose_action for checked options/);
+    assert.match(p.requests[0].body.messages[0].content,/Use journal/);
     const firstContext=JSON.parse(p.requests[0].body.messages.at(-1).content);
     assert.equal(firstContext.plan.matchingReachableChoices,undefined);
     assert.equal(firstContext.plan.goalAchieved,undefined);
@@ -749,7 +755,7 @@ test('replacing an obsolete journal goal stays staged, needs no compaction and s
     r.clock.pump();await until(()=>p.requests.length===1);
     const journal=p.requests[0].body.tools.find((tool:any)=>tool.function.name==='journal');
     assert.deepEqual(journal.function.parameters.properties.replace.enum,[0,1,2,3,4,5,6,7,8,9]);
-    assert.match(p.requests[0].body.messages[0].content,/past records.*oldest first/);
+    assert.match(p.requests[0].body.messages[0].content,/past interpretations.*oldest first/);
     const note='Coastal path at [4,1,8]: rise crossed; next gather sand to extend the path.';
     respondTool(p.requests[0],'journal',{replace:99,note});await until(()=>p.requests.length===2);
     assert.equal(JSON.parse(p.requests[1].body.messages.at(-1).content).ok,false);

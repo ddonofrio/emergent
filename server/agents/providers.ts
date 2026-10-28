@@ -1,5 +1,5 @@
 import { detectTokenLoop, tokenizeLoopText } from '../../vendor/deepseek-harness/loop-detector';
-import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
+import { BedrockRuntimeClient, ConverseCommand, type ConverseCommandInput } from '@aws-sdk/client-bedrock-runtime';
 
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string }; }
 export interface ProviderConfig {
@@ -225,7 +225,7 @@ export class ProviderChain {
       ...(system.length?{system}:{}),
       messages:messages.map(({role,content})=>({role,content:content as never})),
       ...(tools.length?{toolConfig:{tools:tools as never}}:{}),
-      inferenceConfig:{maxTokens:request.max_tokens},
+      ...bedrockThinkingConfig(provider,request),
     }),{abortSignal:signal});
     const answer=response.output?.message?.content??[];
     const content=answer.flatMap(block=>'text'in block&&typeof block.text==='string'?[block.text]:[]).join(' ').slice(0,5000)||null;
@@ -238,6 +238,22 @@ export class ProviderChain {
     if(content&&detectTokenLoop(tokenizeLoopText(content)))throw new InvalidCompletionError(`${provider.name} returned repeating output.`);
     return{provider:provider.id,providerName:provider.name,model:provider.model,content,calls,...(response.usage?{usage:response.usage}:{})};
   }
+}
+
+// Planner and journal requests are independent decisions, so no thinking signatures cross turns.
+// https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html
+export function bedrockThinkingConfig(provider:ProviderConfig,request:CompletionRequest):Pick<ConverseCommandInput,'inferenceConfig'|'additionalModelRequestFields'> {
+  const base={inferenceConfig:{maxTokens:request.max_tokens}};
+  if(request.reasoning!=='maximum'||request.messages.some(message=>(message as {role?:string}).role==='assistant'))return base;
+  if(/anthropic\.claude-(?:sonnet|opus)-4-6(?:\b|-)/.test(provider.model))return {
+    inferenceConfig:{maxTokens:request.max_tokens+8192},
+    additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:'high'}},
+  };
+  if(/anthropic\.claude-(?:haiku|sonnet|opus)-4-5(?:\b|-)/.test(provider.model))return {
+    inferenceConfig:{maxTokens:request.max_tokens+4096},
+    additionalModelRequestFields:{thinking:{type:'enabled',budget_tokens:4096}},
+  };
+  return base;
 }
 
 export function bedrockInferenceModelId(provider:ProviderConfig){

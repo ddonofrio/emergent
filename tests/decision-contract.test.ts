@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { projectReply } from './agent-fixtures';
 import assert from 'node:assert/strict';
 import { inflateSync } from 'node:zlib';
 import { Engine } from '../src/core/engine';
@@ -26,7 +27,7 @@ function fixture() {
   store.record(engine.frame(),engine.state(),runtime.persistence());
   return {engine,store,runtime,plan};
 }
-const answer=(name:string,args:unknown):CompletionResult=>({provider:'stub',providerName:'Stub',model:'stub',content:null,calls:[{type:'function',id:'choice',function:{name,arguments:JSON.stringify(args)}}]});
+const answer=(name:string,args:unknown):CompletionResult=>({provider:'stub',providerName:'Stub',model:'stub',content:null,calls:[{type:'function',id:'choice',function:{name,arguments:JSON.stringify(projectReply(name,args))}}]});
 const context=(request:CompletionRequest)=>JSON.parse((request.messages[1] as {content:string}).content);
 const commit=(engine:Engine,store:Store,runtime:AgentRuntime,turn:PreparedTurn)=>{
   engine.step(()=>runtime.commit(turn));
@@ -215,7 +216,7 @@ test('an older staged plan is reviewed without discarding a ready physical decis
       return answer('wait',{});
     };
     const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
-    assert.equal(turn.decisions[0].mind.plan!.version,3);assert.equal(calls,3);assert.equal(engine.tick,0);
+    assert.equal(turn.decisions[0].mind.plan!.version,4);assert.equal(calls,3);assert.equal(engine.tick,0);
     runtime.inference.complete=async()=>{throw new Error('Do not replace a ready physical decision.');};
     const cached=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
     assert.deepEqual(cached.decisions[0].calls,turn.decisions[0].calls);

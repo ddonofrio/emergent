@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bedrockInferenceModelId, ProviderChain, type CompletionRequest, type CompletionResult, type ProviderConfig } from '../server/agents/providers';
+import { bedrockInferenceModelId, bedrockThinkingConfig, ProviderChain, type CompletionRequest, type CompletionResult, type ProviderConfig } from '../server/agents/providers';
 
 const request:CompletionRequest={messages:[],tools:[],max_tokens:32};
 const provider=(id:string):ProviderConfig=>({id,name:id,apiKey:'test-key',baseUrl:'http://localhost/v1',model:`model-${id}`});
@@ -33,4 +33,14 @@ test('provider failure retains its exact health detail after fallback succeeds',
 test('Bedrock uses the European inference profile for Claude Sonnet 4.6',()=>{
   assert.equal(bedrockInferenceModelId({id:'sonnet',name:'Sonnet',apiKey:'test',baseUrl:'',model:'anthropic.claude-sonnet-4-6',region:'eu-north-1'}),'eu.anthropic.claude-sonnet-4-6');
   assert.equal(bedrockInferenceModelId({id:'sonnet',name:'Sonnet',apiKey:'test',baseUrl:'',model:'anthropic.claude-sonnet-4-6',region:'us-east-1'}),'anthropic.claude-sonnet-4-6');
+});
+
+test('Bedrock planner thinking reaches the wire with a separate budget, without changing executor requests',()=>{
+  const sonnet={...provider('sonnet'),model:'eu.anthropic.claude-sonnet-4-6'};
+  const planning={...request,max_tokens:2200,reasoning:'maximum' as const,messages:[{role:'user',content:'Review my recorded experience.'}]};
+  assert.deepEqual(bedrockThinkingConfig(sonnet,planning),{inferenceConfig:{maxTokens:10392},additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:'high'}}});
+  assert.deepEqual(bedrockThinkingConfig(sonnet,{...planning,reasoning:'minimum'}),{inferenceConfig:{maxTokens:2200}});
+  assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'unknown-model'},planning),{inferenceConfig:{maxTokens:2200}});
+  assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'eu.anthropic.claude-haiku-4-5-20251001-v1:0'},planning),{inferenceConfig:{maxTokens:6296},additionalModelRequestFields:{thinking:{type:'enabled',budget_tokens:4096}}});
+  assert.equal(bedrockThinkingConfig(sonnet,{...planning,messages:[{role:'assistant',content:'An existing tool conversation.'}]}).additionalModelRequestFields,undefined,'Do not enable thinking midway through a conversation lacking signed reasoning blocks.');
 });

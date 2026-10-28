@@ -6,10 +6,13 @@ export interface Inventory { stacks: Stack[]; selected: number | null; capacity:
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }
 export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'approach'|'communicate'|'shape'; subject?:string; entityId?:string; }
 export interface AgentPlan {
-  version?: 2 | 3;
+  version?: 2 | 3 | 4;
+  direction?: string;
+  project?: { goal: string; successCondition: string; progress: string; openQuestions: string[] };
+  suggestedActions?: string[];
   goal: string;
-  status: 'active' | 'completed' | 'abandoned';
-  steps: { task: string; status: 'pending' | 'completed' | 'abandoned'; evidence?: string; criterion?:MilestoneCriterion; evidenceEventIds?:number[]; assessment?:'agent' }[];
+  status: 'active' | 'completed' | 'abandoned' | 'blocked';
+  steps: { task: string; status: 'pending' | 'completed' | 'abandoned' | 'blocked'; evidence?: string; criterion?:MilestoneCriterion; evidenceEventIds?:number[]; assessment?:'agent' }[];
   explanation: string;
   createdTurn: number;
   reviewedTurn: number;

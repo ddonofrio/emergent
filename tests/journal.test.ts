@@ -24,13 +24,17 @@ test('compaction retries outages and invalid output without changing source note
   assert.equal(calls,5);assert.equal(result.length,9);assert.deepEqual(source,notes);
 });
 
-test('compaction accepts fewer notes and drops only the oldest when ten are returned',async()=>{
-  for(const count of [0,1,6,9,10]){
+test('compaction accepts fewer notes and rejects ten without silently losing the oldest',async()=>{
+  for(const count of [0,1,6,9]){
     let calls=0;
     const result=await compactJournal({name:'Moss',notes,incoming:'Build a shelter.',signal:new AbortController().signal,waiting(){},
       async complete(){calls++;return response(notes.slice(0,count));}});
     assert.equal(calls,1);assert.deepEqual(result,notes.slice(0,count).slice(-9));
   }
+  let calls=0;
+  const result=await compactJournal({name:'Moss',notes,incoming:'New observation.',signal:AbortSignal.timeout(2000),retryDelayMs:1,waiting(){},
+    async complete(){return response(++calls===1?notes:[notes[0]+' '+notes[1],...notes.slice(2)]);}});
+  assert.equal(calls,2);assert.ok(result[0].includes(notes[0]));assert.deepEqual(notes,Array.from({length:10},(_,i)=>`Goal ${i}: return to the shore.`));
 });
 
 test('unavailable journal compaction is cancellable and retains all notes',async()=>{

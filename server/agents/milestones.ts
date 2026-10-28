@@ -12,7 +12,12 @@ export function inventoryAmounts(inventory:Inventory|null) {
 // These are references to observed outcomes, not a judgment that a free-form goal succeeded.
 export function goalEvidence(plan:AgentPlan,actions:ReturnType<typeof recentActions>) {
   return historicalActions(actions).filter(entry=>entry.atSecond>(plan.startedAtSecond??Infinity))
-    .map(entry=>({eventId:entry.eventId,action:entry.action,message:entry.result.message,result:entry.result}));
+    .map(entry=>({eventId:entry.eventId,atSecond:entry.atSecond,action:entry.action,args:entry.args,message:entry.result.message,result:entry.result}));
+}
+export function taskEvidenceView(plan:AgentPlan,actions:ReturnType<typeof recentActions>) {
+  const evidence=goalEvidence(plan,actions);
+  const changes=evidence.filter(item=>item.result.collected||item.result.shaped||item.result.placed||item.result.heardBy?.length||item.result.inventoryDelta?.length).slice(-8);
+  return [...new Map([...changes,...evidence.slice(-6)].map(item=>[item.eventId,item])).values()].sort((a,b)=>a.eventId-b.eventId);
 }
 export function referencedGoalEvidence(plan:AgentPlan,actions:ReturnType<typeof recentActions>,ids:unknown) {
   if(!Array.isArray(ids)||!ids.length||ids.length>10||ids.some(id=>!Number.isInteger(id)))return undefined;
