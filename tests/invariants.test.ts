@@ -12,6 +12,7 @@ import { apply } from '../server/agents/harness-plugin';
 import { compactResult, compactView, historicalActions, inventoryContext, planningActions, recentActions, relevantKnowledge, rounded } from '../server/agents/context';
 import { exchangeInventory } from '../src/core/inventory';
 import { TURN_TICKS } from '../src/core/time';
+import { knowledgeDescription, observedMaterialKnowledge } from '../src/core/knowledge';
 
 const entity = (id = 't1', x = .5, z = .5): Entity => ({ id, name: id, kind: 'troglodyte', controller: 'agent', position: [x,1,z], height: 2, yaw: 0, inventory: null, color: '#ffffff', status: 'idle' });
 function fixture(blocks: Block[] = [], entities = [entity()]): Engine {
@@ -371,6 +372,7 @@ test('looking sideways reports movement angles relative to the unchanged body an
 test('perception and scanning identify the same wood without inventing a tree from distant leaves',()=>{
   const engine=fixture([[0,1,1,'wood'],[3,4,5,'leaves']]);
   const view=engine.observe('t1'),scan=engine.materialsAround('t1').find(item=>item.material==='wood')!;
+  assert.equal(engine.discoveries.size,0,'Observing without using the scan tool must not create learned knowledge.');
   assert.match(view.description,/wood block at \[0,1,1\]/);
   assert.doesNotMatch(view.description,/tree trunk/);
   assert.match(view.description,/Walking clearance.*before contact/);
@@ -380,6 +382,24 @@ test('perception and scanning identify the same wood without inventing a tree fr
   assert.equal(scan.bodyRelativeDegrees,0);
   const path=compactView(view).paths.find(path=>path.angle===0)!;
   assert.deepEqual(path.target,scan.target);
+});
+
+test('material scan tools write durable learned knowledge once per observed material',()=>{
+  const engine=fixture([[0,1,1,'wood']]);
+  const scan=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='find_material')!;
+  assert.equal((scan.invoke({}) as {ok:boolean}).ok,true);
+  assert.equal(engine.discoveries.size,0,'A scan must finish before its result becomes learned knowledge.');
+  for(let tick=0;tick<TURN_TICKS;tick++)engine.step();
+  const wood=observedMaterialKnowledge('wood'),stone=observedMaterialKnowledge('stone');
+  assert.ok(engine.discoveries.get('t1')?.has(wood));
+  assert.ok(engine.discoveries.get('t1')?.has(stone));
+  assert.equal(knowledgeDescription(wood),'I have observed wood terrain on this island.');
+  const first=engine.recentEvents.filter(event=>event.type==='discovery'&&(event.data as {knowledge?:string})?.knowledge===wood);
+  assert.equal(first.length,1);assert.equal((first[0].data as any).detail.source,'find_material');
+  assert.equal((scan.invoke({}) as {ok:boolean}).ok,true);for(let tick=0;tick<TURN_TICKS;tick++)engine.step();
+  assert.equal(engine.recentEvents.filter(event=>event.type==='discovery'&&(event.data as {knowledge?:string})?.knowledge===wood).length,1,'Repeated scans must not duplicate learned knowledge.');
+  const restored=new Engine(engine.module,engine.state());
+  assert.ok(restored.discoveries.get('t1')?.has(wood),'Learned scan results must survive state restoration.');
 });
 
 test('sideways look keeps object bearings body-relative and preserves shovel interactions',()=>{

@@ -4,6 +4,7 @@ import { clone, distance, type Action, type ActionResult, type AgentPlan, type O
 import { validateJsonSchemaValue } from '../../vendor/deepseek-harness/json-schema';
 import { PLAN_REMINDER_INTERVAL, PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
+import { isObservedMaterialKnowledge } from '../../src/core/knowledge';
 import type { Store } from '../store';
 import { InvalidCompletionError, ProviderChain, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
@@ -184,7 +185,8 @@ export class AgentRuntime {
     const actor=`plan:${id}`,cached=this.store.loadPending<StagedPlan>(observation.tick,actor,this.inference.cacheKey);
     const actions=this.actionHistory(id,observation.tick,mind.plan);
     const upgrade=mind.plan?.version===3;
-    const reviewReason=experienceReviewReason(mind.plan,mind.turns,actions,this.store.discoveriesSince(observation.tick,id,mind.plan?.reviewedEventId??0));
+    const discoveries=this.store.discoveriesSince(observation.tick,id,mind.plan?.reviewedEventId??0).filter(event=>!isObservedMaterialKnowledge((event.data as {knowledge?:unknown}|undefined)?.knowledge));
+    const reviewReason=experienceReviewReason(mind.plan,mind.turns,actions,discoveries);
     if(!cached&&!upgrade&&!reviewReason&&!needsPlanReview(mind.plan,mind.turns,actions))return [];
     const staged:StagedPlan=cached??{plan:mind.plan!,events:[],modelCalls:0};
     if(!cached||staged.plan.status!=='active'||![2,3,4].includes(staged.plan.version??0)){

@@ -1,3 +1,13 @@
+const OBSERVED_MATERIAL_PREFIX='observed-material:';
+
+export function observedMaterialKnowledge(material:string) {
+  return `${OBSERVED_MATERIAL_PREFIX}${material}`;
+}
+
+export function isObservedMaterialKnowledge(knowledge:unknown) {
+  return typeof knowledge==='string'&&knowledge.startsWith(OBSERVED_MATERIAL_PREFIX);
+}
+
 export function knowledgeDescription(knowledge:string) {
   if(knowledge==='blocks-break-after-three-hits')return 'Repeated strikes break blocks after three hits.';
   if(knowledge==='deep-water-limit')return 'The island ends at deep water. I cannot leave it because the water would rise above half my height.';
@@ -12,5 +22,6 @@ export function knowledgeDescription(knowledge:string) {
   if(knowledge==='wood-shape:door_half_down')return 'Strike wood at front_edge with orientation down to make a lower door half.';
   if(knowledge==='wood-shape:door')return 'Join one upper and one lower wooden door half to make a rustic door.';
   if(knowledge.startsWith('wood-shape:'))return `Wood can be shaped into a ${knowledge.slice('wood-shape:'.length)}.`;
+  if(knowledge.startsWith(OBSERVED_MATERIAL_PREFIX))return `I have observed ${knowledge.slice(OBSERVED_MATERIAL_PREFIX.length)} terrain on this island.`;
   return knowledge;
 }

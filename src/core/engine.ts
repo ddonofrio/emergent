@@ -1,7 +1,7 @@
 import { Voxels } from './voxels';
 import { TICKS_PER_SECOND, TURN_TICKS } from './time';
 import { exchangeInventory, normalizeInventory } from './inventory';
-import { knowledgeDescription } from './knowledge';
+import { knowledgeDescription, observedMaterialKnowledge } from './knowledge';
 import { clone, distance, key, type Action, type ActionResult, type Body, type EncounterNotice, type Entity, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
 
 const ok = (message: string): ActionResult => ({ ok: true, message });
@@ -791,7 +791,18 @@ export class Engine {
       if(e.motion.kind==='scan'){
         const motion=e.motion,progress=Math.min(1,(motion.progress??0)+1/20/(motion.duration??1));motion.progress=progress;
         e.yaw=((motion.startYaw??e.yaw)+360*progress)%360;
-        if(progress>=1){e.yaw=motion.startYaw??e.yaw;delete e.motion;e.status='idle';e.lastAction={ok:true,message:e.lastAction?.message??'You finish scanning all around.',feedback:{...e.lastAction?.feedback,outcome:'completed',facing:e.yaw}};this.event(e.id,'scanned',e.lastAction.message,e.lastAction.feedback);}
+        if(progress>=1){
+          e.yaw=motion.startYaw??e.yaw;delete e.motion;e.status='idle';e.lastAction={ok:true,message:e.lastAction?.message??'You finish scanning all around.',feedback:{...e.lastAction?.feedback,outcome:'completed',facing:e.yaw}};
+          const materials=Array.isArray(e.lastAction.feedback?.materials)?e.lastAction.feedback.materials:[];
+          for(const observed of materials){
+            if(!observed||typeof observed!=='object')continue;
+            const material=(observed as {material?:unknown}).material,target=(observed as {target?:unknown}).target;
+            if(typeof material!=='string'||!this.module.manifest.materials[material])continue;
+            const knowledge=observedMaterialKnowledge(material);
+            this.discover(e.id,knowledge,knowledgeDescription(knowledge),{source:'find_material',material,...(Array.isArray(target)?{target:clone(target)}:{})});
+          }
+          this.event(e.id,'scanned',e.lastAction.message,e.lastAction.feedback);
+        }
         continue;
       }
       if(e.motion.kind==='jump'){
