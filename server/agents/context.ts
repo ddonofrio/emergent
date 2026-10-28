@@ -13,8 +13,9 @@ export function rounded<T>(value:T):T {
 // Match only currently observed affordances; this neither finds hidden targets nor plans a route.
 export function goalAffordances(view:LocalView,criterion:MilestoneCriterion|undefined) {
   if(!criterion)return {matchingReachableChoices:[] as string[]};
-  const subject=criterion.subject,choices=actionChoices(view);
+  const subject=criterion.subject,choices=actionChoices(view,criterion);
   const matching=choices.filter(({action})=>{
+    if(['scan','locate'].includes(criterion.kind)&&action.action==='find_material')return true;
     if(criterion.kind==='collect'&&action.action==='pickup')return view.interactions.pickup.some(item=>item.itemId===action.itemId&&item.kind===subject);
     const target='target' in action?action.target:undefined;
     if(['collect','strike'].includes(criterion.kind)&&['hit','dig'].includes(action.action)&&target)
@@ -22,10 +23,10 @@ export function goalAffordances(view:LocalView,criterion:MilestoneCriterion|unde
     return false;
   });
   return {matchingReachableChoices:matching.map(choice=>choice.id),
-    ...(matching.length?{interactionStatus:`${subject} is within reach. These choices act on the required material here.`}:{}),
+    ...(matching.length?{interactionStatus:criterion.kind==='scan'?'A 360-degree material scan directly performs the required inspection.':criterion.kind==='locate'?`A 360-degree material scan directly performs the required search for ${subject}.`:`${subject} is within reach. These choices act on the required material here.`}:{}),
   };
 }
-export function compactView(view:LocalView) {
+export function compactView(view:LocalView,criterion?:MilestoneCriterion) {
   const inventory=view.self?.inventory,held=inventory&&inventory.selected!==null?inventory.stacks[inventory.selected]:undefined;
   const blockAction=held?.kind==='shovel'?'dig':'hit';
   const cracked=view.interactions.hit.find(block=>block.cracks>0);
@@ -33,7 +34,7 @@ export function compactView(view:LocalView) {
   const blocked=view.navigation.paths.every(path=>path.clearance<.5);
   const jumps=view.navigation.paths.filter(path=>path.jump);
   const navigationSummary=blocked?`Walking is blocked in the three checked directions.${jumps.length?` A checked jump is available ${jumps.map(path=>directionLabel(path.turn)).join(' or ')}. Choose its option to cross the obstacle.`:' Look or turn to inspect another direction, or clear a reachable obstruction.'}`:undefined;
-  return rounded({...(navigationSummary?{navigationSummary}:{}),...(attention?{attention}:{}),choices:actionChoices(view),geometry:localGeometry(view),perception:view.description,...(view.viewAngle===undefined?{}:{viewAngle:view.viewAngle}),
+  return rounded({...(navigationSummary?{navigationSummary}:{}),...(attention?{attention}:{}),choices:actionChoices(view,criterion),geometry:localGeometry(view),perception:view.description,...(view.viewAngle===undefined?{}:{viewAngle:view.viewAngle}),
     paths:view.navigation.paths.map(path=>({angle:path.turn,clearMetres:path.clearance,...(path.issue?{obstacle:path.issue.message,...(path.issue.target?{target:path.issue.target}:{})}:{}),...(path.approach?{walk:path.approach}:{}),...(path.jump?{jump:path.jump}:{})})),
     interactions:Object.fromEntries(Object.entries(view.interactions).filter(([,targets])=>targets.length).map(([name,targets])=>[name==='hit'?blockAction:name,targets])),
   });

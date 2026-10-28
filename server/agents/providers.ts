@@ -23,6 +23,7 @@ export interface CompletionResult {
   calls: ToolCall[];
   usage?: unknown;
 }
+export class InvalidCompletionError extends Error {}
 
 const positive = (value: string | undefined, fallback: number) => {
   const parsed = Number(value ?? fallback);
@@ -70,6 +71,7 @@ export class ProviderChain {
 
   async complete(request: CompletionRequest, signal: AbortSignal, onAttempt: (provider: ProviderConfig, index: number) => void): Promise<CompletionResult> {
     const failures: string[] = [];
+    let invalid = 0;
     for (const [index, provider] of this.providers.entries()) {
       signal.throwIfAborted();
       try {
@@ -78,9 +80,11 @@ export class ProviderChain {
         return await this.request(provider, request, signal);
       } catch (error) {
         signal.throwIfAborted();
+        if(error instanceof InvalidCompletionError)invalid++;
         failures.push(error instanceof Error ? error.message : `${provider.name} failed.`);
       }
     }
+    if(invalid===this.providers.length)throw new InvalidCompletionError(`All inference providers returned invalid completions. ${failures.join(' ')}`);
     throw new Error(`All inference providers are unavailable. ${failures.join(' ')}`);
   }
 
@@ -130,14 +134,16 @@ export class ProviderChain {
       await response.body?.cancel();
       throw new Error(`${provider.name} returned HTTP ${response.status}.`);
     }
-    const payload = await response.json() as { model?: string; choices?: { message: { content?: string; tool_calls?: ToolCall[] } }[]; usage?: unknown };
+    let payload:{ model?: string; choices?: { message: { content?: string; tool_calls?: ToolCall[] } }[]; usage?: unknown };
+    try{payload=await response.json() as typeof payload;}
+    catch{throw new InvalidCompletionError(`${provider.name} returned invalid JSON.`);}
     const answer = payload.choices?.[0]?.message;
-    if (!answer) throw new Error(`${provider.name} returned an incomplete response.`);
+    if (!answer) throw new InvalidCompletionError(`${provider.name} returned an incomplete response.`);
     const content = typeof answer.content === 'string' ? answer.content.slice(0, 5000) : null;
-    if (content && detectTokenLoop(tokenizeLoopText(content))) throw new Error(`${provider.name} returned repeating output.`);
+    if (content && detectTokenLoop(tokenizeLoopText(content))) throw new InvalidCompletionError(`${provider.name} returned repeating output.`);
     const calls = answer.tool_calls ?? [];
     if (!Array.isArray(calls) || calls.length > 16 || calls.some(call => typeof call.id !== 'string' || call.type !== 'function' || typeof call.function?.name !== 'string' || typeof call.function?.arguments !== 'string')) {
-      throw new Error(`${provider.name} returned invalid tool calls.`);
+      throw new InvalidCompletionError(`${provider.name} returned invalid tool calls.`);
     }
     return { provider: provider.id, providerName: provider.name, model: payload.model ?? provider.model, content, calls, ...(payload.usage === undefined ? {} : { usage: payload.usage }) };
   }

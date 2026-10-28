@@ -154,7 +154,7 @@ requestAnimationFrame(playback);
 
 function renderTimeline() {
   if (!meta) return;
-  $('view-mode').textContent = isLive ? meta.runtime.phase === 'thinking' ? 'LIVE · WAITING FOR MODELS' : meta.runtime.phase === 'paused' ? 'LIVE · WORLD PAUSED' : 'LIVE OBSERVATION' : scrubTarget !== null ? 'FAST SCRUB PLAYBACK' : playing ? 'RECORDED PLAYBACK' : 'PAUSED OBSERVATION';
+  $('view-mode').textContent = isLive ? meta.runtime.phase === 'thinking' ? 'LIVE · WAITING FOR MODELS' : meta.runtime.phase === 'error' ? 'LIVE · DECISION ERROR' : meta.runtime.phase === 'paused' ? 'LIVE · WORLD PAUSED' : 'LIVE OBSERVATION' : scrubTarget !== null ? 'FAST SCRUB PLAYBACK' : playing ? 'RECORDED PLAYBACK' : 'PAUSED OBSERVATION';
   $('view-mode').classList.toggle('past',!isLive); $('world-clock').textContent = `DAY ${String(dayOf(cursor)).padStart(3,'0')} · ${clock(cursor)}`;
   $('live').classList.toggle('active',isLive); $('play').textContent = isLive || playing ? 'Ⅱ' : '▶'; $('play').setAttribute('aria-label',isLive || playing ? 'Pause observation' : 'Play recording');
   $('playback-time').textContent = formatWorldDuration(cursor,true);
@@ -165,7 +165,8 @@ function renderTimeline() {
   if (count !== dayCount) { const day = $<HTMLSelectElement>('day'); day.replaceChildren(); for (let i = 1;i<=count;i++) { const option = new Option(`Day ${String(i).padStart(3,'0')}`,String(i)); day.add(option); } dayCount = count; }
   $<HTMLSelectElement>('day').value = String(dayOf(cursor));
   const waiting = Object.entries(meta.runtime.agents).filter(([,s]) => s.state === 'planning' || s.state === 'thinking' || s.state === 'waiting').map(([id]) => shown?.entities.find(e=>e.id===id)?.name ?? id);
-  $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
+  const failed=Object.entries(meta.runtime.agents).filter(([,status])=>status.state==='error').map(([id,status])=>`${shown?.entities.find(entity=>entity.id===id)?.name??id}: ${status.message??'invalid decision loop'}`);
+  $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'error' ? `Turn ${meta.runtime.turn} · ${failed.join(' · ')}` : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
   $('record-status').textContent = isLive ? '1 turn = 1 world second' : playing && cursor >= latest ? 'Waiting for the next recorded turn' : 'World time · inference waits omitted';
   const marks = $('event-marks'); marks.replaceChildren();
   for (const event of liveEvents.filter(e => ['discovery','lost','memory','encounter','agent-error'].includes(e.type))) {
@@ -178,20 +179,20 @@ function renderInspector() {
   const list = $('entity-list');
   for (const e of shown.entities) {
     const enabled = e.enabled !== false;
-    const displayStatus = enabled ? isLive && meta.runtime.phase === 'thinking' ? meta.runtime.agents[e.id]?.state ?? 'held' : e.status : 'disabled';
+    const displayStatus = enabled ? isLive && (meta.runtime.phase === 'thinking' || meta.runtime.phase === 'error') ? meta.runtime.agents[e.id]?.state ?? 'held' : e.status : 'disabled';
     const existing = document.getElementById(`entity-${e.id}`);
     if (existing) {
       existing.classList.toggle('selected',e.id===selected); existing.classList.toggle('disabled',!enabled);
       const select = existing.querySelector('.inhabitant-select')!; select.setAttribute('aria-pressed',String(e.id===selected));
       const toggle = existing.querySelector<HTMLInputElement>('.entity-toggle')!; toggle.checked = enabled; toggle.disabled = !isLive;
-      const status = existing.querySelector('.entity-status')!; status.textContent=displayStatus; status.classList.toggle('thinking',displayStatus==='planning' || displayStatus==='thinking' || displayStatus==='waiting'); continue;
+      const status = existing.querySelector('.entity-status')!; status.textContent=displayStatus; status.classList.toggle('thinking',displayStatus==='planning' || displayStatus==='thinking' || displayStatus==='waiting'); status.classList.toggle('error',displayStatus==='error'); continue;
     }
     const row = document.createElement('div'); row.className = `inhabitant ${e.id === selected ? 'selected' : ''} ${enabled ? '' : 'disabled'}`; row.id = `entity-${e.id}`;
     const button = document.createElement('button'); button.className = 'inhabitant-select'; button.setAttribute('aria-pressed',String(e.id === selected));
     const avatar = document.createElement('span'); avatar.className = `avatar ${e.kind}`; avatar.style.setProperty('--entity-color',e.color); avatar.innerHTML = '<i></i>';
     const text = document.createElement('span'); text.className = 'inhabitant-text'; const name = document.createElement('strong'); name.textContent = e.name;
     const kind = document.createElement('small'); kind.textContent = e.kind === 'troglodyte' ? 'Troglodyte' : 'Duck · NPC'; text.append(name,kind);
-    const status = document.createElement('span'); status.className = `entity-status ${displayStatus === 'planning' || displayStatus === 'thinking' || displayStatus === 'waiting' ? 'thinking' : ''}`; status.textContent = displayStatus;
+    const status = document.createElement('span'); status.className = `entity-status ${displayStatus === 'planning' || displayStatus === 'thinking' || displayStatus === 'waiting' ? 'thinking' : ''} ${displayStatus === 'error'?'error':''}`; status.textContent = displayStatus;
     const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.className = 'entity-toggle'; toggle.checked = enabled; toggle.disabled = !isLive;
     toggle.title = `Enable ${e.name}`; toggle.setAttribute('aria-label',`Enable ${e.name}`); toggle.onchange = () => void setEntityEnabled(e.id,toggle.checked,toggle);
     button.append(avatar,text,status); button.onclick = () => selectEntity(e.id); button.ondblclick = () => view.focus(e.id); row.append(button,toggle); list.append(row);

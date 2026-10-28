@@ -5,7 +5,7 @@ import { validateJsonSchemaValue } from '../../vendor/deepseek-harness/json-sche
 import { PLAN_REMINDER_INTERVAL, PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import type { Store } from '../store';
-import { ProviderChain, type ProviderConfig, type ToolCall } from './providers';
+import { InvalidCompletionError, ProviderChain, type ProviderConfig, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
 import { compactResult, compactView, goalAffordances, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded } from './context';
 import { compactJournal } from './journal-compaction';
@@ -46,6 +46,11 @@ export interface PreparedMovementPrompt {
   content:string|null; latencyMs:number; attempts:number; provider:string; model:string; usage?:unknown;
 }
 type Report = (id: string, status: DecisionStatus) => void;
+const MAX_SUPPORTING_CALLS = 4;
+const MAX_CORRECTION_ROUNDS = 4;
+export class DecisionLoopError extends Error {
+  constructor(readonly actor:string,readonly attempts:number,readonly reason:string){super(`${actor} could not produce one valid physical action after ${attempts} model responses. ${reason}`);}
+}
 
 export class AgentRuntime {
   readonly mode: 'llm' | 'demo';
@@ -188,13 +193,9 @@ export class AgentRuntime {
     const started = Date.now();
     const planEvents=await this.preparePlan(id,mind,observation,signal,report);
     const actions=recentActions(this.store.actionEventsAt(observation.tick,id,PLAN_REVIEW_INTERVAL*2),PLAN_REVIEW_INTERVAL*2);
-    const completedGoal=[...planEvents].reverse().find(plan=>plan.status==='completed');
-    if(completedGoal)mind.journalOffer=goalLearningOffer(completedGoal);
+    delete mind.journalOffer;
     const journalCompactions:NonNullable<PreparedDecision['journalCompactions']>=[];
     const journalEntries:string[]=[];
-    let journalHint=following?undefined:mind.journalOffer;
-    if(journalHint)delete mind.journalOffer;
-    let journalOfferUsed=journalHint;
     const journalOptions={
       compactJournal:async(notes:readonly string[],incoming:string)=>{
         const after=await compactJournal({name:observation.self.name,notes,incoming,signal,retryDelayMs:this.config.retryDelayMs,
@@ -202,7 +203,7 @@ export class AgentRuntime {
           waiting:message=>report(id,{state:'waiting',message})});
         journalCompactions.push({before:[...notes],after,incoming});return after;
       },
-      onJournalEntry:(note:string)=>{journalEntries.push(note);journalHint=undefined;},
+      onJournalEntry:(note:string)=>{journalEntries.push(note);},
       onFinishGoal:(outcome:'completed'|'abandoned',reason:string)=>{
         const staged=this.store.loadPending<{modelCalls:number;acknowledged?:boolean}>(observation.tick,`plan:${id}`,this.inference.cacheKey);
         if(staged?.acknowledged)return {ok:false,message:'You already changed goals in this decision. Choose one physical action before changing again.'};
@@ -214,18 +215,23 @@ export class AgentRuntime {
         return {ok:true,message:'Goal closed. Choose a new milestone before your next physical action.',planningCalls:staged?.modelCalls??0};
       },
     };
-    let tools = worldTools(this.engine, id, mind,{following,speechMenu,...journalOptions});
+    const currentCriterion=()=>mind.plan?.steps.find(step=>step.status==='pending')?.criterion;
+    const makeTools=()=>{
+      const staged=this.store.loadPending<{acknowledged?:boolean}>(observation.tick,`plan:${id}`,this.inference.cacheKey);
+      return worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,goalCriterion:currentCriterion(),...journalOptions,...(staged?.acknowledged?{onFinishGoal:undefined}:{})});
+    };
+    let tools = makeTools();
     const system = ()=>[
       `CURRENT GOAL: ${mind.plan!.goal}\nREQUIRED RESULT: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??'Close or replace the finished goal.'}\n${milestoneEvidence(mind.plan!,actions).length?'STATUS: Achieved. Call finish_goal with completed now.':'STATUS: Not yet achieved. Choose the next action to achieve this result.'} Available tools and incidental objects are capabilities, not competing tasks.`,
       this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),
       'End this decision with exactly one physical action. You may use supporting tools first; call finish_goal alone to close a goal before acting. Prefer choose_action with a current choices ID. Facts and current results override your intentions. If blocked, use the navigation summary before repeating a move.',
-      !following&&mind.notes.length?'Notes are past records, oldest first; your current plan takes priority. Use journal with replace for outdated notes. Old locations and directions may no longer apply.':undefined,journalHint,
+      !following&&mind.notes.length?'Notes are past records, oldest first; your current plan takes priority. Use journal with replace for outdated notes. Old locations and directions may no longer apply.':undefined,
     ].filter(Boolean).join('\n');
     const notes=()=>mind.notes.length?{notes:mind.notes}:{};
     const recent=historicalActions(actions),learned=relevantKnowledge(this.engine,observation);
     const lastResult=(observation.self.lastAction??mind.lastResult) as ActionResult|undefined;
     const heard=observation.heard.length?{heard:observation.heard.map(({tick,direction,distance,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND,directionWhenHeard:direction,distanceWhenHeard:distance}))}:{};
-    const {attention,...view}=compactView(observation);
+    const {attention,...view}=compactView(observation,currentCriterion());
     const planContext=()=>{
       const plan=mind.plan!,elapsed=mind.turns-plan.reviewedTurn,reached=milestoneEvidence(plan,actions);
       const step=plan.steps.find(step=>step.status==='pending');
@@ -236,16 +242,29 @@ export class AgentRuntime {
       };
     };
     const terrainChanges=observation.terrainChanges.length?{terrainChanges:observation.terrainChanges.map(notice=>notice.message)}:{};
-    const normalContext=()=>rounded({plan:planContext(),...(attention?{attention}:{}),...(lastResult?{lastResult:compactResult(lastResult)}:{}),...(viewAngle?compactView(this.engine.observeAt(id,viewAngle)):view),progress:progressContext(recent),...notes(),body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...terrainChanges,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...(learned.length?{learned}:{}),...(recent.length?{recent:recent.slice(-4)}:{}),actionRequest:milestoneEvidence(mind.plan!,actions).length?'Call finish_goal with completed now.':`Choose one action toward this required result: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??'Close or replace the finished goal.'}`});
+    const normalContext=()=>rounded({plan:planContext(),...(attention?{attention}:{}),...(lastResult?{lastResult:compactResult(lastResult)}:{}),...(viewAngle?compactView(this.engine.observeAt(id,viewAngle),currentCriterion()):view),progress:progressContext(recent),...notes(),body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...terrainChanges,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...(learned.length?{learned}:{}),...(recent.length?{recent:recent.slice(-4)}:{}),actionRequest:milestoneEvidence(mind.plan!,actions).length?'Call finish_goal with completed now.':`Choose one action toward this required result: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??'Close or replace the finished goal.'}`});
     const initial=following?{plan:planContext(),following:observation.following,...heard,...terrainChanges}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
-    let attempts=0,supporting=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
+    let attempts=0,supportingCalls=0,lookCalls=0,correctionRounds=0,invalidCompletions=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
+    const stopLoop=(reason:string):never=>{
+      const error=new DecisionLoopError(id,attempts,`${reason} Pause and resume the world, or toggle this agent, to retry the frozen turn.`);
+      report(id,{state:'error',attempts,message:error.message});throw error;
+    };
     const complete=async()=>{
       while(true){
         signal.throwIfAborted();attempts++;
         report(id,{state:attempts===1?'thinking':'waiting',attempts,message:'Waiting for an inference provider; world time is held.'});
         try{return await this.inference.complete({messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'minimum'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
-        catch(error){signal.throwIfAborted();report(id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});}
+        catch(error){
+          signal.throwIfAborted();
+          if(error instanceof InvalidCompletionError){
+            invalidCompletions++;
+            if(invalidCompletions>=MAX_CORRECTION_ROUNDS)stopLoop(`The model returned ${invalidCompletions} invalid completions. Last error: ${error.message}`);
+            report(id,{state:'waiting',attempts,message:`Invalid model response ${invalidCompletions}/${MAX_CORRECTION_ROUNDS}; requesting a corrected action.`});
+            continue;
+          }
+          report(id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});
+        }
       }
     };
     while(true){
@@ -253,6 +272,7 @@ export class AgentRuntime {
       cycle.push({role:'assistant',content:answer.content,...(answer.calls.length?{tool_calls:answer.calls}:{})});
       const physical:ToolCall[]=[];
       let invalidPhysical=false;
+      let rejectedCall='';
       const wasFollowing=following;
       for(const call of answer.calls){
         const tool=tools.find(candidate=>candidate.name===call.function.name);let result:unknown;
@@ -270,44 +290,49 @@ export class AgentRuntime {
           invalidPhysical=true;
           result={ok:false,message:errors.join('; ')};
         }
-        else if(tool.name==='look'&&supporting++>=2)result={ok:false,message:'Use at most two look calls before acting. Journal remains freely available.'};
-        else if(tool.name==='finish_goal'&&answer.calls.length!==1)result={ok:false,message:'Call finish_goal alone before choosing your next physical action.'};
-        else{try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{signal.throwIfAborted();result={ok:false,message:'Invalid tool arguments.'};}}
+        else{
+          supportingCalls++;
+          if(supportingCalls>MAX_SUPPORTING_CALLS)stopLoop(`The model exceeded the limit of ${MAX_SUPPORTING_CALLS} supporting tool calls without choosing a physical action.`);
+          if(tool.name==='look'&&lookCalls++>=2)result={ok:false,message:'Use at most two look calls before acting.'};
+          else if(tool.name==='finish_goal'&&answer.calls.length!==1)result={ok:false,message:'Call finish_goal alone before choosing your next physical action.'};
+          else{try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{signal.throwIfAborted();result={ok:false,message:'Invalid tool arguments.'};}}
+        }
+        if((result as {ok?:boolean})?.ok===false)rejectedCall=(result as {message?:string}).message??`${call.function.name} was rejected.`;
         if(call.function.name==='look'&&typeof (result as {viewAngle?:number})?.viewAngle==='number'){
           viewAngle=(result as {viewAngle:number}).viewAngle;
           result={plan:planContext(),...(result as object)};
         }
         cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
         if(call.function.name==='finish_goal'&&(result as {ok?:boolean})?.ok){
-          const finished=mind.plan!;
           planEvents.splice(0,planEvents.length,...await this.preparePlan(id,mind,observation,signal,report,(result as {planningCalls:number}).planningCalls));
-          if(finished.status==='completed'){journalHint=goalLearningOffer(finished);journalOfferUsed=journalHint;}
-          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
+          tools=makeTools();
           cycle.splice(0,cycle.length,{role:'user',content:JSON.stringify(normalContext())});
         }
         if(call.function.name==='journal'&&(result as {ok?:boolean})?.ok){
-          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
+          tools=makeTools();
         }
         if(call.function.name==='look'&&typeof (result as {viewAngle?:number})?.viewAngle==='number'){
           viewAngle=(result as {viewAngle:number}).viewAngle;
-          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
+          tools=makeTools();
         }
         if(call.function.name==='say'&&!tool?.physical&&(result as {ok?:boolean})?.ok){
           speechMenu=true;
-          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
+          tools=makeTools();
         }
         if(call.function.name==='do_not_reply'&&(result as {ok?:boolean})?.ok){
           speechMenu=false;
-          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
+          tools=makeTools();
         }
         if(call.function.name==='stop_follow'&&(result as {ok?:boolean})?.ok){
-          following=false;stopFollowing=true;journalHint=mind.journalOffer;delete mind.journalOffer;journalOfferUsed??=journalHint;
-          tools=worldTools(this.engine,id,mind,{following:false,viewAngle,speechMenu,...journalOptions});
+          following=false;stopFollowing=true;delete mind.journalOffer;
+          tools=makeTools();
         }
       }
       if(invalidPhysical){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'This response contains an invalid physical action. Choose exactly one valid physical action.'})});}
-      else if(physical.length===1)return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(journalOfferUsed?{journalOffer:journalOfferUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
+      else if(physical.length===1)return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
       else if(physical.length>1)for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action per response.'})});
+      const correction=invalidPhysical?'The model chose an invalid physical action.':physical.length>1?'The model chose more than one physical action.':rejectedCall||(!answer.calls.length?'The model returned no tool call.':'');
+      if(correction&&++correctionRounds>=MAX_CORRECTION_ROUNDS)stopLoop(`${correction} The correction limit of ${MAX_CORRECTION_ROUNDS} was reached.`);
       if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(normalContext())});
       else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose exactly one: follow or stop_follow.':'Choose exactly one available physical action.'});
     }
@@ -373,10 +398,6 @@ export class AgentRuntime {
     }
     this.engine.wakeMovingListenersFromSpeech();
   }
-}
-
-function goalLearningOffer(plan:AgentPlan) {
-  return `You completed the goal "${plan.goal}". What memorable fact did you learn about the world? If you discovered a durable rule, useful method, important location, or surprising property, use journal now to preserve that lesson. Record the learned fact, not a recap of actions or merely that the goal is complete. Skip journal if nothing memorable was learned.`;
 }
 
 function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind,capabilities:string[],actions:ReturnType<typeof recentActions>) {

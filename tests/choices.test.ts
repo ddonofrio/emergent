@@ -5,6 +5,7 @@ import {island} from '../src/modules/island';
 import type {Block,Entity} from '../src/core/types';
 import {compactView,goalAffordances,progressContext,recentActions} from '../server/agents/context';
 import {worldTools} from '../server/agents/tools';
+import {actionChoices} from '../server/agents/choices';
 
 function fixture(extra:Block[]=[]) {
   const blocks:Block[]=[];
@@ -25,7 +26,10 @@ test('goal affordances distinguish the required material and never expose an occ
     const action=choices.find(choice=>choice.id===id)!.action;
     assert.equal(action.action,'hit');assert.ok('target' in action&&action.target&&engine.voxels.get(action.target)==='sand');
   }
-  assert.deepEqual(goalAffordances(view,{kind:'locate',subject:'sand'}).matchingReachableChoices,[]);
+  const scan=goalAffordances(view,{kind:'locate',subject:'sand'});
+  assert.deepEqual(scan.matchingReachableChoices,['scan_for_sand']);
+  assert.match(scan.interactionStatus!,/360-degree material scan/);
+  assert.deepEqual(actionChoices(view,{kind:'locate',subject:'sand'})[0],{id:'scan_for_sand',label:'Scan 360 degrees to locate sand.',action:{action:'find_material'}});
 });
 
 test('a cramped local view makes a checked escape prominent and its choice lands safely',()=>{

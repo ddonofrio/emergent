@@ -1,6 +1,6 @@
 import type { Engine } from '../src/core/engine';
 import { FRAME_TICKS, STEP_MS, TURN_TICKS, type DecisionStatus, type TurnStatus } from '../src/core/time';
-import type { AgentRuntime, PreparedTurn } from './agents/runtime';
+import { DecisionLoopError, type AgentRuntime, type PreparedTurn } from './agents/runtime';
 
 /** One barrier, one commit, twenty physics steps. Wall time only paces presentation. */
 export class TurnClock {
@@ -35,7 +35,7 @@ export class TurnClock {
     this.hooks.status();
   }
   entityChanged() {
-    if (this.phase === 'thinking') {
+    if (this.phase === 'thinking' || this.phase === 'error') {
       this.pending?.abort(); this.pending = undefined; this.prepared = undefined; this.decisions = {};
       this.phase = this.enabled ? this.engine.tick < this.endTick ? 'advancing' : 'idle' : 'paused';
     }
@@ -43,6 +43,7 @@ export class TurnClock {
   }
   pump() {
     if (this.closed) return;
+    if(this.phase==='error')return;
     if (this.enabled && !this.pending && this.engine.movementPrompts().length) { this.beginMovementPrompts(); return; }
     if (this.phase === 'advancing') {
       const now = this.now();
@@ -69,7 +70,13 @@ export class TurnClock {
       this.pending = undefined; this.prepared = prepared; this.endTick = prepared.tick + TURN_TICKS;
       this.previous = this.now(); this.phase = 'advancing'; this.hooks.status();
     }).catch(error => {
-      if (!controller.signal.aborted && !this.closed) this.hooks.fatal(error);
+      if (controller.signal.aborted || this.closed) return;
+      if(error instanceof DecisionLoopError){
+        this.pending=undefined;this.prepared=undefined;this.phase='error';
+        this.decisions[error.actor]={state:'error',attempts:error.attempts,message:error.message};
+        this.hooks.status();return;
+      }
+      this.hooks.fatal(error);
     });
   }
   private beginMovementPrompts() {

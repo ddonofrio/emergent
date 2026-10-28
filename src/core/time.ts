@@ -25,12 +25,12 @@ export function formatWorldDuration(tick: number, tenths = false) {
 }
 
 export interface DecisionStatus {
-  state: 'planning' | 'thinking' | 'waiting' | 'ready' | 'moving' | 'disabled' | 'turn limit';
+  state: 'planning' | 'thinking' | 'waiting' | 'ready' | 'moving' | 'disabled' | 'turn limit' | 'error';
   attempts?: number;
   message?: string;
 }
 export interface TurnStatus {
-  phase: 'idle' | 'thinking' | 'advancing' | 'paused';
+  phase: 'idle' | 'thinking' | 'advancing' | 'paused' | 'error';
   enabled: boolean;
   turn: number;
   tick: number;

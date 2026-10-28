@@ -123,7 +123,7 @@ test('planning holds time, reminds every five decisions and reviews after thirty
     assert.equal(engine.tick,600,'Closing and replacing a plan must not consume world time.');
     respondTool(replacement,'set_plan',{goal:'Investigate wood.',milestone:'collect_wood',explanation:'I now want to investigate wood.'});
     const action=await nextRequest();assert.equal(JSON.parse(action.body.messages.at(-1).content).plan.goal,'Investigate wood.');
-    assert.match(action.body.messages[0].content,/What memorable fact did you learn about the world/);
+    assert.doesNotMatch(action.body.messages[0].content,/What memorable fact did you learn about the world/);
     respond(action,{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     const historical=store.stateAt(600).entities.find(entity=>entity.id==='t1')!.plan!;
     const current=store.stateAt(620).entities.find(entity=>entity.id==='t1')!.plan!;
@@ -154,9 +154,8 @@ test('early goal acknowledgment requires evidence, survives restart and resets t
     resumed=run(restored,store,p.url,null);resumed.clock.pump();
     const afterRestart=await next();assert.equal(p.planningRequests.length,2,'The staged replacement must be reused.');
     assert.equal(JSON.parse(afterRestart.body.messages.at(-1).content).plan.reviewInDecisions,30);
-    respondTool(afterRestart,'finish_goal',{outcome:'abandoned',reason:'Try changing again.'});
-    const limited=await next();assert.match(limited.body.messages.at(-1).content,/already changed goals/);
-    respond(limited,{action:'wait'});await until(()=>resumed!.clock.status().phase==='advancing');resumed.advance(1000);
+    assert.equal(afterRestart.body.tools.some((tool:any)=>tool.function.name==='finish_goal'),false,'A second goal change is not offered in the same decision.');
+    respond(afterRestart,{action:'wait'});await until(()=>resumed!.clock.status().phase==='advancing');resumed.advance(1000);
     assert.equal(restored.entity('t1').plan!.reviewedTurn,2);
     assert.deepEqual(store.eventsAt(40,'t1').filter(event=>event.type==='plan').map(event=>(event.data as any).plan.status),['active','completed','active']);
     for(let turn=3;turn<=31;turn++){
@@ -324,7 +323,7 @@ test('following asks every world second; stopping stages a free normal action th
   }finally{r.clock.close();resumed?.clock.close();store.close();p.close();}
 });
 
-test('a pending goal-learning journal offer waits until following stops',async()=>{
+test('a legacy goal-learning journal offer cannot interrupt execution after following stops',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);const duck=engine.entity('duck');delete duck.motion;duck.position=[-.5,1,5.5];
@@ -334,7 +333,7 @@ test('a pending goal-learning journal offer waits until following stops',async()
     assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow']);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/memorable fact/);
     respondTool(p.requests[0],'stop_follow',{});await until(()=>p.requests.length===2);
-    assert.match(p.requests[1].body.messages[0].content,/memorable fact/);
+    assert.doesNotMatch(p.requests[1].body.messages[0].content,/memorable fact/);
     assert.ok(p.requests[1].body.tools.some((tool:any)=>tool.function.name==='walk'));
     assert.equal(p.requests[1].body.tools.some((tool:any)=>tool.function.name==='reflect'),false);
     assert.equal(engine.tick,0);respond(p.requests[1],{action:'turn',angle:90});
@@ -581,6 +580,43 @@ test('an out-of-range jump is corrected during inference without consuming a wor
   }finally{r.clock.close();store.close();p.close();}
 });
 
+test('repeated supporting tools stop in a visible recoverable error without advancing time',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
+    for(let index=0;index<4;index++){
+      respondTool(p.requests[index],'journal',{note:`Temporary observation ${index}.`});
+      await until(()=>p.requests.length===index+2);
+    }
+    respondTool(p.requests[4],'journal',{note:'One supporting call too many.'});
+    await until(()=>r.clock.status().phase==='error');
+    const status=r.clock.status();
+    assert.equal(engine.tick,0);assert.equal(status.agents.t1.state,'error');
+    assert.match(status.agents.t1.message!,/limit of 4 supporting tool calls/);
+    assert.deepEqual(r.runtime.minds.get('t1')!.notes,[],'Uncommitted supporting calls are discarded.');
+    assert.deepEqual(r.failures,[],'A decision loop is not a fatal server error.');
+    r.clock.setEnabled(false);assert.equal(r.clock.status().phase,'paused');
+    r.clock.setEnabled(true);r.clock.pump();await until(()=>p.requests.length===6);
+    respond(p.requests[5],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.tick,20);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
+test('repeated invalid physical choices stop after four correction rounds',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
+    for(let index=0;index<4;index++){
+      respondTool(p.requests[index],'choose_action',{option:'not_a_current_choice'});
+      if(index<3)await until(()=>p.requests.length===index+2);
+    }
+    await until(()=>r.clock.status().phase==='error');
+    assert.equal(engine.tick,0);assert.equal(p.requests.length,4);
+    assert.match(r.clock.status().agents.t1.message!,/correction limit of 4/);
+    assert.deepEqual(r.failures,[]);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
 test('goal leads crack attention and the last result, and attention disappears after the block breaks',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
@@ -657,6 +693,10 @@ test('journal favors durable world knowledge and persists notes for future promp
     assert.match(p.requests[0].body.messages[0].content,/milestoneReached confirms success, use finish_goal/);
     assert.match(p.requests[0].body.messages[0].content,/Prefer a labeled choice for reachable interactions or checked movement/);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/journal/);
+    const firstContext=JSON.parse(p.requests[0].body.messages.at(-1).content);
+    assert.deepEqual(firstContext.plan.matchingReachableChoices,['scan_surroundings']);
+    assert.equal(firstContext.choices[0].id,'scan_surroundings');
+    assert.ok(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='choose_action').function.parameters.properties.option.enum.includes('scan_surroundings'));
     for(let index=0;index<3;index++){
       respondTool(p.requests[index],'journal',{note:`I want to explore area ${index}.`});await until(()=>p.requests.length===index+2);
       assert.equal(engine.tick,0);
@@ -724,12 +764,10 @@ test('disabled occupied-hand actions and a missing shaping orientation are repai
     assert.match(JSON.parse(p.requests[1].body.messages.at(-1).content).message,/Run is unavailable/);assert.equal(engine.tick,0);
     respondTool(p.requests[1],'hit',{target:[0,1,1]});await until(()=>p.requests.length===3);
     assert.match(JSON.parse(p.requests[2].body.messages.at(-1).content).message,/Hit is unavailable while you hold wood/);assert.equal(engine.tick,0);
-    respondTool(p.requests[2],'pickup',{itemId:'anything'});await until(()=>p.requests.length===4);
-    assert.match(JSON.parse(p.requests[3].body.messages.at(-1).content).message,/Pickup is unavailable while you hold wood/);assert.equal(engine.tick,0);
-    respondTool(p.requests[3],'strike_held',{point:'front_edge'});await until(()=>p.requests.length===5);
-    assert.match(JSON.parse(p.requests[4].body.messages.at(-1).content).message,/orientation up or down/);
+    respondTool(p.requests[2],'strike_held',{point:'front_edge'});await until(()=>p.requests.length===4);
+    assert.match(JSON.parse(p.requests[3].body.messages.at(-1).content).message,/orientation up or down/);
     assert.equal(engine.tick,0);assert.equal(engine.held(engine.entity('t1'))?.kind,'wood');
-    respondTool(p.requests[4],'strike_held',{point:'front_edge',orientation:'up'});await until(()=>r.clock.status().phase==='advancing');
+    respondTool(p.requests[3],'strike_held',{point:'front_edge',orientation:'up'});await until(()=>r.clock.status().phase==='advancing');
     r.advance(1000);assert.equal(engine.held(engine.entity('t1'))?.kind,'door_half_up');
     assert.equal(store.actionEventsAt(engine.tick,'t1').length,1);
   }finally{r.clock.close();store.close();p.close();}

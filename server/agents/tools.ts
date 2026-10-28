@@ -1,6 +1,6 @@
 import { assertSupportedJsonSchema, validateJsonSchemaValue, type JsonSchemaNode } from '../../vendor/deepseek-harness/json-schema';
 import type { Engine } from '../../src/core/engine';
-import type { Action } from '../../src/core/types';
+import type { Action, MilestoneCriterion } from '../../src/core/types';
 import { knowledgeDescription } from '../../src/core/knowledge';
 import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { compactView } from './context';
@@ -19,7 +19,7 @@ export interface WorldTool {
   execute(args: unknown, exec?: { signal?: AbortSignal }): Promise<unknown>;
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
 }
-export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;speechMenu?:boolean;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned',reason:string)=>unknown} = {}): WorldTool[] {
+export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;speechMenu?:boolean;goalCriterion?:MilestoneCriterion;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned',reason:string)=>unknown} = {}): WorldTool[] {
   const tool = (name: string, description: string, parameters: JsonSchemaNode, physical: boolean, run: (args: any) => unknown): WorldTool => {
     assertSupportedJsonSchema(parameters);
     return { name, description, parameters, physical, output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
@@ -73,14 +73,14 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   ];
   const movement=(maximum:number)=>object({distance:{type:'number',description:`Metres: greater than 0, at most ${maximum}.`},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right.'}},['distance']);
   const tools:WorldTool[]=[
-    tool('look','Look without turning your body or spending time.',object({angle:{type:'number',description:'Body-relative viewing angle (-180..180 degrees).'}}),false,({angle=0}:{angle?:number})=>compactView(engine.observeAt(id,Math.max(-180,Math.min(180,angle))))),
+    tool('look','Look without turning your body or spending time.',object({angle:{type:'number',description:'Body-relative viewing angle (-180..180 degrees).'}}),false,({angle=0}:{angle?:number})=>compactView(engine.observeAt(id,Math.max(-180,Math.min(180,angle))),options.goalCriterion)),
     action('find_material','Scan 360 degrees for visible materials. Returns the nearest block target, distance to its centre and body-relative angle per material; one world second.',noArgs,'find_material'),
     action('find_entity','Scan 360 degrees for visible living beings within 18 metres. Returns each ID, name, kind, distance and body-relative angle; one world second.',noArgs,'find_entity'),
     action('walk','Walk; stop before obstacles or unsafe terrain.',movement(32),'walk'),
     action('turn','Turn your body and forward view.',object({angle:{type:'number',description:'Degrees (-360..360); negative left, positive right.'}},['angle']),'turn'),
   ];
   if(view){
-    const choices=actionChoices(view);
+    const choices=actionChoices(view,options.goalCriterion);
     const resolveAction=(args:unknown)=>{
       const choice=choices.find(choice=>choice.id===(args as {option:string}).option);
       if(!choice)throw new Error('Choose an option from the current observation.');

@@ -1,4 +1,4 @@
-import type { Action, Block, Entity, Observation, Vec3 } from '../../src/core/types';
+import type { Action, Block, Entity, MilestoneCriterion, Observation, Vec3 } from '../../src/core/types';
 
 export type LocalView = Pick<Observation, 'description' | 'navigation' | 'interactions'> & {
   self?: Entity; blocks?: Block[]; viewAngle?: number; bodyYaw?: number;
@@ -15,10 +15,12 @@ function relativePosition(self: Entity, target: Vec3) {
 }
 
 // Choices are observation-local references. Resolve them before persisting a decision.
-export function actionChoices(view: LocalView): ActionChoice[] {
+export function actionChoices(view: LocalView, criterion?:MilestoneCriterion): ActionChoice[] {
   if(!view.self)return [];
   const self=view.self,inventory=self.inventory,held=inventory?.selected==null?undefined:inventory.stacks[inventory.selected];
   const choices:ActionChoice[]=[];
+  if(criterion?.kind==='locate')choices.push({id:`scan_for_${criterion.subject}`,label:`Scan 360 degrees to locate ${criterion.subject}.`,action:{action:'find_material'}});
+  else if(criterion?.kind==='scan')choices.push({id:'scan_surroundings',label:'Scan the surroundings for visible materials.',action:{action:'find_material'}});
   for(const path of view.navigation.paths){
     const direction=directionLabel(path.turn),suffix=String(path.turn).replace('-', 'left_');
     if(path.jump)choices.push({id:`jump_${suffix}`,label:`Jump ${direction}, ${path.jump.distance} m to a checked landing.`,action:{action:'jump',...path.jump}});
