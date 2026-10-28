@@ -30,6 +30,13 @@ export interface CompletionResult {
 }
 export class InvalidCompletionError extends Error {}
 
+function validateToolCalls(provider:ProviderConfig,calls:unknown):asserts calls is ToolCall[] {
+  if(!Array.isArray(calls)||calls.length>16||calls.some(call=>!call||typeof call.id!=='string'||!call.id||call.type!=='function'
+    ||typeof call.function?.name!=='string'||!/^[a-zA-Z0-9_-]+$/.test(call.function.name)||typeof call.function?.arguments!=='string')) {
+    throw new InvalidCompletionError(`${provider.name} returned invalid tool calls; tool names must contain only letters, numbers, underscores or hyphens.`);
+  }
+}
+
 const positive = (value: string | undefined, fallback: number) => {
   const parsed = Number(value ?? fallback);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -103,13 +110,15 @@ export class ProviderChain {
   async complete(request: CompletionRequest, signal: AbortSignal, onAttempt: (provider: ProviderConfig, index: number) => void): Promise<CompletionResult> {
     const failures: string[] = [];
     let invalid = 0;
-    for (const {index,provider} of this.providerOrder()) {
+    const order=this.providerOrder();
+    for (const {index,provider} of order) {
       signal.throwIfAborted();
       try {
         this.currentStatus=`${failures.length?`${failures.join(' ')} `:''}Connecting to ${provider.name}…`;
         if (provider.modelDiscovery === 'lm-studio') await this.discoverLmStudioModel(provider, signal);
         onAttempt(provider, index);
         const result=await this.request(provider, request, signal);
+        validateToolCalls(provider,result.calls);
         this.providerHealth.set(provider.id,{state:'ok',detail:'Last inference request succeeded.'});
         this.currentStatus=`${provider.name}: connected; last inference request succeeded.${failures.length?` Earlier provider failures: ${failures.join(' ')}`:''}`;
         if(this.strategy==='fallback')this.stickyIndex=index;
@@ -124,7 +133,7 @@ export class ProviderChain {
         failures.push(failure);
       }
     }
-    if(invalid===this.providers.length){this.currentStatus=`All inference providers returned invalid completions. ${failures.join(' ')}`;throw new InvalidCompletionError(this.currentStatus);}
+    if(order.length&&invalid===order.length){this.currentStatus=`All inference providers returned invalid completions. ${failures.join(' ')}`;throw new InvalidCompletionError(this.currentStatus);}
     this.currentStatus=`All inference providers are unavailable. ${failures.join(' ')}`;
     throw new Error(this.currentStatus);
   }
@@ -184,9 +193,6 @@ export class ProviderChain {
     const content = typeof answer.content === 'string' ? answer.content.slice(0, 5000) : null;
     if (content && detectTokenLoop(tokenizeLoopText(content))) throw new InvalidCompletionError(`${provider.name} returned repeating output.`);
     const calls = answer.tool_calls ?? [];
-    if (!Array.isArray(calls) || calls.length > 16 || calls.some(call => typeof call.id !== 'string' || call.type !== 'function' || typeof call.function?.name !== 'string' || typeof call.function?.arguments !== 'string')) {
-      throw new InvalidCompletionError(`${provider.name} returned invalid tool calls.`);
-    }
     return { provider: provider.id, providerName: provider.name, model: payload.model ?? provider.model, content, calls, ...(payload.usage === undefined ? {} : { usage: payload.usage }) };
   }
 
@@ -234,7 +240,6 @@ export class ProviderChain {
       return[{id:block.toolUse.toolUseId,type:'function' as const,function:{name:block.toolUse.name,arguments:JSON.stringify(block.toolUse.input??{})}}];
     });
     if(!content&&!calls.length)throw new InvalidCompletionError(`${provider.name} returned an incomplete response.`);
-    if(calls.length>16)throw new InvalidCompletionError(`${provider.name} returned too many tool calls.`);
     if(content&&detectTokenLoop(tokenizeLoopText(content)))throw new InvalidCompletionError(`${provider.name} returned repeating output.`);
     return{provider:provider.id,providerName:provider.name,model:provider.model,content,calls,...(response.usage?{usage:response.usage}:{})};
   }

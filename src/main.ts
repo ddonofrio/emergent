@@ -117,6 +117,10 @@ function renderModelRows(providers:LlmProvider[]){
   }
   updateStrategyControl();
 }
+const inhabitantPortraits:Record<string,string>={
+  Flint:new URL('./assets/flint.png',import.meta.url).href,
+  Moss:new URL('./assets/moss.png',import.meta.url).href,
+};
 function troglodytePortrait(id:string){
   const colors=id==='t2'?{fur:'#493326',trim:'#b8874d',hair:'#302c26',skin:'#cfae83',beard:'#40352b'}:{fur:'#b8874d',trim:'#493326',hair:'#514d3e',skin:'#d9b98d',beard:'#514638'};
   return `<svg class="troglodyte-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><path d="M5 52 7 39q1-6 9-9l5-2h7l5 2q8 3 9 9l2 13Z" fill="${colors.fur}"/><path d="m9 39 5 2 4-2 5 3 5-3 5 3 5-3 5 2-1 11H7Z" fill="${colors.trim}"/><path d="m16 30 8 6 8-6 3 3-8 9h-6l-8-9Z" fill="${colors.fur}"/><path d="M18 25h12v8q-6 5-12 0Z" fill="${colors.skin}"/><ellipse cx="14" cy="17" rx="3" ry="4" fill="${colors.skin}"/><ellipse cx="34" cy="17" rx="3" ry="4" fill="${colors.skin}"/><path d="M15 12q0-8 9-9 10 1 10 10v7q-2 7-10 9-8-2-9-9Z" fill="${colors.skin}"/><path d="M14 14Q13 4 24 3q11 1 11 11l-3-3-2-4q-5 4-14 3l-1 5Z" fill="${colors.hair}"/><path d="M16 18q2 1 4 0m8 0q2 1 4 0" fill="none" stroke="#382f25" stroke-width="1.5" stroke-linecap="round"/><path d="M24 18v4l-2 1" fill="none" stroke="#a67f60" stroke-width="1.2" stroke-linecap="round"/><path d="M17 21q2-2 5 0h4q3-2 5 0l-1 6-3 4-3 2-3-2-3-4Z" fill="${colors.beard}"/><path d="m18 22 4 1 2-1 2 1 4-1" fill="none" stroke="${colors.beard}" stroke-width="2" stroke-linecap="round"/><path d="m16 30 8 6 8-6 2 3-6 6h-8l-6-6Z" fill="${colors.trim}"/><path d="m21 37 3 3 3-3" fill="none" stroke="${colors.fur}" stroke-width="2" stroke-linecap="round"/></svg>`;
@@ -327,7 +331,11 @@ function renderInspector() {
     }
     const row=document.createElement('div');row.className=`inhabitant ${e.id===selected?'selected':''} ${enabled?'':'disabled'}`;row.id=`entity-${e.id}`;
     const button=document.createElement('button');button.className='inhabitant-select';button.setAttribute('aria-pressed',String(e.id===selected));
-    const avatar=document.createElement('span');avatar.className=`avatar ${e.kind}`;avatar.style.setProperty('--entity-color',e.color);avatar.innerHTML=e.kind==='troglodyte'?troglodytePortrait(e.id):'<i></i>';
+    const avatar=document.createElement('span');avatar.className=`avatar ${e.kind}`;avatar.style.setProperty('--entity-color',e.color);avatar.setAttribute('aria-hidden','true');
+    const portrait=e.kind==='troglodyte'?inhabitantPortraits[e.name]:undefined;
+    if(portrait){
+      const image=document.createElement('img');image.src=portrait;image.alt='';image.width=31;image.height=36;image.decoding='async';avatar.append(image);
+    }else avatar.innerHTML=e.kind==='troglodyte'?troglodytePortrait(e.id):'<i></i>';
     const text=document.createElement('span');text.className='inhabitant-text';const name=document.createElement('strong');name.textContent=e.name;
     const kind=document.createElement('small');kind.textContent=e.kind==='troglodyte'?'Troglodyte':'Duck · NPC';text.append(name,kind);
     const status=document.createElement('span');status.className=`entity-status ${['planning','thinking','waiting'].includes(displayStatus)?'thinking':''} ${displayStatus==='error'?'error':''}`;status.textContent=displayStatus;

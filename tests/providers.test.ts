@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bedrockInferenceModelId, bedrockThinkingConfig, ProviderChain, type CompletionRequest, type CompletionResult, type ProviderConfig } from '../server/agents/providers';
+import { bedrockInferenceModelId, bedrockThinkingConfig, InvalidCompletionError, ProviderChain, type CompletionRequest, type CompletionResult, type ProviderConfig } from '../server/agents/providers';
 
 const request:CompletionRequest={messages:[],tools:[],max_tokens:32};
 const provider=(id:string):ProviderConfig=>({id,name:id,apiKey:'test-key',baseUrl:'http://localhost/v1',model:`model-${id}`});
@@ -28,6 +28,23 @@ test('provider failure retains its exact health detail after fallback succeeds',
   assert.deepEqual(chain.healthFor('bedrock'),{state:'bad',detail:'Inference profile unavailable for test model.'});
   assert.deepEqual(chain.healthFor('local'),{state:'ok',detail:'Last inference request succeeded.'});
   assert.match(chain.currentStatus,/bedrock: Inference profile unavailable for test model/);
+});
+
+test('first-only rejects malformed model tool names before accepting a response, with configured backups inactive',async()=>{
+  const providers=[provider('primary'),provider('inactive')],chain=new ProviderChain(providers,'first-only');
+  const attempted:string[]=[];
+  let name='choices</arg_value>';
+  intercept(chain,async config=>{
+    attempted.push(config.id);
+    return {...result(config),calls:[{id:'call',type:'function',function:{name,arguments:'{}'}}]};
+  });
+  for(name of ['choices</arg_value>','halt</arg_value>','functions.wait','']){
+    await assert.rejects(chain.complete(request,AbortSignal.timeout(1000),()=>{}),error=>error instanceof InvalidCompletionError&&/invalid tool calls/.test(error.message));
+  }
+  name='wait';
+  assert.equal((await chain.complete(request,AbortSignal.timeout(1000),()=>{})).calls[0].function.name,'wait');
+  assert.deepEqual(attempted,Array(5).fill('primary'));
+  assert.equal(chain.healthFor('inactive').state,'unknown');
 });
 
 test('Bedrock uses the European inference profile for Claude Sonnet 4.6',()=>{

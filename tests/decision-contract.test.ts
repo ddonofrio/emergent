@@ -35,6 +35,30 @@ const commit=(engine:Engine,store:Store,runtime:AgentRuntime,turn:PreparedTurn)=
   store.record(engine.frame(),engine.state(),runtime.persistence());
 };
 
+test('malformed Bedrock tool names never poison correction history or advance world time',async()=>{
+  const {engine,store,runtime}=fixture();
+  try{
+    runtime.setInferenceConfig([{id:'bedrock',type:'amazon-bedrock',name:'Bedrock',apiKey:'test',baseUrl:'',model:'test'},
+      {id:'inactive',name:'Inactive',apiKey:'test',baseUrl:'http://unused.invalid',model:'test'}],'first-only');
+    let requests=0;
+    const clients=(runtime.inference as unknown as {bedrockClients:Map<string,unknown>}).bedrockClients;
+    clients.set('bedrock:',{async send(command:{input:{messages:{content:{toolUse?:{name:string}}[]}[]}}){
+      assert.equal(engine.tick,0);
+      for(const message of command.input.messages)for(const block of message.content){
+        if(block.toolUse)assert.match(block.toolUse.name,/^[a-zA-Z0-9_-]+$/);
+      }
+      return {output:{message:{role:'assistant',content:[{toolUse:{toolUseId:`call-${++requests}`,name:requests===1?'choices</arg_value>':requests===2?'halt</arg_value>':'wait',input:{}}}]}}};
+    }});
+    const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
+    assert.equal(requests,3);
+    assert.equal(engine.tick,0);
+    assert.deepEqual(turn.decisions[0].calls.map(call=>call.function.name),['wait']);
+    assert.deepEqual(store.db.prepare('SELECT status FROM inference_audit ORDER BY id').all().map(row=>row.status),['failed','failed','completed']);
+    commit(engine,store,runtime,turn);
+    assert.equal(engine.tick,20);
+  }finally{store.close();}
+});
+
 test('collection requires a new unit, not recycling an owned block; unknown transformations remain undisclosed',()=>{
   const {engine,store,plan}=fixture();
   try{
