@@ -23,7 +23,7 @@ app.innerHTML = `
         <div id="toast" role="status"></div>
       </div>
       <section class="timeline" aria-label="Recorded world timeline">
-        <div class="timeline-top"><div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span> Live</button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00:00.0</span><span id="time-to-live">LIVE</span></div><div class="timeline-right"><span id="record-status">Recording every 100 ms</span><select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div></div>
+        <div class="timeline-top"><div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span> Live</button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00:00.0</span><span id="time-to-live">LIVE</span></div><div class="timeline-right"><select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div></div>
         <div class="scrubber"><div id="event-marks"></div><input id="seek" type="range" min="0" max="1" value="0" step="2" aria-label="Seek world history"></div>
         <div class="timeline-labels"><span id="range-start">00:00:00</span><span id="range-end">00:00:00</span></div>
       </section>
@@ -311,7 +311,6 @@ function renderTimeline() {
     turnStatus.title=status?.message??'';
   }else if(meta.runtime.phase==='paused'){turnStatus.textContent='World paused';turnStatus.title='';}
   else{turnStatus.textContent=`Turn ${meta.runtime.turn} · One world second`;turnStatus.title='';}
-  $('record-status').textContent = isLive ? '1 turn = 1 world second' : playing && cursor >= latest ? 'Waiting for the next recorded turn' : 'World time · inference waits omitted';
   const marks = $('event-marks'); marks.replaceChildren();
   for (const event of liveEvents.filter(e => ['discovery','lost','memory','encounter','agent-error'].includes(e.type))) {
     const mark = document.createElement('i'); mark.style.left = `${event.tick/Math.max(1,latest)*100}%`; mark.className = event.type; mark.title = event.message; marks.append(mark);
