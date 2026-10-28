@@ -50,9 +50,7 @@ export interface PreparedMovementPrompt {
 type Report = (id: string, status: DecisionStatus) => void;
 const MAX_SUPPORTING_CALLS = 4;
 const MAX_CORRECTION_ROUNDS = 4;
-export class DecisionLoopError extends Error {
-  constructor(readonly actor:string,readonly attempts:number,readonly reason:string){super(`${actor} could not produce one valid physical action after ${attempts} model responses. ${reason}`);}
-}
+const REQUIRED_SUPPORT_TOOLS = new Set(['finish_goal','stop_follow','do_not_reply']);
 
 export class AgentRuntime {
   readonly mode: 'llm' | 'demo';
@@ -226,11 +224,12 @@ export class AgentRuntime {
       const staged=this.store.loadPending<{acknowledged?:boolean}>(observation.tick,`plan:${id}`,this.inference.cacheKey);
       return worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,concise:true,goalCriterion:currentCriterion(),...journalOptions,...(staged?.acknowledged?{onFinishGoal:undefined}:{})}).map(tool=>tool.physical?{...tool,parameters:{...tool.parameters,properties:{...tool.parameters.properties,intention:{type:'string' as const}}}}:tool);
     };
-    let tools = makeTools();
     const system = ()=>[
       `CURRENT GOAL: ${mind.plan!.goal}\n${milestoneEvidence(mind.plan!,actions,observation).length?`STATUS: Achieved. ${following?'Use stop_follow, then ':''}Call finish_goal with completed now.`:'STATUS: Not yet achieved.'}`,
       this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),
       'End this decision with exactly one physical action. You may use supporting tools first; call finish_goal alone before acting. Prefer choose_action for checked options; other physical tools allow custom actions. Optional intention: a next-step reminder of 1..200 characters, replaced each decision and never automatically executed. Current facts override reminders. Past speech is historical; its directions are not current bearings.',
+      lookCalls>=2?'The look limit is exhausted for this decision. Choose from the current observation and available tools.':undefined,
+      supportingCalls>=MAX_SUPPORTING_CALLS?'The supporting-tool limit is exhausted for this decision. Choose one available physical action.':undefined,
       !following&&mind.notes.length?'Notes are past records, oldest first; your current plan takes priority. Use journal with replace for outdated notes. Old locations and directions may no longer apply.':undefined,
     ].filter(Boolean).join('\n');
     const notes=()=>mind.notes.length?{notes:mind.notes}:{};
@@ -256,10 +255,17 @@ export class AgentRuntime {
     const initial=following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
     let attempts=0,supportingCalls=0,lookCalls=0,correctionRounds=0,invalidCompletions=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
-    const stopLoop=(reason:string):never=>{
-      const error=new DecisionLoopError(id,attempts,`${reason} Pause and resume the world, or toggle this agent, to retry the frozen turn.`);
-      report(id,{state:'error',attempts,message:error.message});throw error;
+    let tools=makeTools();
+    const refreshTools=()=>{
+      tools=makeTools().filter(tool=>(tool.name!=='look'||lookCalls<2)&&(tool.physical||supportingCalls<MAX_SUPPORTING_CALLS||REQUIRED_SUPPORT_TOOLS.has(tool.name)));
     };
+    const resetCorrectionContext=(reason:string)=>{
+      correctionRounds=0;
+      cycle.splice(0,cycle.length,{role:'user',content:JSON.stringify(following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges}:normalContext())});
+      refreshTools();
+      report(id,{state:'waiting',attempts,message:`${reason} Retrying with a fresh constrained prompt; world time is held.`});
+    };
+    refreshTools();
     const complete=async()=>{
       while(true){
         signal.throwIfAborted();attempts++;
@@ -270,8 +276,8 @@ export class AgentRuntime {
           if(error instanceof InferenceAuditError)throw error;
           if(error instanceof InvalidCompletionError){
             invalidCompletions++;
-            if(invalidCompletions>=MAX_CORRECTION_ROUNDS)stopLoop(`The model returned ${invalidCompletions} invalid completions. Last error: ${error.message}`);
-            report(id,{state:'waiting',attempts,message:`Invalid model response ${invalidCompletions}/${MAX_CORRECTION_ROUNDS}; requesting a corrected action.`});
+            if(invalidCompletions%MAX_CORRECTION_ROUNDS===0)resetCorrectionContext(`The model returned ${invalidCompletions} invalid completions. Last error: ${error.message}`);
+            else report(id,{state:'waiting',attempts,message:`Invalid model response ${invalidCompletions}; requesting a corrected action while world time is held.`});
             continue;
           }
           report(id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});
@@ -305,11 +311,15 @@ export class AgentRuntime {
           result={ok:false,message:errors.join('; ')};
         }
         else{
-          supportingCalls++;
-          if(supportingCalls>MAX_SUPPORTING_CALLS)stopLoop(`The model exceeded the limit of ${MAX_SUPPORTING_CALLS} supporting tool calls without choosing a physical action.`);
-          if(tool.name==='look'&&lookCalls++>=2)result={ok:false,message:'Use at most two look calls before acting.'};
+          const limited=!REQUIRED_SUPPORT_TOOLS.has(tool.name);
+          if(limited&&supportingCalls>=MAX_SUPPORTING_CALLS)result={ok:false,message:'The supporting-tool limit is exhausted. Choose one available physical action.'};
+          else if(tool.name==='look'&&lookCalls>=2)result={ok:false,message:'Use at most two look calls before acting.'};
           else if(tool.name==='finish_goal'&&answer.calls.length!==1)result={ok:false,message:'Call finish_goal alone before choosing your next physical action.'};
-          else{try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch(error){signal.throwIfAborted();if(error instanceof InferenceAuditError)throw error;result={ok:false,message:'Invalid tool arguments.'};}}
+          else{
+            if(limited)supportingCalls++;
+            if(tool.name==='look')lookCalls++;
+            try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch(error){signal.throwIfAborted();if(error instanceof InferenceAuditError)throw error;result={ok:false,message:'Invalid tool arguments.'};}
+          }
         }
         if((result as {ok?:boolean})?.ok===false)rejectedCall=(result as {message?:string}).message??`${call.function.name} was rejected.`;
         if(call.function.name==='look'&&typeof (result as {viewAngle?:number})?.viewAngle==='number'){
@@ -339,8 +349,9 @@ export class AgentRuntime {
         }
         if(call.function.name==='stop_follow'&&(result as {ok?:boolean})?.ok){
           following=false;stopFollowing=true;delete mind.journalOffer;
-          tools=makeTools();
+          refreshTools();
         }
+        else refreshTools();
       }
       if(invalidPhysical){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'This response contains an invalid physical action. Choose exactly one valid physical action.'})});}
       else if(physical.length===1){
@@ -350,7 +361,7 @@ export class AgentRuntime {
       }
       else if(physical.length>1)for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action per response.'})});
       const correction=invalidPhysical?'The model chose an invalid physical action.':physical.length>1?'The model chose more than one physical action.':rejectedCall||(!answer.calls.length?'The model returned no tool call.':'');
-      if(correction&&++correctionRounds>=MAX_CORRECTION_ROUNDS)stopLoop(`${correction} The correction limit of ${MAX_CORRECTION_ROUNDS} was reached.`);
+      if(correction&&++correctionRounds>=MAX_CORRECTION_ROUNDS){resetCorrectionContext(`${correction} The correction cycle reached ${MAX_CORRECTION_ROUNDS} responses.`);continue;}
       if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(normalContext())});
       else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose exactly one: follow or stop_follow.':'Choose exactly one available physical action.'});
     }

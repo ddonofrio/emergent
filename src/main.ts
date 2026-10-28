@@ -154,7 +154,7 @@ requestAnimationFrame(playback);
 
 function renderTimeline() {
   if (!meta) return;
-  $('view-mode').textContent = isLive ? meta.runtime.phase === 'thinking' ? 'LIVE · WAITING FOR MODELS' : meta.runtime.phase === 'error' ? 'LIVE · DECISION ERROR' : meta.runtime.phase === 'paused' ? 'LIVE · WORLD PAUSED' : 'LIVE OBSERVATION' : scrubTarget !== null ? 'FAST SCRUB PLAYBACK' : playing ? 'RECORDED PLAYBACK' : 'PAUSED OBSERVATION';
+  $('view-mode').textContent = isLive ? meta.runtime.phase === 'thinking' ? 'LIVE · WAITING FOR MODELS' : meta.runtime.phase === 'paused' ? 'LIVE · WORLD PAUSED' : 'LIVE OBSERVATION' : scrubTarget !== null ? 'FAST SCRUB PLAYBACK' : playing ? 'RECORDED PLAYBACK' : 'PAUSED OBSERVATION';
   $('view-mode').classList.toggle('past',!isLive); $('world-clock').textContent = `DAY ${String(dayOf(cursor)).padStart(3,'0')} · ${clock(cursor)}`;
   $('live').classList.toggle('active',isLive); $('play').textContent = isLive || playing ? 'Ⅱ' : '▶'; $('play').setAttribute('aria-label',isLive || playing ? 'Pause observation' : 'Play recording');
   $('playback-time').textContent = formatWorldDuration(cursor,true);
@@ -165,8 +165,7 @@ function renderTimeline() {
   if (count !== dayCount) { const day = $<HTMLSelectElement>('day'); day.replaceChildren(); for (let i = 1;i<=count;i++) { const option = new Option(`Day ${String(i).padStart(3,'0')}`,String(i)); day.add(option); } dayCount = count; }
   $<HTMLSelectElement>('day').value = String(dayOf(cursor));
   const waiting = Object.entries(meta.runtime.agents).filter(([,s]) => s.state === 'planning' || s.state === 'thinking' || s.state === 'waiting').map(([id]) => shown?.entities.find(e=>e.id===id)?.name ?? id);
-  const failed=Object.entries(meta.runtime.agents).filter(([,status])=>status.state==='error').map(([id,status])=>`${shown?.entities.find(entity=>entity.id===id)?.name??id}: ${status.message??'invalid decision loop'}`);
-  $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'error' ? `Turn ${meta.runtime.turn} · ${failed.join(' · ')}` : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
+  $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
   $('record-status').textContent = isLive ? '1 turn = 1 world second' : playing && cursor >= latest ? 'Waiting for the next recorded turn' : 'World time · inference waits omitted';
   const marks = $('event-marks'); marks.replaceChildren();
   for (const event of liveEvents.filter(e => ['discovery','lost','memory','encounter','agent-error'].includes(e.type))) {
@@ -179,7 +178,7 @@ function renderInspector() {
   const list = $('entity-list');
   for (const e of shown.entities) {
     const enabled = e.enabled !== false;
-    const displayStatus = enabled ? isLive && (meta.runtime.phase === 'thinking' || meta.runtime.phase === 'error') ? meta.runtime.agents[e.id]?.state ?? 'held' : e.status : 'disabled';
+    const displayStatus = enabled ? isLive && meta.runtime.phase === 'thinking' ? meta.runtime.agents[e.id]?.state ?? 'held' : e.status : 'disabled';
     const existing = document.getElementById(`entity-${e.id}`);
     if (existing) {
       existing.classList.toggle('selected',e.id===selected); existing.classList.toggle('disabled',!enabled);

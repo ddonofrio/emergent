@@ -573,6 +573,23 @@ test('look returns perception inside the same frozen decision before a physical 
   }finally{r.clock.close();store.close();p.close();}
 });
 
+test('a ready agent is retained while another exhausts look and corrects a removed call',async()=>{
+  const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
+  try{
+    r.runtime.setParallelRequests(false);r.clock.pump();await until(()=>p.requests.length===1);assert.equal(p.requests[0].id,'t1');
+    respond(p.requests[0],{action:'wait'});await until(()=>p.requests.length===2);assert.equal(p.requests[1].id,'t2');
+    respondTool(p.requests[1],'look',{angle:0});await until(()=>p.requests.length===3);
+    respondTool(p.requests[2],'look',{angle:-90});await until(()=>p.requests.length===4);
+    assert.equal(p.requests[3].body.tools.some((tool:any)=>tool.function.name==='look'),false);
+    respondTool(p.requests[3],'look',{angle:180});await until(()=>p.requests.length===5);
+    assert.equal(engine.tick,0);assert.equal(r.clock.status().phase,'thinking');
+    assert.ok(store.loadPending(0,'t1',r.runtime.inference.cacheKey),'The first ready decision must survive correction retries.');
+    assert.deepEqual(r.failures,[]);
+    respond(p.requests[4],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.tick,20);
+  }finally{r.clock.close();store.close();p.close();}
+});
+
 test('an out-of-range jump is corrected during inference without consuming a world turn',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
@@ -586,7 +603,7 @@ test('an out-of-range jump is corrected during inference without consuming a wor
   }finally{r.clock.close();store.close();p.close();}
 });
 
-test('repeated supporting tools stop in a visible recoverable error without advancing time',async()=>{
+test('exhausted supporting tools are removed while the frozen decision keeps retrying',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
@@ -594,32 +611,31 @@ test('repeated supporting tools stop in a visible recoverable error without adva
       respondTool(p.requests[index],'journal',{note:`Temporary observation ${index}.`});
       await until(()=>p.requests.length===index+2);
     }
-    respondTool(p.requests[4],'journal',{note:'One supporting call too many.'});
-    await until(()=>r.clock.status().phase==='error');
-    const status=r.clock.status();
-    assert.equal(engine.tick,0);assert.equal(status.agents.t1.state,'error');
-    assert.match(status.agents.t1.message!,/limit of 4 supporting tool calls/);
+    assert.equal(p.requests[4].body.tools.some((tool:any)=>tool.function.name==='journal'),false);
+    assert.equal(p.requests[4].body.tools.some((tool:any)=>tool.function.name==='look'),false);
+    respondTool(p.requests[4],'journal',{note:'A removed tool must be rejected.'});
+    await until(()=>p.requests.length===6);
+    assert.equal(r.clock.status().phase,'thinking');assert.equal(engine.tick,0);
     assert.deepEqual(r.runtime.minds.get('t1')!.notes,[],'Uncommitted supporting calls are discarded.');
-    assert.deepEqual(r.failures,[],'A decision loop is not a fatal server error.');
-    r.clock.setEnabled(false);assert.equal(r.clock.status().phase,'paused');
-    r.clock.setEnabled(true);r.clock.pump();await until(()=>p.requests.length===6);
+    assert.deepEqual(r.failures,[],'A model correction is not a fatal server error.');
     respond(p.requests[5],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
-    assert.equal(engine.tick,20);
+    assert.equal(engine.tick,20);assert.equal(r.runtime.minds.get('t1')!.notes.length,4);
   }finally{r.clock.close();store.close();p.close();}
 });
 
-test('repeated invalid physical choices stop after four correction rounds',async()=>{
+test('repeated invalid physical choices restart a fresh prompt without an error phase',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
     for(let index=0;index<4;index++){
       respondTool(p.requests[index],'choose_action',{option:'not_a_current_choice'});
-      if(index<3)await until(()=>p.requests.length===index+2);
+      await until(()=>p.requests.length===index+2);
     }
-    await until(()=>r.clock.status().phase==='error');
-    assert.equal(engine.tick,0);assert.equal(p.requests.length,4);
-    assert.match(r.clock.status().agents.t1.message!,/correction limit of 4/);
+    assert.equal(engine.tick,0);assert.equal(p.requests.length,5);assert.equal(r.clock.status().phase,'thinking');
+    assert.deepEqual(p.requests[4].body.messages.map((message:any)=>message.role),['system','user'],'The correction transcript is discarded before retrying.');
     assert.deepEqual(r.failures,[]);
+    respond(p.requests[4],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    assert.equal(engine.tick,20);
   }finally{r.clock.close();store.close();p.close();}
 });
 

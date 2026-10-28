@@ -18,4 +18,3 @@
 .experiment-content{margin-top:14px}
 .experiment-heading:hover .experiment-collapse-mark{color:var(--lime)}
 .experiment-heading:focus-visible{outline:2px solid var(--lime);outline-offset:4px}
-.entity-status.error{color:#e08f80}
