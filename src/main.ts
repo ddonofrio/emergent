@@ -1,23 +1,21 @@
 import './style.css';
 import { WorldView } from './view/world-view';
 import { advancePlayback, fastScrubSpeed } from './view/playback-clock';
-import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, type TurnStatus } from './core/time';
+import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, TURN_TICKS, type TurnStatus } from './core/time';
 import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from './core/types';
 import { knowledgeDescription } from './core/knowledge';
 import { PLAN_REVIEW_INTERVAL } from './core/memory';
 
-interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
+interface ProviderHealth {state:'unknown'|'ok'|'bad';detail:string;}
+interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; providerStrategy:string; llmConfig?:LlmConfig; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
+interface LlmProvider {id:string;type:string;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKey?:string;health?:ProviderHealth;}
+interface LlmConfig {strategy:string;currentStatus?:string;providers:LlmProvider[];}
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
-  <header class="app-header">
-    <a class="brand" href="/" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent<span class="version">LAB / 001</span></a>
-    <div class="header-middle"><span class="status-dot" id="connection-dot"></span><span id="connection">Connecting</span><span class="divider">/</span><span>World observatory</span></div>
-    <div class="header-actions"><button id="help-button" class="quiet">Field guide</button><a href="/api/export" class="quiet export">Export record <span>↗</span></a></div>
-  </header>
-  <main>
+  <main id="main">
     <section class="observation-area" aria-label="World observation">
-      <div class="world-toolbar"><div><span class="eyebrow">ACTIVE MODULE</span><h1 id="module-name">First Shore <span>01</span></h1></div><div class="world-stats"><span><i class="tiny-square"></i> 1 m voxels</span><span id="world-size">100 m island</span><span id="population">3 inhabitants</span></div></div>
+      <div class="world-toolbar"><div class="world-brand"><a class="brand" href="/" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent</a><span class="world-brand-divider" aria-hidden="true">|</span><h1 id="module-name">First Shore</h1></div><button id="settings-open" class="settings-open" title="Settings" aria-label="Open settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.25a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z"/><path d="m19.4 13.5 1.1.85-1.1 1.9-1.35-.45a7.8 7.8 0 0 1-1.55.9l-.25 1.4h-2.2l-.25-1.4a7.8 7.8 0 0 1-1.55-.9l-1.35.45-1.1-1.9 1.1-.85a7 7 0 0 1 0-1.8l-1.1-.85 1.1-1.9 1.35.45a7.8 7.8 0 0 1 1.55-.9l.25-1.4h2.2l.25 1.4a7.8 7.8 0 0 1 1.55.9l1.35-.45 1.1 1.9-1.1.85a7 7 0 0 1 0 1.8Z" transform="translate(-1.4 -1.5)"/></svg></button></div>
       <div id="world" class="world"><div class="loading" id="loading"><span class="loader"></span>Opening the observatory…</div>
         <div class="world-top"><span class="glass-tag" id="view-mode">LIVE OBSERVATION</span><span class="glass-tag world-clock" id="world-clock">DAY 001 · 00:00</span></div>
         <div class="camera-tools"><button id="overview" title="Overview" aria-label="Overview">◈</button><button id="top-down" title="Top view" aria-label="Top view">⊞</button><button id="follow" title="Follow selected inhabitant" aria-label="Follow selected inhabitant">◎</button></div>
@@ -27,19 +25,34 @@ app.innerHTML = `
       <section class="timeline" aria-label="Recorded world timeline">
         <div class="timeline-top"><div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span> Live</button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00:00.0</span><span id="time-to-live">LIVE</span></div><div class="timeline-right"><span id="record-status">Recording every 100 ms</span><select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div></div>
         <div class="scrubber"><div id="event-marks"></div><input id="seek" type="range" min="0" max="1" value="0" step="2" aria-label="Seek world history"></div>
-        <div class="timeline-labels"><span id="range-start">00:00:00</span><span>PAST <span class="timeline-line">─────────────────</span> NET WORLD TIME <span class="timeline-line">─────────────────</span> PRESENT</span><span id="range-end">00:00:00</span></div>
+        <div class="timeline-labels"><span id="range-start">00:00:00</span><span id="range-end">00:00:00</span></div>
       </section>
     </section>
-    <aside class="inspector" aria-label="World inspector">
-      <details id="experiment-panel" class="experiment"><summary class="experiment-heading"><span class="experiment-heading-text"><span class="eyebrow">EXPERIMENT 001</span><span class="seed">SEED 731</span></span><span class="experiment-collapse-mark" aria-hidden="true">+</span></summary><div class="experiment-content"><div id="runtime-mode" class="runtime-mode">Connecting to runtime</div><label class="request-setting" title="Changes apply from the next turn."><input id="parallel-requests" type="checkbox" checked disabled>Parallel requests</label><p id="turn-status" role="status">One turn = one world second</p></div></details>
-      <div class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">03</span></div><div id="entity-list"></div></div>
-      <div class="inspector-tabs" role="tablist"><button id="journal-tab" role="tab" aria-selected="true" class="active">Journal</button><button id="details-tab" role="tab" aria-selected="false">In focus</button><span id="event-count">0</span></div>
-      <div id="journal" class="journal" role="tabpanel"><p class="empty">Waiting for the first trace.</p></div>
-      <div id="details" class="details hidden" role="tabpanel"></div>
-      <div class="inspector-footer"><span class="status-dot"></span><span id="persistence">Local persistent recording</span><span id="lost">0 lost</span></div>
+    <aside id="debug-panel" class="debug-panel collapsed" aria-label="Debug and journal">
+      <header class="panel-heading"><button id="debug-toggle" class="panel-toggle" type="button" aria-expanded="false" aria-label="Expand debug panel" title="Expand debug panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg><span>Debug</span></button></header>
+      <div class="debug-content">
+        <section class="turn-status-section"><h2>Turn status</h2><ul id="provider-status-list" class="provider-status-list" aria-label="Configured models"></ul><p id="provider-algorithm" class="provider-algorithm"></p><p id="provider-current-status" class="provider-current-status hidden" role="status"></p><p id="turn-status" role="status">One turn = one world second</p></section>
+        <section class="journal-section"><header class="journal-heading"><h2>Journal</h2><span id="event-count">0</span></header><div id="journal" class="journal"><p class="empty">Waiting for the first trace.</p></div></section>
+      </div>
+    </aside>
+    <aside id="inspector" class="inspector" aria-label="Inhabitants and in focus">
+      <header class="panel-heading"><h2>Inhabitants <span id="entity-count">03</span></h2><button id="focus-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-label="Collapse right panel" title="Collapse right panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span>Inhabitants</span></button></header>
+      <section class="inhabitants"><div id="entity-list"></div></section>
+      <section class="focus-section"><h2>In focus</h2><div id="details" class="details"></div></section>
     </aside>
   </main>
-  <dialog id="guide"><button id="close-guide" class="dialog-close" aria-label="Close field guide">×</button><span class="eyebrow">EMERGENT / FIELD GUIDE</span><h2>Observe. Rewind. Discover.</h2><p>Two Troglodytes share a finite island with a wandering duck. There is no assigned objective. Each shared turn advances one world second after all model decisions arrive. The world waits for unavailable models; your camera and recorded history remain usable.</p><dl><dt>Move the camera</dt><dd>Drag to orbit, right-drag to pan, scroll to zoom. Focus the world and use WASD + Q/E to fly. Shift moves faster. Select a name, then use Follow.</dd><dt>Read the past</dt><dd>Drag the timeline to any recorded moment, choose a day, or pause and play at up to 8×. Live returns to the present. Observer playback never rewinds the actual experiment.</dd><dt>Run a model</dt><dd>Copy <code>.env.example</code> to <code>.env</code>, then configure OpenRouter and/or a local OpenAI-compatible provider. Without either provider, the clearly labelled scripted demo exercises the same actions. Agent decisions are unlimited unless an explicit optional cap is configured.</dd><dt>Keep an experiment</dt><dd>The server records physics at 10 Hz, events and private notes in SQLite, with checkpoints every 30 seconds. Reopening resumes the world. Export downloads the complete history.</dd><dt>Physical limits</dt><dd>Ten different item stacks, up to 64 identical items each. Buckets stack by contents. Three-metre reach. Speech offers twenty ideas after opening the communication menu, travels at most 10 metres and cannot pass through solid blocks. Water deeper than half a Troglodyte is refused. Sinking items beyond the lower boundary are permanently lost.</dd></dl><p class="guide-note">MVP: voxel terrain stays fixed until edited; thrown items use gravity, collisions and buoyancy. Poured water disperses. Inference waiting has no duration in world history. At 1×, one recorded turn takes one real second. Long actions continue across turns at their normal speed.</p></dialog>`;
+  <section id="llm-settings" class="settings-screen hidden" aria-labelledby="settings-title" aria-hidden="true">
+    <header class="settings-header"><button id="settings-back" class="settings-back">Back</button><div><span class="eyebrow">EMERGENT / SETTINGS</span><h1 id="settings-title">Settings</h1></div></header>
+    <div class="settings-content">
+      <section class="settings-section"><h2>Request settings</h2><label class="request-setting" title="Changes apply from the next turn."><input id="parallel-requests" type="checkbox" checked disabled>Parallel requests</label></section>
+      <form id="llm-settings-form">
+        <section class="settings-section"><div class="settings-section-heading"><div><h2>LLM configuration</h2><p>Choose one or more providers and models for agent requests.</p></div><button id="add-model" class="secondary-button" type="button">Add model</button></div><div id="model-list" class="model-list"></div><p class="settings-note">Amazon Bedrock uses an API key and AWS region. Anthropic's native adapter is not connected yet.</p></section>
+        <section class="settings-section algorithm-section"><label for="settings-strategy"><h2>Selection algorithm</h2></label><select id="settings-strategy"><option value="first-only">First model only</option><option value="round-robin">Round robin</option><option value="fallback">Fallback</option><option value="master-slaves">Master / slaves</option></select><p id="strategy-description" class="settings-note">Use only the first model in the list.</p></section>
+        <div class="settings-actions"><span id="settings-status" role="status"></span><button class="save-button" type="submit">Save configuration</button></div>
+      </form>
+    </div>
+  </section>
+`;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 let view: WorldView;
@@ -51,14 +64,125 @@ let liveDynamic: Omit<WorldState,'blocks'>;
 const liveCells = new Map<string,string>();
 let latest = 0, selected = 't1', isLive = true, playing = false, cursor = 0, scrubTarget: number | null = null, events: WorldEvent[] = [], liveEvents: WorldEvent[] = [];
 let epoch = 0, seekTimer: ReturnType<typeof setTimeout>, replayFrames: Frame[] = [], fetching = false, replayClock = 0, replayRequest = 0, lastPlayback = performance.now(), lastUi = 0, nextReplayFetch = 0, seeking = false;
-let activeTab = 'journal', dayCount = 0;
+let dayCount = 0,detailsSignature='';
 let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[]}|undefined;
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
+let llmConfig:LlmConfig={strategy:'first-only',providers:[]};
+function settingField(parent:HTMLElement,title:string,field:string,value:string,type='text',placeholder=''){
+  const label=document.createElement('label');label.className='model-field';label.textContent=title;
+  const input=document.createElement('input');input.type=type;input.dataset.field=field;input.value=value;input.placeholder=placeholder;input.autocomplete=type==='password'?'new-password':'off';label.append(input);parent.append(label);return input;
+}
+function readModelRows():LlmProvider[]{
+  return Array.from($('model-list').children).map(card=>{
+    const field=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement|HTMLSelectElement).value;
+    const apiKey=card.querySelector('[data-field="apiKey"]') as HTMLInputElement;
+    return{id:(card as HTMLElement).dataset.id!,type:field('type'),name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),apiKey:apiKey.value,apiKeyConfigured:apiKey.placeholder.startsWith('Saved on server')};
+  });
+}
+function renderModelRows(providers:LlmProvider[]){
+  const list=$('model-list');list.replaceChildren();
+  for(const provider of providers){
+    const card=document.createElement('fieldset');card.className='model-card';card.dataset.id=provider.id;
+    const heading=document.createElement('div');heading.className='model-card-heading';
+    const title=document.createElement('strong');title.textContent=provider.name||'Model';heading.append(title);
+    const order=document.createElement('div');order.className='model-order-controls';
+    const move=(delta:number)=>{const rows=readModelRows(),from=rows.findIndex(row=>row.id===provider.id),to=from+delta;if(to<0||to>=rows.length)return;[rows[from],rows[to]]=[rows[to],rows[from]];renderModelRows(rows);};
+    const up=document.createElement('button');up.type='button';up.className='model-order-button';up.textContent='↑';up.title='Move model up';up.setAttribute('aria-label',`Move ${provider.name} up`);up.disabled=providers.indexOf(provider)===0;up.onclick=()=>move(-1);
+    const down=document.createElement('button');down.type='button';down.className='model-order-button';down.textContent='↓';down.title='Move model down';down.setAttribute('aria-label',`Move ${provider.name} down`);down.disabled=providers.indexOf(provider)===providers.length-1;down.onclick=()=>move(1);
+    order.append(up,down);heading.append(order);
+    const remove=document.createElement('button');remove.type='button';remove.className='remove-model';remove.textContent='Remove';remove.onclick=()=>{card.remove();updateStrategyControl();};heading.append(remove);card.append(heading);
+    const grid=document.createElement('div');grid.className='model-fields';
+    const typeLabel=document.createElement('label');typeLabel.className='model-field';typeLabel.textContent='Provider';
+    const type=document.createElement('select');type.dataset.field='type';
+    for(const [value,labelText,disabled] of [['openai-compatible','OpenAI Compatible',false],['openai','OpenAI',false],['openrouter','OpenRouter',false],['amazon-bedrock','Amazon Bedrock',false],['anthropic','Anthropic (adapter pending)',true]] as [string,string,boolean][]){const option=new Option(labelText,value);option.disabled=disabled;type.add(option);}
+    type.value=provider.type;typeLabel.append(type);grid.append(typeLabel);
+    const nameInput=settingField(grid,'Name','name',provider.name);
+    const endpoint=settingField(grid,'Base URL','baseUrl',provider.baseUrl,'url','https://...');
+    settingField(grid,'Model identifier','model',provider.model,'text','e.g. gpt-4o-mini');
+    const apiKey=settingField(grid,'API key','apiKey',provider.apiKey??'', 'password',provider.apiKeyConfigured?'Saved on server; blank keeps it':provider.type==='openai-compatible'?'Enter API key (optional for local models)':'Enter API key');
+    const region=settingField(grid,'AWS region','region',provider.region??'','text','e.g. eu-west-1');
+    const endpointField=endpoint.closest('.model-field')!,apiKeyField=apiKey.closest('.model-field')!,regionField=region.closest('.model-field')!;
+    const updateProviderFields=()=>{
+      const bedrock=type.value==='amazon-bedrock';endpointField.classList.toggle('hidden',bedrock);apiKeyField.classList.toggle('hidden',false);regionField.classList.toggle('hidden',!bedrock);
+    };
+    type.onchange=()=>{
+      if(type.value==='openai')endpoint.value='https://api.openai.com/v1';else if(type.value==='openrouter')endpoint.value='https://openrouter.ai/api/v1';else if(!endpoint.value||endpoint.value.includes('api.openai.com')||endpoint.value.includes('openrouter.ai'))endpoint.value='';
+      apiKey.placeholder=type.value===provider.type&&provider.apiKeyConfigured?'Saved on server; blank keeps it':type.value==='openai-compatible'?'Enter API key (optional for local models)':'Enter API key';
+      updateProviderFields();
+    };
+    updateProviderFields();
+    nameInput.oninput=()=>{title.textContent=nameInput.value||'Model';};
+    card.append(grid);list.append(card);
+  }
+  updateStrategyControl();
+}
+function troglodytePortrait(id:string){
+  const colors=id==='t2'?{fur:'#493326',trim:'#b8874d',hair:'#302c26',skin:'#cfae83',beard:'#40352b'}:{fur:'#b8874d',trim:'#493326',hair:'#514d3e',skin:'#d9b98d',beard:'#514638'};
+  return `<svg class="troglodyte-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><path d="M5 52 7 39q1-6 9-9l5-2h7l5 2q8 3 9 9l2 13Z" fill="${colors.fur}"/><path d="m9 39 5 2 4-2 5 3 5-3 5 3 5-3 5 2-1 11H7Z" fill="${colors.trim}"/><path d="m16 30 8 6 8-6 3 3-8 9h-6l-8-9Z" fill="${colors.fur}"/><path d="M18 25h12v8q-6 5-12 0Z" fill="${colors.skin}"/><ellipse cx="14" cy="17" rx="3" ry="4" fill="${colors.skin}"/><ellipse cx="34" cy="17" rx="3" ry="4" fill="${colors.skin}"/><path d="M15 12q0-8 9-9 10 1 10 10v7q-2 7-10 9-8-2-9-9Z" fill="${colors.skin}"/><path d="M14 14Q13 4 24 3q11 1 11 11l-3-3-2-4q-5 4-14 3l-1 5Z" fill="${colors.hair}"/><path d="M16 18q2 1 4 0m8 0q2 1 4 0" fill="none" stroke="#382f25" stroke-width="1.5" stroke-linecap="round"/><path d="M24 18v4l-2 1" fill="none" stroke="#a67f60" stroke-width="1.2" stroke-linecap="round"/><path d="M17 21q2-2 5 0h4q3-2 5 0l-1 6-3 4-3 2-3-2-3-4Z" fill="${colors.beard}"/><path d="m18 22 4 1 2-1 2 1 4-1" fill="none" stroke="${colors.beard}" stroke-width="2" stroke-linecap="round"/><path d="m16 30 8 6 8-6 2 3-6 6h-8l-6-6Z" fill="${colors.trim}"/><path d="m21 37 3 3 3-3" fill="none" stroke="${colors.fur}" stroke-width="2" stroke-linecap="round"/></svg>`;
+}
+function updateStrategyControl(){
+  const control=$<HTMLSelectElement>('settings-strategy'),count=$('model-list').children.length,description=$('strategy-description');
+  control.disabled=count===0;
+  if(count===0){control.value='first-only';description.textContent='No models are configured yet.';return;}
+  const messages:Record<string,string>={'first-only':'Use only the first model in the list; keep the remaining models configured but inactive.','round-robin':'Rotate to the next model for each request; try others if one fails.','fallback':'Keep using the last successful model; move to the next when it fails.','master-slaves':'Contact the primary model every time; try the remaining models only if it fails.'};
+  description.textContent=messages[control.value]??messages.fallback;
+}
+async function loadProviderStatus(){
+  try{
+    const response=await fetch('/api/llm-config');if(!response.ok)return;llmConfig=await response.json() as LlmConfig;
+    if(llmConfig.providers.some(provider=>!provider.health||provider.health.state==='unknown')){
+      const eventResponse=await fetch(`/api/events?tick=${meta?.latestTick??latest}`);
+      if(eventResponse.ok){
+        const events=await eventResponse.json() as WorldEvent[];let mostRecent:{provider:string;turn:number}|undefined;
+        for(const event of events){
+          if(event.type!=='decision'&&event.type!=='movement-decision')continue;
+          const providerId=(event.data as {provider?:unknown}|undefined)?.provider;if(typeof providerId!=='string')continue;
+          const provider=llmConfig.providers.find(candidate=>candidate.id===providerId);if(!provider)continue;
+          const turn=Math.floor(event.tick/TURN_TICKS)+1;
+          if(!provider.health||provider.health.state==='unknown')provider.health={state:'ok',detail:`Successful inference in turn ${turn}.`};
+          mostRecent={provider:provider.name,turn};
+        }
+        if(!llmConfig.currentStatus&&mostRecent)llmConfig.currentStatus=`${mostRecent.provider}: last successful inference in turn ${mostRecent.turn}.`;
+      }
+    }
+    if(meta){meta.llmConfig=llmConfig;renderProviderStatus();}
+  }catch{/* The turn status remains available if provider details cannot be loaded. */}
+}
+async function loadLlmSettings(){
+  $('settings-status').textContent='Loading current configuration…';
+  try{
+    const response=await fetch('/api/llm-config');if(!response.ok)throw new Error();
+    llmConfig=await response.json() as LlmConfig;$<HTMLSelectElement>('settings-strategy').value=llmConfig.strategy;renderProviderStatus(llmConfig);
+    renderModelRows(llmConfig.providers);if(meta)$<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
+    $('settings-status').textContent='';
+  }catch{$('settings-status').textContent='Could not load LLM configuration.';}
+}
+function showSettings(open:boolean){
+  $('main').classList.toggle('hidden',open);$('llm-settings').classList.toggle('hidden',!open);$('llm-settings').setAttribute('aria-hidden',String(!open));
+  if(open)void loadLlmSettings();
+}
 function dayOf(tick: number) { return worldTime(tick).day; }
 function clock(tick: number) { const value=worldTime(tick);return `${String(value.hour).padStart(2,'0')}:${String(value.minute).padStart(2,'0')}:${String(value.second).padStart(2,'0')}`; }
-function setConnection(connected: boolean) { $('connection').textContent = connected ? 'Connected' : 'Reconnecting'; $('connection-dot').classList.toggle('offline',!connected); }
-function selectEntity(id: string) { selected = id; view.select(id); renderInspector(); if(activeTab==='details')void loadMemory(); }
+function renderProviderStatus(config:LlmConfig|undefined=meta?.llmConfig??llmConfig){
+  const providers=config?.providers??[],list=$('provider-status-list');list.replaceChildren();
+  for(const provider of providers){
+    const row=document.createElement('li');row.className='provider-status-row';
+    const state=provider.health?.state??'unknown',detail=provider.health?.detail??'No inference result recorded yet.',tooltip=`${state.toUpperCase()}: ${detail}`,dot=document.createElement('span');dot.className=`provider-status-dot ${state}`;dot.setAttribute('aria-label',`${state}: ${detail}`);dot.title=tooltip;
+    const name=document.createElement('span');name.className='provider-status-name';name.textContent=provider.name;
+    row.title=tooltip;name.title=tooltip;row.append(dot,name);list.append(row);
+  }
+  const names:Record<string,string>={'first-only':'First model only','round-robin':'Round robin','fallback':'Fallback','master-slaves':'Master / slaves'};
+  $('provider-algorithm').textContent=providers.length?(names[config?.strategy??'']??config?.strategy??''):'';
+  const current=$('provider-current-status');
+  const waiting=Object.entries(meta?.runtime.agents??{}).find(([,status])=>status.state==='waiting'&&status.message);
+  const waitingName=waiting?shown?.entities.find(entity=>entity.id===waiting[0])?.name??waiting[0]:'';
+  const providerError=config?.currentStatus&&/error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}|earlier provider failures|unsupported|access denied/i.test(config.currentStatus);
+  current.textContent=providerError?config!.currentStatus!:waiting?`${waitingName}: ${waiting[1].message}`:config?.currentStatus||'';
+  current.classList.toggle('hidden',!current.textContent);
+  current.classList.toggle('error',/error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}/i.test(current.textContent));
+}
+function selectEntity(id: string) { selected = id; detailsSignature='';view.select(id);renderInspector();void loadMemory(); }
 async function loadMemory(){
   const request=++memoryRequest,actor=selected,tick=cursor;memoryView=undefined;renderDetails();
   try{const response=await fetch(`/api/memory?tick=${tick}&actor=${encodeURIComponent(actor)}`);if(!response.ok)throw new Error();const notes=await response.json() as string[];if(request===memoryRequest){memoryView={actor,tick,notes};renderDetails();}}
@@ -68,23 +192,28 @@ function setBoot(boot: Boot) {
   meta = boot; latest = boot.latestTick; liveDynamic = boot.state; liveCells.clear();
   for (const [x,y,z,kind] of boot.state.blocks) liveCells.set(key([x,y,z]),kind);
   liveEvents = boot.events; $('loading').classList.add('hidden');
-  $('runtime-mode').textContent = meta.mode === 'demo' ? 'SCRIPTED DEMO · No LLM connected' : `LLM CONNECTED · ${meta.model}`;
-  $('runtime-mode').classList.toggle('model',meta.mode === 'llm');
+  renderProviderStatus(meta.llmConfig);
+  if(!meta.llmConfig||meta.llmConfig.providers.some(provider=>!provider.health||provider.health.state==='unknown'))void loadProviderStatus();
   $<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
   $<HTMLInputElement>('parallel-requests').disabled=false;
-  $('module-name').textContent = meta.module.name; $('population').textContent = `${boot.state.entities.length} inhabitants`;
+  $('module-name').textContent = meta.module.name;
   if (isLive) goLive(); else renderTimeline();
 }
 const stream = new EventSource('/api/stream');
-stream.addEventListener('boot', event => { setConnection(true); setBoot(JSON.parse((event as MessageEvent).data)); });
+stream.addEventListener('boot', event => { setBoot(JSON.parse((event as MessageEvent).data)); });
 stream.addEventListener('settings',event=>{
   if(!meta)return;
   meta.parallelRequests=JSON.parse((event as MessageEvent).data).parallelRequests;
   $<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
 });
+stream.addEventListener('llm-config',event=>{
+  if(!meta)return;
+  meta.llmConfig=JSON.parse((event as MessageEvent).data) as LlmConfig;meta.providerStrategy=meta.llmConfig.strategy;renderProviderStatus();
+});
 stream.addEventListener('status', event => {
   if (!meta) return;
-  meta.runtime = JSON.parse((event as MessageEvent).data).runtime;
+  const packet=JSON.parse((event as MessageEvent).data) as {runtime:TurnStatus;llmConfig?:LlmConfig};
+  meta.runtime=packet.runtime;if(packet.llmConfig)meta.llmConfig=packet.llmConfig;renderProviderStatus();
   renderTimeline(); renderInspector();
 });
 stream.addEventListener('frame', event => {
@@ -97,16 +226,15 @@ stream.addEventListener('frame', event => {
     shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);
     if (frame.events.length) renderJournal();
   }
-  if(activeTab==='details'&&frame.events.some(event=>event.type==='memory'&&event.actor===selected))void loadMemory();
+  if(frame.events.some(event=>event.type==='memory'&&event.actor===selected))void loadMemory();
   if (performance.now()-lastUi > 200) { renderTimeline(); renderInspector(); lastUi = performance.now(); }
 });
-stream.onerror = () => setConnection(false);
 
 function goLive() {
   if (!meta || !liveDynamic) return;
   epoch++; replayRequest++; fetching = false; seeking = false; clearTimeout(seekTimer); isLive = true; playing = false; scrubTarget = null; replayFrames = [];
   shown = { ...liveDynamic, blocks: [...liveCells].map(([k,kind]) => [...unkey(k),kind]) };
-  cursor = latest; events = liveEvents; view.load(shown,meta.module); renderTimeline(); renderInspector(); renderJournal();if(activeTab==='details')void loadMemory();
+  cursor = latest; events = liveEvents; view.load(shown,meta.module); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
 }
 async function seek(tick: number) {
   const request = ++epoch; replayRequest++; fetching = false; seeking = true; isLive = false; playing = false; scrubTarget = null; replayFrames = []; view.hold();
@@ -114,7 +242,7 @@ async function seek(tick: number) {
   try {
     const response = await fetch(`/api/state?tick=${cursor}`); if (!response.ok) throw new Error('Could not load recorded history.');
     const data = await response.json() as Boot; if (request !== epoch) return;
-    shown = data.state; cursor = shown.tick; replayClock = cursor; seeking = false; events = data.events; view.load(shown,meta.module); renderTimeline(); renderInspector(); renderJournal();if(activeTab==='details')void loadMemory();
+    shown = data.state; cursor = shown.tick; replayClock = cursor; seeking = false; events = data.events; view.load(shown,meta.module); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
   } catch (error) { if (request === epoch) toast(error instanceof Error ? error.message : 'History unavailable.'); }
   finally { if (request === epoch) seeking = false; }
 }
@@ -143,7 +271,7 @@ function playback(now: number) {
         const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] }; view.update(frame,false,speed); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
       }
       if (changed) { renderTimeline(); renderInspector(); renderJournal(); }
-      if(memoryChanged&&activeTab==='details')void loadMemory();
+      if(memoryChanged)void loadMemory();
       if (scrubTarget !== null && cursor >= scrubTarget) { scrubTarget = null; replayFrames = []; view.hold(); renderTimeline(); }
     }
     // Stay in replay at the recording edge. Only the Live button changes observer mode.
@@ -164,8 +292,19 @@ function renderTimeline() {
   const count = dayOf(latest);
   if (count !== dayCount) { const day = $<HTMLSelectElement>('day'); day.replaceChildren(); for (let i = 1;i<=count;i++) { const option = new Option(`Day ${String(i).padStart(3,'0')}`,String(i)); day.add(option); } dayCount = count; }
   $<HTMLSelectElement>('day').value = String(dayOf(cursor));
-  const waiting = Object.entries(meta.runtime.agents).filter(([,s]) => s.state === 'planning' || s.state === 'thinking' || s.state === 'waiting').map(([id]) => shown?.entities.find(e=>e.id===id)?.name ?? id);
-  $('turn-status').textContent = meta.runtime.phase === 'thinking' ? `Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ') || 'decisions'}` : meta.runtime.phase === 'paused' ? 'World paused' : `Turn ${meta.runtime.turn} · One world second`;
+  const waitingEntries=Object.entries(meta.runtime.agents).filter(([,status])=>['planning','thinking','waiting'].includes(status.state));
+  const waiting=waitingEntries.map(([id])=>shown?.entities.find(e=>e.id===id)?.name??id);
+  const diagnostic=waitingEntries.find(([,status])=>status.state==='waiting'&&status.message&&/model error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}/i.test(status.message))??waitingEntries.find(([,status])=>status.state==='waiting'&&status.message);
+  const turnStatus=$('turn-status');
+  const diagnosticText=diagnostic?.[1].message??'';
+  turnStatus.classList.toggle('error',/error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}/i.test(diagnosticText));
+  if(meta.runtime.phase==='thinking'){
+    const [id,status]=diagnostic??[];
+    const name=id?shown?.entities.find(e=>e.id===id)?.name??id:'';
+    turnStatus.textContent=diagnostic&&name?`Turn ${meta.runtime.turn} · ${name}: ${status?.message??''}`:`Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ')||'decisions'}`;
+    turnStatus.title=status?.message??'';
+  }else if(meta.runtime.phase==='paused'){turnStatus.textContent='World paused';turnStatus.title='';}
+  else{turnStatus.textContent=`Turn ${meta.runtime.turn} · One world second`;turnStatus.title='';}
   $('record-status').textContent = isLive ? '1 turn = 1 world second' : playing && cursor >= latest ? 'Waiting for the next recorded turn' : 'World time · inference waits omitted';
   const marks = $('event-marks'); marks.replaceChildren();
   for (const event of liveEvents.filter(e => ['discovery','lost','memory','encounter','agent-error'].includes(e.type))) {
@@ -174,29 +313,28 @@ function renderTimeline() {
 }
 function renderInspector() {
   if (!shown) return;
-  $('lost').textContent = `${shown.lost} lost`; $('entity-count').textContent = String(shown.entities.length).padStart(2,'0');
-  const list = $('entity-list');
-  for (const e of shown.entities) {
-    const enabled = e.enabled !== false;
-    const displayStatus = enabled ? isLive && meta.runtime.phase === 'thinking' ? meta.runtime.agents[e.id]?.state ?? 'held' : e.status : 'disabled';
-    const existing = document.getElementById(`entity-${e.id}`);
-    if (existing) {
-      existing.classList.toggle('selected',e.id===selected); existing.classList.toggle('disabled',!enabled);
-      const select = existing.querySelector('.inhabitant-select')!; select.setAttribute('aria-pressed',String(e.id===selected));
-      const toggle = existing.querySelector<HTMLInputElement>('.entity-toggle')!; toggle.checked = enabled; toggle.disabled = !isLive;
-      const status = existing.querySelector('.entity-status')!; status.textContent=displayStatus; status.classList.toggle('thinking',displayStatus==='planning' || displayStatus==='thinking' || displayStatus==='waiting'); status.classList.toggle('error',displayStatus==='error'); continue;
+  $('entity-count').textContent=String(shown.entities.length).padStart(2,'0');
+  const list=$('entity-list');
+  for(const e of shown.entities){
+    const enabled=e.enabled!==false;
+    const displayStatus=enabled?isLive&&meta.runtime.phase==='thinking'?meta.runtime.agents[e.id]?.state??'held':e.status:'disabled';
+    const existing=document.getElementById(`entity-${e.id}`);
+    if(existing){
+      existing.classList.toggle('selected',e.id===selected);existing.classList.toggle('disabled',!enabled);
+      const select=existing.querySelector<HTMLButtonElement>('.inhabitant-select')!;select.setAttribute('aria-pressed',String(e.id===selected));
+      const toggle=existing.querySelector<HTMLInputElement>('.entity-toggle')!;toggle.checked=enabled;toggle.disabled=!isLive;
+      const status=existing.querySelector<HTMLElement>('.entity-status')!;status.textContent=displayStatus;status.classList.toggle('thinking',['planning','thinking','waiting'].includes(displayStatus));status.classList.toggle('error',displayStatus==='error');continue;
     }
-    const row = document.createElement('div'); row.className = `inhabitant ${e.id === selected ? 'selected' : ''} ${enabled ? '' : 'disabled'}`; row.id = `entity-${e.id}`;
-    const button = document.createElement('button'); button.className = 'inhabitant-select'; button.setAttribute('aria-pressed',String(e.id === selected));
-    const avatar = document.createElement('span'); avatar.className = `avatar ${e.kind}`; avatar.style.setProperty('--entity-color',e.color); avatar.innerHTML = '<i></i>';
-    const text = document.createElement('span'); text.className = 'inhabitant-text'; const name = document.createElement('strong'); name.textContent = e.name;
-    const kind = document.createElement('small'); kind.textContent = e.kind === 'troglodyte' ? 'Troglodyte' : 'Duck · NPC'; text.append(name,kind);
-    const status = document.createElement('span'); status.className = `entity-status ${displayStatus === 'planning' || displayStatus === 'thinking' || displayStatus === 'waiting' ? 'thinking' : ''} ${displayStatus === 'error'?'error':''}`; status.textContent = displayStatus;
-    const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.className = 'entity-toggle'; toggle.checked = enabled; toggle.disabled = !isLive;
-    toggle.title = `Enable ${e.name}`; toggle.setAttribute('aria-label',`Enable ${e.name}`); toggle.onchange = () => void setEntityEnabled(e.id,toggle.checked,toggle);
-    button.append(avatar,text,status); button.onclick = () => selectEntity(e.id); button.ondblclick = () => view.focus(e.id); row.append(button,toggle); list.append(row);
+    const row=document.createElement('div');row.className=`inhabitant ${e.id===selected?'selected':''} ${enabled?'':'disabled'}`;row.id=`entity-${e.id}`;
+    const button=document.createElement('button');button.className='inhabitant-select';button.setAttribute('aria-pressed',String(e.id===selected));
+    const avatar=document.createElement('span');avatar.className=`avatar ${e.kind}`;avatar.style.setProperty('--entity-color',e.color);avatar.innerHTML=e.kind==='troglodyte'?troglodytePortrait(e.id):'<i></i>';
+    const text=document.createElement('span');text.className='inhabitant-text';const name=document.createElement('strong');name.textContent=e.name;
+    const kind=document.createElement('small');kind.textContent=e.kind==='troglodyte'?'Troglodyte':'Duck · NPC';text.append(name,kind);
+    const status=document.createElement('span');status.className=`entity-status ${['planning','thinking','waiting'].includes(displayStatus)?'thinking':''} ${displayStatus==='error'?'error':''}`;status.textContent=displayStatus;
+    const toggle=document.createElement('input');toggle.type='checkbox';toggle.className='entity-toggle';toggle.checked=enabled;toggle.disabled=!isLive;toggle.title=`Enable ${e.name}`;toggle.setAttribute('aria-label',`Enable ${e.name}`);toggle.onchange=()=>void setEntityEnabled(e.id,toggle.checked,toggle);
+    button.append(avatar,text,status);button.onclick=()=>selectEntity(e.id);button.ondblclick=()=>view.focus(e.id);row.append(button,toggle);list.append(row);
   }
-  if (activeTab === 'details') renderDetails();
+  renderDetails();
 }
 async function setEntityEnabled(id: string, enabled: boolean, toggle: HTMLInputElement) {
   toggle.disabled = true;
@@ -214,13 +352,19 @@ async function setEntityEnabled(id: string, enabled: boolean, toggle: HTMLInputE
 }
 function renderDetails() {
   const e = shown.entities.find(e => e.id === selected); if (!e) return;
-  const panel = $('details'); panel.replaceChildren();
+  const signature=JSON.stringify({id:e.id,name:e.name,kind:e.kind,status:e.status,enabled:e.enabled,inventory:e.inventory,plan:e.plan,memory:memoryView,knowledge:shown.discoveries?.[selected]});
+  const panel = $('details');
+  if(signature===detailsSignature){
+    const position=panel.querySelector<HTMLElement>('[data-detail="Position"] .detail-value');if(position)position.textContent=e.position.map(v=>v.toFixed(1)).join(' / ');
+    const facing=panel.querySelector<HTMLElement>('[data-detail="Facing"] .detail-value');if(facing)facing.textContent=`${Math.round(e.yaw)}°`;
+    return;
+  }
+  detailsSignature=signature;panel.replaceChildren();
   const title = document.createElement('h3'); title.textContent = `${e.name} / ${e.kind}`; panel.append(title);
   const held=e.inventory?.selected===null||!e.inventory?undefined:e.inventory.stacks[e.inventory.selected];
   const inventory=e.inventory?.stacks.map((stack,index)=>`${index}: ${stack.count} × ${stack.kind}${stack.contents?` (${stack.contents})`:''}`).join(', ')??'Empty';
   const pairs = [['Position',e.position.map(v => v.toFixed(1)).join(' / ')],['Facing',`${Math.round(e.yaw)}°`],['State',e.status],['Hands',held?`${held.kind}${held.contents?` · ${held.contents}`:''}`:'Empty'],['Inventory',inventory],['Perception',`${meta.module.perception.range} m · ${meta.module.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
-  for (const [label,value] of pairs) { const row = document.createElement('div'); row.className = 'detail-row'; const a = document.createElement('span'); a.textContent = label; const b = document.createElement('span'); b.textContent = value; row.append(a,b); panel.append(row); }
-  const focus = document.createElement('button'); focus.className = 'focus-button'; focus.textContent = `Follow ${e.name}`; focus.onclick = () => view.focus(e.id); panel.append(focus);
+  for (const [label,value] of pairs) { const row = document.createElement('div'); row.className = 'detail-row';row.dataset.detail=label; const a = document.createElement('span'); a.textContent = label; const b = document.createElement('span');b.className='detail-value'; b.textContent = value; row.append(a,b); panel.append(row); }
   if(e.controller==='agent'){
     const section=document.createElement('section');section.className='agent-plan';section.setAttribute('aria-label','Recorded goal and steps');
     const planLabel=document.createElement('h4');planLabel.textContent='GOAL AND STEPS IN THIS RECORD';section.append(planLabel);
@@ -282,10 +426,39 @@ function journalEventMessage(event:WorldEvent) {
   }
   return event.message;
 }
-$<HTMLDetailsElement>('experiment-panel').addEventListener('toggle',event=>{
-  const panel=event.currentTarget as HTMLDetailsElement;
-  panel.querySelector('.experiment-collapse-mark')!.textContent=panel.open?'−':'+';
-});
+$('settings-open').onclick=()=>showSettings(true);
+$('settings-back').onclick=()=>showSettings(false);
+$('debug-toggle').onclick=()=>{
+  const panel=$('debug-panel'),open=panel.classList.contains('collapsed');panel.classList.toggle('collapsed',!open);
+  $('main').classList.toggle('debug-open',open);$('debug-toggle').setAttribute('aria-expanded',String(open));$('debug-toggle').setAttribute('aria-label',`${open?'Collapse':'Expand'} debug panel`);$('debug-toggle').title=`${open?'Collapse':'Expand'} debug panel`;
+};
+$('focus-toggle').onclick=()=>{
+  const panel=$('inspector'),open=panel.classList.contains('collapsed');panel.classList.toggle('collapsed',!open);
+  $('main').classList.toggle('focus-collapsed',!open);$('focus-toggle').setAttribute('aria-expanded',String(open));$('focus-toggle').setAttribute('aria-label',`${open?'Collapse':'Expand'} right panel`);$('focus-toggle').title=`${open?'Collapse':'Expand'} right panel`;
+};
+$('add-model').onclick=()=>{
+  const number=$('model-list').children.length+1;
+  renderModelRows([...readModelRows(),{id:`model-${Date.now()}-${number}`,type:'openai-compatible',name:`Model ${number}`,baseUrl:'',model:'',apiKeyConfigured:false}]);
+};
+$<HTMLSelectElement>('settings-strategy').onchange=updateStrategyControl;
+$<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
+  event.preventDefault();const status=$('settings-status');status.textContent='Saving configuration…';
+  const providers=Array.from($('model-list').children).map(card=>{
+    const field=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement|HTMLSelectElement).value;
+    return{id:(card as HTMLElement).dataset.id,type:field('type'),name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),apiKey:field('apiKey')};
+  });
+  const requestedStrategy=$<HTMLSelectElement>('settings-strategy').value;
+  try{
+    const response=await fetch('/api/llm-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({providers,strategy:requestedStrategy})});
+    const data=await response.json() as Metadata&{llmConfig?:LlmConfig;error?:string};
+    if(!response.ok)throw new Error(data.error??'Could not save configuration.');
+    if(meta){meta.mode=data.mode;meta.model=data.model;meta.providerStrategy=data.providerStrategy;}
+    if(data.llmConfig)llmConfig=data.llmConfig;
+    if(data.llmConfig){if(meta)meta.llmConfig=data.llmConfig;renderProviderStatus(data.llmConfig);}
+    renderModelRows(llmConfig.providers);$<HTMLSelectElement>('settings-strategy').value=llmConfig.strategy;
+    status.textContent='Configuration saved.';
+  }catch(error){status.textContent=error instanceof Error?error.message:'Could not save configuration.';}
+};
 $('live').onclick = goLive;
 $('play').onclick = () => {
   if (!meta || seeking) return;
@@ -311,10 +484,4 @@ $<HTMLInputElement>('parallel-requests').onchange=async event=>{
   }catch{toast('Could not change request mode. Check the connection.');}
   finally{input.checked=meta.parallelRequests;input.disabled=false;}
 };
-for (const tab of ['journal','details']) $(tab+'-tab').onclick = () => {
-  activeTab = tab; for (const name of ['journal','details']) { $(name).classList.toggle('hidden',name!==tab); $(name+'-tab').classList.toggle('active',name===tab); $(name+'-tab').setAttribute('aria-selected',String(name===tab)); }
-  if (tab === 'details') { renderDetails();void loadMemory(); }
-};
-$('help-button').onclick = () => $<HTMLDialogElement>('guide').showModal();
-$('close-guide').onclick = () => $<HTMLDialogElement>('guide').close();
 window.addEventListener('beforeunload', () => { stream.close(); view.dispose(); });

@@ -13,6 +13,10 @@ npm run dev
 
 Open http://127.0.0.1:3000. Without a configured provider the app runs a clearly labelled **scripted demo**, not an LLM experiment. Copy `.env.example` to `.env` and configure OpenRouter and/or a local OpenAI-compatible server. Providers are attempted in declaration order; exhaustion pauses world time and retries indefinitely. Keys remain server-side. Agent decisions are unlimited unless an optional positive `AGENT_MAX_TURNS` is explicitly configured. Context keeps ten private notes, four recent actions, and a factual progress summary. Agents can select labeled, checked actions and inspect visible local geometry.
 
+## Inference settings
+
+The Settings screen stores ordered provider/model entries and the selection strategy in the server-only `data/llm-config.json`. Supported adapters are OpenAI-compatible, OpenAI, OpenRouter and Amazon Bedrock. API keys are never returned by the configuration endpoint; leaving a saved key blank preserves it. `First model only` disables the remaining entries, `Round robin` rotates the starting provider for each inference request and falls through on failure, `Fallback` sticks to the last successful provider, and `Master / slaves` starts with the first entry each time. Bedrock uses an API key and region; the European Claude Sonnet 4.6 and Haiku 4.5 model IDs are mapped to their EU inference profiles automatically.
+
 `npm run build` builds production assets; `npm start` serves them. `npm test` checks the physical invariants, replay and an agent loop against a local mock provider.
 
 ## Shape

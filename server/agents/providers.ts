@@ -1,12 +1,15 @@
 import { detectTokenLoop, tokenizeLoopText } from '../../vendor/deepseek-harness/loop-detector';
+import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string }; }
 export interface ProviderConfig {
   id: string;
+  type?: 'openai-compatible' | 'openai' | 'openrouter' | 'amazon-bedrock';
   name: string;
   apiKey: string;
   baseUrl: string;
   model: string;
+  region?: string;
   displayModel?: string;
   modelDiscovery?: 'lm-studio';
   reasoningOptions?: ReasoningEffort[];
@@ -14,6 +17,8 @@ export interface ProviderConfig {
   headers?: Record<string, string>;
 }
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high';
+export type ProviderStrategy = 'first-only' | 'round-robin' | 'fallback' | 'master-slaves';
+export interface ProviderHealth { state:'unknown'|'ok'|'bad'; detail:string; }
 export interface CompletionRequest { messages: unknown[]; tools: unknown[]; max_tokens: number; reasoning?: 'minimum' | 'maximum'; }
 export interface CompletionResult {
   provider: string;
@@ -34,6 +39,7 @@ export function providersFromEnv(env: NodeJS.ProcessEnv = process.env): Provider
   const providers: ProviderConfig[] = [];
   if (env.OPENROUTER_ENABLED !== 'false' && env.OPENROUTER_API_KEY?.trim()) providers.push({
     id: 'openrouter',
+    type: 'openrouter',
     name: 'OpenRouter Free',
     apiKey: env.OPENROUTER_API_KEY.trim(),
     baseUrl: env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1',
@@ -43,6 +49,7 @@ export function providersFromEnv(env: NodeJS.ProcessEnv = process.env): Provider
   });
   if (env.LOCAL_LLM_BASE_URL?.trim()) providers.push({
     id: 'local',
+    type: 'openai-compatible',
     name: 'Local LM Studio',
     apiKey: env.LOCAL_LLM_API_KEY?.trim() || 'local-lm-studio',
     baseUrl: env.LOCAL_LLM_BASE_URL.trim(),
@@ -51,6 +58,7 @@ export function providersFromEnv(env: NodeJS.ProcessEnv = process.env): Provider
   });
   if (!providers.length && env.LLM_API_KEY?.trim()) providers.push({
     id: 'legacy',
+    type: 'openai-compatible',
     name: 'Configured provider',
     apiKey: env.LLM_API_KEY.trim(),
     baseUrl: env.LLM_BASE_URL ?? 'https://api.deepseek.com',
@@ -60,10 +68,33 @@ export function providersFromEnv(env: NodeJS.ProcessEnv = process.env): Provider
 }
 
 export class ProviderChain {
-  constructor(readonly providers: ProviderConfig[]) {}
+  private roundRobinIndex = 0;
+  private stickyIndex = 0;
+  private bedrockClients = new Map<string,BedrockRuntimeClient>();
+  private providerHealth = new Map<string,ProviderHealth>();
+  currentStatus='';
+  constructor(readonly providers: ProviderConfig[], public strategy: ProviderStrategy = 'fallback') {}
   get enabled() { return this.providers.length > 0; }
-  get cacheKey() { return this.providers.map(provider => `${provider.id}:${provider.model}`).join('->') || 'demo'; }
+  healthFor(id:string):ProviderHealth{return this.providerHealth.get(id)??{state:'unknown',detail:'No inference result recorded yet.'};}
+  seedHistoricalSuccess(id:string,turn:number){
+    const provider=this.providers.find(candidate=>candidate.id===id);if(!provider)return;
+    const detail=`Last successful inference in turn ${turn}.`;
+    this.providerHealth.set(id,{state:'ok',detail});this.currentStatus=`${provider.name}: ${detail}`;
+  }
+  get cacheKey() { return `${this.strategy}:${this.providers.map(provider => `${provider.id}:${provider.type??'openai-compatible'}:${provider.region??''}:${provider.model}`).join('->') || 'demo'}`; }
   get label() { return this.providers.map(provider => `${provider.name} (${provider.displayModel ?? provider.model})`).join(' -> ') || 'Scripted demo'; }
+
+  private providerOrder() {
+    const count=this.providers.length;
+    if(count<2)return this.providers.map((provider,index)=>({provider,index}));
+    if(this.strategy==='first-only')return[{provider:this.providers[0],index:0}];
+    if(this.strategy==='round-robin'){
+      const start=this.roundRobinIndex++%count;
+      return Array.from({length:count},(_,offset)=>{const index=(start+offset)%count;return{provider:this.providers[index],index};});
+    }
+    const start=this.strategy==='fallback'?this.stickyIndex%count:0;
+    return Array.from({length:count},(_,offset)=>{const index=(start+offset)%count;return{provider:this.providers[index],index};});
+  }
 
   async refreshDiscoveredModels(signal: AbortSignal) {
     await Promise.all(this.providers.filter(provider => provider.modelDiscovery === 'lm-studio').map(provider => this.discoverLmStudioModel(provider, signal)));
@@ -72,20 +103,30 @@ export class ProviderChain {
   async complete(request: CompletionRequest, signal: AbortSignal, onAttempt: (provider: ProviderConfig, index: number) => void): Promise<CompletionResult> {
     const failures: string[] = [];
     let invalid = 0;
-    for (const [index, provider] of this.providers.entries()) {
+    for (const {index,provider} of this.providerOrder()) {
       signal.throwIfAborted();
       try {
+        this.currentStatus=`${failures.length?`${failures.join(' ')} `:''}Connecting to ${provider.name}…`;
         if (provider.modelDiscovery === 'lm-studio') await this.discoverLmStudioModel(provider, signal);
         onAttempt(provider, index);
-        return await this.request(provider, request, signal);
+        const result=await this.request(provider, request, signal);
+        this.providerHealth.set(provider.id,{state:'ok',detail:'Last inference request succeeded.'});
+        this.currentStatus=`${provider.name}: connected; last inference request succeeded.${failures.length?` Earlier provider failures: ${failures.join(' ')}`:''}`;
+        if(this.strategy==='fallback')this.stickyIndex=index;
+        return result;
       } catch (error) {
         signal.throwIfAborted();
         if(error instanceof InvalidCompletionError)invalid++;
-        failures.push(error instanceof Error ? error.message : `${provider.name} failed.`);
+        const detail=error instanceof Error?error.message:`${provider.name} failed.`;
+        this.providerHealth.set(provider.id,{state:'bad',detail});
+        const failure=`${provider.name}: ${detail}`;
+        this.currentStatus=failure;
+        failures.push(failure);
       }
     }
-    if(invalid===this.providers.length)throw new InvalidCompletionError(`All inference providers returned invalid completions. ${failures.join(' ')}`);
-    throw new Error(`All inference providers are unavailable. ${failures.join(' ')}`);
+    if(invalid===this.providers.length){this.currentStatus=`All inference providers returned invalid completions. ${failures.join(' ')}`;throw new InvalidCompletionError(this.currentStatus);}
+    this.currentStatus=`All inference providers are unavailable. ${failures.join(' ')}`;
+    throw new Error(this.currentStatus);
   }
 
   private async discoverLmStudioModel(provider: ProviderConfig, signal: AbortSignal) {
@@ -113,6 +154,7 @@ export class ProviderChain {
   }
 
   private async request(provider: ProviderConfig, request: CompletionRequest, signal: AbortSignal): Promise<CompletionResult> {
+    if(provider.type==='amazon-bedrock')return this.requestBedrock(provider,request,signal);
     const timeout = provider.timeoutMs ? AbortSignal.timeout(provider.timeoutMs) : undefined;
     const requestSignal = timeout ? AbortSignal.any([signal, timeout]) : signal;
     let response: Response;
@@ -147,6 +189,62 @@ export class ProviderChain {
     }
     return { provider: provider.id, providerName: provider.name, model: payload.model ?? provider.model, content, calls, ...(payload.usage === undefined ? {} : { usage: payload.usage }) };
   }
+
+  private async requestBedrock(provider:ProviderConfig,request:CompletionRequest,signal:AbortSignal):Promise<CompletionResult>{
+    const cacheKey=`${provider.id}:${provider.region??''}`;
+    let client=this.bedrockClients.get(cacheKey);
+    if(!client){
+      client=new BedrockRuntimeClient({region:provider.region||undefined,token:async()=>({token:provider.apiKey}),authSchemePreference:['httpBearerAuth']});
+      this.bedrockClients.set(cacheKey,client);
+    }
+    const system:{text:string}[]=[],messages:{role:'user'|'assistant';content:Record<string,unknown>[];toolResults?:boolean}[]=[];
+    for(const raw of request.messages as {role?:string;content?:unknown;tool_calls?:ToolCall[];tool_call_id?:string}[]){
+      const content=typeof raw.content==='string'?raw.content:raw.content==null?'':JSON.stringify(raw.content);
+      if(raw.role==='system'||raw.role==='developer'){if(content)system.push({text:content});continue;}
+      if(raw.role==='tool'){
+        const block={toolResult:{toolUseId:raw.tool_call_id??'tool-result',content:[{text:content}]}};
+        const previous=messages.at(-1);
+        if(previous?.role==='user'&&previous.toolResults)previous.content.push(block);
+        else messages.push({role:'user',content:[block],toolResults:true});
+        continue;
+      }
+      if(raw.role!=='user'&&raw.role!=='assistant')continue;
+      const blocks:Record<string,unknown>[]=[];
+      if(content)blocks.push({text:content});
+      for(const call of raw.tool_calls??[]){
+        let input:Record<string,unknown>={};try{const parsed=JSON.parse(call.function.arguments);if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))input=parsed;}catch{}
+        blocks.push({toolUse:{toolUseId:call.id,name:call.function.name,input}});
+      }
+      messages.push({role:raw.role,content:blocks.length?blocks:[{text:'Continue.'}]});
+    }
+    const tools=(request.tools as {type?:string;function?:{name?:string;description?:string;parameters?:unknown}}[])
+      .filter(tool=>tool.type==='function'&&tool.function?.name)
+      .map(tool=>({toolSpec:{name:tool.function!.name!,description:tool.function!.description??'',inputSchema:{json:tool.function!.parameters??{type:'object',properties:{}}}}}));
+    const response=await client.send(new ConverseCommand({
+      modelId:bedrockInferenceModelId(provider),
+      ...(system.length?{system}:{}),
+      messages:messages.map(({role,content})=>({role,content:content as never})),
+      ...(tools.length?{toolConfig:{tools:tools as never}}:{}),
+      inferenceConfig:{maxTokens:request.max_tokens},
+    }),{abortSignal:signal});
+    const answer=response.output?.message?.content??[];
+    const content=answer.flatMap(block=>'text'in block&&typeof block.text==='string'?[block.text]:[]).join(' ').slice(0,5000)||null;
+    const calls:ToolCall[]=answer.flatMap(block=>{
+      if(!('toolUse'in block)||!block.toolUse?.name||!block.toolUse.toolUseId)return[];
+      return[{id:block.toolUse.toolUseId,type:'function' as const,function:{name:block.toolUse.name,arguments:JSON.stringify(block.toolUse.input??{})}}];
+    });
+    if(!content&&!calls.length)throw new InvalidCompletionError(`${provider.name} returned an incomplete response.`);
+    if(calls.length>16)throw new InvalidCompletionError(`${provider.name} returned too many tool calls.`);
+    if(content&&detectTokenLoop(tokenizeLoopText(content)))throw new InvalidCompletionError(`${provider.name} returned repeating output.`);
+    return{provider:provider.id,providerName:provider.name,model:provider.model,content,calls,...(response.usage?{usage:response.usage}:{})};
+  }
+}
+
+export function bedrockInferenceModelId(provider:ProviderConfig){
+  const model=provider.model.trim();
+  if(model==='anthropic.claude-sonnet-4-6'&&provider.region?.startsWith('eu-'))return `eu.${model}`;
+  if(model==='anthropic.claude-haiku-4-5-20251001-v1:0'&&provider.region?.startsWith('eu-'))return `eu.${model}`;
+  return model;
 }
 
 interface LmStudioModel {

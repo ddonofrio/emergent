@@ -5,7 +5,7 @@ import { validateJsonSchemaValue } from '../../vendor/deepseek-harness/json-sche
 import { PLAN_REMINDER_INTERVAL, PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import type { Store } from '../store';
-import { InvalidCompletionError, ProviderChain, type CompletionRequest, type ProviderConfig, type ToolCall } from './providers';
+import { InvalidCompletionError, ProviderChain, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
 import { actionFeedback, compactResult, compactView, decisionView, goalAffordances, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
 import { compactJournal } from './journal-compaction';
@@ -53,16 +53,14 @@ const MAX_CORRECTION_ROUNDS = 4;
 const REQUIRED_SUPPORT_TOOLS = new Set(['finish_goal','stop_follow','do_not_reply']);
 
 export class AgentRuntime {
-  readonly mode: 'llm' | 'demo';
   readonly minds = new Map<string, Mind>();
-  readonly inference: ProviderChain;
+  inference: ProviderChain;
   parallelRequests: boolean;
   constructor(readonly engine: Engine, readonly store: Store, readonly config: {
     providers: ProviderConfig[]; maxTurns: number | null; retryDelayMs?: number;
   }) {
     this.parallelRequests=store.loadParallelRequests();
     this.inference = new ProviderChain(config.providers);
-    this.mode = this.inference.enabled ? 'llm' : 'demo';
     for (const entity of engine.entities.filter(e => e.controller === 'agent')) {
       const saved = store.loadMind<Mind & {cycles?:Message[][];actionQueue?:unknown;sequenceInterruption?:unknown}>(entity.id);
       if(saved){
@@ -76,10 +74,15 @@ export class AgentRuntime {
     }
   }
   persistence(): [string, unknown][] { return [...this.minds]; }
+  get mode(): 'llm' | 'demo' { return this.inference.enabled ? 'llm' : 'demo'; }
   private infer(id:string,phase:string,request:CompletionRequest,signal:AbortSignal,onAttempt:(provider:ProviderConfig,index:number)=>void) {
     return auditedCompletion(this.store,this.engine.tick,id,phase,request,signal,()=>this.inference.complete(request,signal,onAttempt));
   }
   setParallelRequests(enabled:boolean) { this.store.saveParallelRequests(enabled);this.parallelRequests=enabled; }
+  setInferenceConfig(providers:ProviderConfig[],strategy:ProviderStrategy){
+    this.config.providers=providers;
+    this.inference=new ProviderChain(providers,strategy);
+  }
   async prepareMovementPrompts(signal:AbortSignal,report:Report):Promise<PreparedMovementPrompt[]> {
     const tick=this.engine.tick,inputs=this.engine.movementPrompts().map(entity=>({id:entity.id,mind:clone(this.minds.get(entity.id)!),prompt:clone(entity.movementPrompt!),motion:clone(entity.motion!)}));
     const prepare=async(input:typeof inputs[number])=>{
@@ -255,7 +258,7 @@ export class AgentRuntime {
     const normalContext=()=>rounded({plan:planContext(),...continuation(),...(lastResult?{lastResult:{...(lastRecorded?{action:lastRecorded.action,args:lastRecorded.args}:{}),...actionFeedback(compactResult(lastResult))}}:{}),inventory:inventoryContext(observation),...heard,...terrainChanges,...decisionView(this.engine.observeAt(id,viewAngle),currentCriterion()),body:{position:observation.self.position,yaw:observation.self.yaw},...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),progress:progressContext(recent.filter(entry=>entry.atSecond>(mind.plan?.startedAtSecond??0))),...(learned.length?{learned}:{}),...notes(),...(priorActions.length?{recent:priorActions.map(entry=>({...entry,result:actionFeedback(entry.result)}))}:{})});
     const initial=following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
-    let attempts=0,supportingCalls=0,lookCalls=0,correctionRounds=0,invalidCompletions=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
+    let attempts=0,supportingCalls=0,lookCalls=0,correctionRounds=0,invalidCompletions=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null,lastProviderError:string|undefined;
     let tools=makeTools();
     const refreshTools=()=>{
       tools=makeTools().filter(tool=>(tool.name!=='look'||lookCalls<2)&&(tool.physical||supportingCalls<MAX_SUPPORTING_CALLS||REQUIRED_SUPPORT_TOOLS.has(tool.name)));
@@ -270,8 +273,11 @@ export class AgentRuntime {
     const complete=async()=>{
       while(true){
         signal.throwIfAborted();attempts++;
-        report(id,{state:attempts===1?'thinking':'waiting',attempts,message:'Waiting for an inference provider; world time is held.'});
-        try{return await this.infer(id,'action',{messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'minimum'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
+        report(id,{state:attempts===1?'thinking':'waiting',attempts,message:lastProviderError?`Model error: ${lastProviderError}. Retrying; world time is held.`:'Waiting for an inference provider; world time is held.'});
+        try{
+          const answer=await this.infer(id,'action',{messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'minimum'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}${lastProviderError?`; previous model error: ${lastProviderError}`:''}; world time is held.`}));
+          lastProviderError=undefined;return answer;
+        }
         catch(error){
           signal.throwIfAborted();
           if(error instanceof InferenceAuditError)throw error;
@@ -281,7 +287,8 @@ export class AgentRuntime {
             else report(id,{state:'waiting',attempts,message:`Invalid model response ${invalidCompletions}; requesting a corrected action while world time is held.`});
             continue;
           }
-          report(id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});
+          lastProviderError=error instanceof Error?error.message:'Inference providers unavailable.';
+          report(id,{state:'waiting',attempts,message:`Model error: ${lastProviderError}. Retrying; world time is held.`});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});
         }
       }
     };

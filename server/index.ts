@@ -1,5 +1,5 @@
 import { createServer, type ServerResponse } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { once } from 'node:events';
 import { inflateSync } from 'node:zlib';
@@ -7,14 +7,15 @@ import { Engine } from '../src/core/engine';
 import { loadModule } from '../src/modules';
 import { Store } from './store';
 import { AgentRuntime } from './agents/runtime';
-import { ProviderChain, providersFromEnv } from './agents/providers';
+import { ProviderChain, providersFromEnv, type ProviderConfig, type ProviderStrategy } from './agents/providers';
 import { TurnClock } from './turn-clock';
 import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
 
 const port = Number(process.env.PORT ?? 3000);
 const worldModule = loadModule(process.env.EMERGENT_MODULE ?? 'first-shore');
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port.');
-const store = new Store(resolve(process.env.DATA_DIR ?? 'data', `${worldModule.manifest.id}.sqlite`), worldModule.manifest);
+const dataDirectory=resolve(process.env.DATA_DIR??'data'),llmConfigPath=resolve(dataDirectory,'llm-config.json');
+const store = new Store(resolve(dataDirectory, `${worldModule.manifest.id}.sqlite`), worldModule.manifest);
 const engine = new Engine(worldModule, store.hasWorld() ? store.stateAt(store.latestTick()) : undefined);
 engine.nextEvent = store.maxEventId() + 1;
 const optionalTurnLimit = (value: string | undefined) => {
@@ -23,18 +24,37 @@ const optionalTurnLimit = (value: string | undefined) => {
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error('AGENT_MAX_TURNS must be an optional positive integer.');
   return parsed;
 };
-const providers = providersFromEnv();
+let providers = providersFromEnv(),providerStrategy:ProviderStrategy='fallback';
+try{
+  const saved=JSON.parse(await readFile(llmConfigPath,'utf8')) as {providers?:ProviderConfig[];strategy?:ProviderStrategy|'single-model'};
+  if(Array.isArray(saved.providers)&&saved.providers.every(provider=>provider&&typeof provider.id==='string'&&typeof provider.name==='string'&&typeof provider.apiKey==='string'&&typeof provider.baseUrl==='string'&&typeof provider.model==='string')){
+    const savedIds=new Set(saved.providers.map(provider=>provider.id));
+    providers=[...saved.providers,...providers.filter(provider=>!savedIds.has(provider.id))];
+    if(saved.strategy==='single-model')providerStrategy='first-only';else if(['first-only','round-robin','fallback','master-slaves'].includes(saved.strategy??''))providerStrategy=saved.strategy!;
+  }
+}catch{}
 if (providers.some(provider => provider.modelDiscovery)) {
   try { await new ProviderChain(providers).refreshDiscoveredModels(AbortSignal.timeout(2000)); }
   catch { /* Discovery is retried whenever the local fallback is needed. */ }
 }
 const agents = new AgentRuntime(engine, store, { providers, maxTurns: optionalTurnLimit(process.env.AGENT_MAX_TURNS) });
+agents.setInferenceConfig(providers,providerStrategy);
+for(const event of store.eventsAt(engine.tick,'',500)){
+  if(event.type!=='decision'&&event.type!=='movement-decision')continue;
+  const provider=(event.data as {provider?:unknown}|undefined)?.provider;
+  if(typeof provider==='string')agents.inference.seedHistoricalSuccess(provider,Math.floor(event.tick/TURN_TICKS)+1);
+}
 engine.event('world', 'session', `World ${store.hasWorld() ? 'resumed' : 'created'} in ${agents.mode === 'demo' ? 'scripted demo' : 'LLM'} mode.`);
 store.record(engine.frame(), engine.state(), agents.persistence());
 const clients = new Set<ServerResponse>();
 const production = process.argv.includes('--production');
 const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
-const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.inference.label, parallelRequests: agents.parallelRequests, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
+const publicLlmConfig = () => ({
+  strategy: agents.inference.providers.length < 2 ? 'first-only' : agents.inference.strategy,
+  currentStatus:agents.inference.currentStatus,
+  providers: agents.inference.providers.map(({id,type,name,baseUrl,model,region,displayModel,apiKey})=>({id,type:type??'openai-compatible',name,baseUrl,model,region,displayModel,apiKeyConfigured:!!apiKey,health:agents.inference.healthFor(id)})),
+});
+const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.inference.label, providerStrategy:publicLlmConfig().strategy, llmConfig:publicLlmConfig(), parallelRequests: agents.parallelRequests, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
 function broadcast(event: string, value: unknown) {
   const message = `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`;
   for (const client of clients) {
@@ -52,6 +72,40 @@ const server = createServer(async (req, res) => {
     if (req.headers.origin && !allowedHosts.map(h => `http://${h}`).includes(req.headers.origin)) { json(res, { error: 'Cross-origin access is disabled.' }, 403); return; }
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
     if (url.pathname.startsWith('/api/')) {
+      if(url.pathname==='/api/llm-config'&&req.method==='GET'){json(res,publicLlmConfig());return;}
+      if(url.pathname==='/api/llm-config'&&req.method==='POST'){
+        let body='';for await(const chunk of req){body+=chunk;if(body.length>16384){json(res,{error:'Configuration is too large.'},413);return;}}
+        const data=JSON.parse(body) as {providers?:unknown;strategy?:unknown};
+        const supportedTypes=new Set(['openai-compatible','openai','openrouter','amazon-bedrock']);
+        const strategies=new Set(['first-only','round-robin','fallback','master-slaves']);
+        if(!Array.isArray(data.providers)||data.providers.length>12||!strategies.has(String(data.strategy))){json(res,{error:'Choose a supported strategy and up to 12 models.'},400);return;}
+        const previous=new Map(agents.inference.providers.map(provider=>[provider.id,provider]));
+        const ids=new Set<string>();const next:ProviderConfig[]=[];
+        for(const value of data.providers){
+          if(!value||typeof value!=='object'){json(res,{error:'Each model needs valid settings.'},400);return;}
+          const row=value as Record<string,unknown>,id=typeof row.id==='string'?row.id:'',type=String(row.type??''),name=typeof row.name==='string'?row.name.trim():'',model=typeof row.model==='string'?row.model.trim():'';
+          if(!/^[a-zA-Z0-9_-]{1,64}$/.test(id)||ids.has(id)){json(res,{error:`${name||'Each model'} needs a unique ID.`},400);return;}
+          if(!supportedTypes.has(type)){json(res,{error:`${name||'This model'} uses an unsupported provider: ${type||'none'}.`},400);return;}
+          if(!name||name.length>80){json(res,{error:'Each model needs a name of 1 to 80 characters.'},400);return;}
+          if(!model||model.length>200){json(res,{error:`Enter a model identifier for ${name}.`},400);return;}
+          ids.add(id);
+          const bedrock=type==='amazon-bedrock',defaultUrl=type==='openai'?'https://api.openai.com/v1':type==='openrouter'?'https://openrouter.ai/api/v1':'';
+          const baseUrl=bedrock?'':typeof row.baseUrl==='string'&&row.baseUrl.trim()?row.baseUrl.trim():defaultUrl;
+          if(!bedrock){let parsed:URL;try{parsed=new URL(baseUrl);}catch{json(res,{error:`Enter a valid endpoint for ${name}.`},400);return;}
+            if(!['http:','https:'].includes(parsed.protocol)){json(res,{error:`The endpoint for ${name} must use HTTP or HTTPS.`},400);return;}}
+          const region=typeof row.region==='string'?row.region.trim():'';
+          if(bedrock&&!region){json(res,{error:`Enter an AWS region for ${name}.`},400);return;}
+          if(bedrock&&!/^[a-zA-Z0-9-]{1,64}$/.test(region)){json(res,{error:`Enter a valid AWS region for ${name}.`},400);return;}
+          const old=previous.get(id),providedKey=typeof row.apiKey==='string'?row.apiKey.trim():'';
+          const apiKey=providedKey||(old?.type===type?old.apiKey:'')||(type==='openai-compatible'?'local-openai-compatible':'');
+          if(!apiKey){json(res,{error:`Enter an API key for ${name}.`},400);return;}
+          next.push({id,type:type as ProviderConfig['type'],name,apiKey,baseUrl,model,...(region?{region}:{}),modelDiscovery:old?.modelDiscovery,timeoutMs:old?.timeoutMs,headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined});
+        }
+        const strategy=data.strategy as ProviderStrategy,tempPath=`${llmConfigPath}.tmp`;
+        await writeFile(tempPath,JSON.stringify({strategy,providers:next}),{encoding:'utf8',mode:0o600});await rename(tempPath,llmConfigPath);
+        agents.setInferenceConfig(next,strategy);
+        const config=publicLlmConfig();broadcast('llm-config',config);broadcast('settings',{parallelRequests:agents.parallelRequests});json(res,{...metadata(),llmConfig:config});return;
+      }
       if (url.pathname === '/api/control' && req.method === 'POST') {
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 2048) { json(res, { error: 'Request too large.' }, 413); return; } }
@@ -112,7 +166,7 @@ const turnClock = new TurnClock(engine, agents, {
   frame() {
     publishFrame(engine.tick % 600 === 0);
   },
-  status() { broadcast('status', { runtime: turnClock.status() }); },
+  status() { broadcast('status', { runtime: turnClock.status(),llmConfig:publicLlmConfig() }); },
   fatal(error) { console.error('World storage or runtime failure:', error); void shutdown(1); },
 });
 function publishFrame(checkpoint = false) {
@@ -125,7 +179,7 @@ const timer = setInterval(() => {
   try { turnClock.pump(); }
   catch (error) { console.error('Simulation stopped:', error); void shutdown(1); }
 }, 20);
-const heartbeat = setInterval(() => broadcast('status', { runtime: turnClock.status() }), 10000);
+const heartbeat = setInterval(() => broadcast('status', { runtime: turnClock.status(),llmConfig:publicLlmConfig() }), 10000);
 server.listen(port, '127.0.0.1', () => console.log(`Emergent: http://127.0.0.1:${port} (${agents.mode} mode)`));
 server.on('error', error => { console.error(error); void shutdown(1); });
 async function shutdown(code = 0) {
