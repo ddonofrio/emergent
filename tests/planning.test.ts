@@ -1,75 +1,88 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planDecision, needsPlanReview, unboundedMilestone } from '../server/agents/planning';
-import type { AgentPlan } from '../src/core/types';
+import { planDecision, needsPlanReview } from '../server/agents/planning';
+import { milestoneEvidence, type MilestoneOption } from '../server/agents/milestones';
+import { compactResult } from '../server/agents/context';
+import type { AgentPlan, MilestoneCriterion } from '../src/core/types';
 import type { CompletionResult } from '../server/agents/providers';
 
-const plan:AgentPlan={goal:'Inspect the nearby tree.',status:'active',steps:[{task:'Approach the trunk.',status:'completed',evidence:'Arrived beside the trunk.'},{task:'Strike the trunk and observe it.',status:'pending'}],explanation:'I want to see how the tree responds.',createdTurn:1,reviewedTurn:1};
+const milestones:MilestoneOption[]=[{id:'collect_wood',task:'Collect one wood from the world.',criterion:{kind:'collect',subject:'wood'}},{id:'scan',task:'Inspect the surroundings with one scan.',criterion:{kind:'scan'}}];
+const plan:AgentPlan={goal:'Investigate wood.',status:'active',steps:[{task:milestones[0].task,status:'pending',criterion:milestones[0].criterion}],explanation:'I want to try wood.',createdTurn:1,reviewedTurn:1,startedAtSecond:0};
 const answer=(name:string,args:unknown):CompletionResult=>({provider:'stub',providerName:'Stub',model:'stub',content:null,calls:[{id:'plan',type:'function',function:{name,arguments:JSON.stringify(args)}}]});
+const base=()=>({name:'Moss',turn:31,time:30,context:{},milestones,actions:[],signal:AbortSignal.timeout(2000),retryDelayMs:1,waiting(){},save(_plan:AgentPlan){}});
+const recorded=(action:string,feedback:Record<string,unknown>,eventId=10)=>({eventId,atSecond:1,action,args:{},result:compactResult({ok:true,message:'Recorded effect.',feedback})});
 
-test('planning is required initially and after ten decisions, not ten inference requests',()=>{
+test('planning runs initially and after thirty decisions, including legacy plans',()=>{
   assert.equal(needsPlanReview(undefined,1),true);
-  assert.equal(needsPlanReview(plan,10),false);assert.equal(needsPlanReview(plan,11),true);
-  assert.equal(needsPlanReview({...plan,status:'completed'},2),true);
+  assert.equal(needsPlanReview(plan,30),false);assert.equal(needsPlanReview(plan,31),true);
+  const legacy={...plan,steps:[{task:'Collect all nearby wood.',status:'pending' as const}]};
+  assert.equal(needsPlanReview(legacy,2),false);assert.equal(needsPlanReview(legacy,31),true);
 });
 
-test('review rejects a second stalled interval and premature closure, then requires a new abstract goal',async()=>{
-  const source={...structuredClone(plan),stalledReviews:1},original=structuredClone(source),saved:AgentPlan[]=[];let calls=0;
-  const next=await planDecision({name:'Moss',turn:11,plan:source,context:{recent:[]},signal:new AbortController().signal,retryDelayMs:1,waiting(){},save(value){saved.push(structuredClone(value));},
-    async complete(request){
-      assert.deepEqual(source,original,'Only accepted staged plans may change.');
-      const tool=(request.tools[0] as any).function.name;
-      calls++;
-      if(calls===1){assert.equal(tool,'review_plan');return answer(tool,{outcome:'continue',steps:[{status:'completed',evidence:'Arrived beside the trunk.'},{status:'pending',evidence:''}],explanation:'Nothing changed.'});}
-      if(calls===2)return answer(tool,{outcome:'complete',steps:[{status:'completed',evidence:'Arrived.'},{status:'pending',evidence:''}],explanation:'Done.'});
-      if(calls===3)return answer(tool,{outcome:'complete',steps:[{status:'completed',evidence:'Arrived.'},{status:'completed',evidence:'The recorded hit cracked the trunk.'}],explanation:'I reached the tree and saw it crack.'});
-      assert.equal(tool,'set_plan');assert.equal(saved[0].status,'completed');
-      if(calls===4)return answer(tool,{goal:'',steps:[],explanation:'I have no idea.'});
-      return answer(tool,{goal:'Investigate the shore.',steps:['Find the shore.','Examine its terrain.','Test one property of its material.'],explanation:'I want to learn what makes the shore distinct.'});
-    }});
-  assert.equal(calls,5);assert.equal(saved.length,2);assert.equal(next.status,'active');
-  assert.equal(next.goal,'Investigate the shore.');assert.equal(next.reviewedTurn,11);
+test('scanning, holding, cracking, and older successes cannot prove collection',()=>{
+  const actions=[recorded('find_material',{materials:[{material:'wood',target:[1,1,1]}]}),recorded('hold',{}),recorded('hit',{material:'wood',blockOutcome:'cracked'}),{...recorded('hit',{collected:'wood'}),atSecond:0}];
+  assert.deepEqual(milestoneEvidence(plan,actions),[]);
+  const collected=recorded('hit',{material:'wood',blockOutcome:'collected',collected:'wood'},42);
+  assert.deepEqual(milestoneEvidence(plan,[...actions,collected]),[{eventId:42,message:'Recorded effect.'}]);
 });
 
-test('abandoned plans close all unfinished steps before a replacement can be set',async()=>{
-  const saved:AgentPlan[]=[];let calls=0;
-  const next=await planDecision({name:'Moss',turn:11,plan,context:{},signal:new AbortController().signal,retryDelayMs:1,waiting(){},save(value){saved.push(value);},
-    async complete(){
-      if(++calls===1)return answer('review_plan',{outcome:'abandon',steps:[{status:'completed',evidence:'Arrived.'},{status:'abandoned',evidence:'The trunk is no longer reachable.'}],explanation:'I cannot reach the trunk now.'});
-      return answer('set_plan',{goal:'Investigate sand.',steps:['Find sand.','Interact with a sand block.','Observe the result.'],explanation:'Sand is available to investigate.'});
-    }});
-  assert.equal(saved[0].status,'abandoned');assert.equal(saved[0].steps[1].status,'abandoned');assert.equal(next.status,'active');
+test('different milestone kinds require their own actual effects',()=>{
+  const verify=(criterion:MilestoneCriterion,entry:ReturnType<typeof recorded>)=>milestoneEvidence({...plan,steps:[{...plan.steps[0],criterion}]},[entry]).length;
+  assert.equal(verify({kind:'locate',subject:'wood'},recorded('find_material',{materials:[{material:'wood'}]})),1);
+  assert.equal(verify({kind:'place',subject:'wood'},recorded('hold',{})),0);
+  assert.equal(verify({kind:'place',subject:'wood'},recorded('place',{placed:'leaves'})),0);
+  assert.equal(verify({kind:'place',subject:'wood'},recorded('place',{placed:'wood'})),1);
+  assert.equal(verify({kind:'move'},recorded('walk',{outcome:'started',from:[0,1,0],destination:[4,1,0]})),0);
+  assert.equal(verify({kind:'move'},recorded('walk',{from:[0,1,0],to:[3,1,0]})),1);
+  assert.equal(verify({kind:'communicate'},recorded('say',{recipientIds:[]})),0);
+  assert.equal(verify({kind:'communicate'},recorded('say',{recipientIds:['t2']})),1);
+});
+
+test('invented completion is rejected and a second stalled interval closes before replacement',async()=>{
+  let calls=0;const saved:AgentPlan[]=[];
+  const next=await planDecision({...base(),plan:{...plan,stalledReviews:1},save(value){saved.push(value);},async complete(request){
+    if(++calls===1)return answer('review_plan',{outcome:'complete',explanation:'I scanned wood so I collected it.'});
+    if(calls===2){assert.match(JSON.parse((request.messages[1] as {content:string}).content).correction,/Invented evidence/);return answer('review_plan',{outcome:'continue',explanation:'Keep trying.'});}
+    if(calls===3)return answer('review_plan',{outcome:'abandon',explanation:'No collection was recorded.'});
+    return answer('set_plan',{goal:'Inspect the area.',milestone:'scan',explanation:'Try another finite activity.'});
+  }});
+  assert.equal(calls,4);assert.deepEqual(saved.map(item=>item.status),['abandoned','active']);assert.equal(next.steps.length,1);
+});
+
+test('completion evidence is copied from history, not model prose, and cannot carry into the next goal',async()=>{
+  let calls=0;const saved:AgentPlan[]=[];
+  const actions=[recorded('pickup',{collected:'wood'},42)];
+  const next=await planDecision({...base(),plan,actions,save(value){saved.push(value);},async complete(){
+    if(++calls===1)return answer('review_plan',{outcome:'complete',explanation:'Collected many trees.'});
+    return answer('set_plan',{goal:'Collect another wood.',milestone:'collect_wood',explanation:'Try once more.'});
+  }});
+  assert.deepEqual(saved[0].steps[0].evidenceEventIds,[42]);assert.equal(saved[0].steps[0].evidence,'Recorded effect.');
+  assert.deepEqual(milestoneEvidence(next,actions),[]);
+});
+
+test('legacy dependent steps must all close before selecting one replacement milestone',async()=>{
+  let calls=0;const saved:AgentPlan[]=[];
+  const legacy:AgentPlan={...plan,steps:[{task:'Build foundation.',status:'abandoned',evidence:'Blocked.'},{task:'Add finishing touches.',status:'pending'}]};
+  await planDecision({...base(),plan:legacy,save(value){saved.push(value);},async complete(){
+    if(++calls===1)return answer('review_plan',{outcome:'continue',explanation:'Add more leaves.'});
+    if(calls===2)return answer('review_plan',{outcome:'abandon',explanation:'The prerequisite is abandoned.'});
+    return answer('set_plan',{goal:'Look around.',milestone:'scan',explanation:'Inspect before building.'});
+  }});
+  assert.equal(calls,3);assert.ok(saved[0].steps.every(step=>step.status==='abandoned'));assert.deepEqual(saved[0].steps[0],legacy.steps[0]);
+});
+
+test('unknown milestones cannot introduce hidden products or unbounded plans',async()=>{
+  let calls=0;
+  const next=await planDecision({...base(),async complete(){
+    if(++calls===1)return answer('set_plan',{goal:'Discover something.',milestone:'make_hidden_product',explanation:'Guess an effect.'});
+    if(calls===2)return answer('set_plan',{goal:'Collect every wood block.',milestone:'collect_wood',explanation:'Never finish.'});
+    return answer('set_plan',{goal:'Inspect wood.',milestone:'collect_wood',explanation:'Collect one.'});
+  }});
+  assert.equal(calls,3);assert.equal(next.steps.length,1);assert.deepEqual(next.steps[0].criterion,{kind:'collect',subject:'wood'});
 });
 
 test('unavailable planning waits cancellably without inventing a goal',async()=>{
   const controller=new AbortController();let attempts=0,saves=0;
-  await assert.rejects(planDecision({name:'Moss',turn:1,context:{},signal:controller.signal,retryDelayMs:1,save(){saves++;},waiting(){if(++attempts===3)controller.abort();},async complete(){throw new Error('Offline');}}),{name:'AbortError'});
+  await assert.rejects(planDecision({...base(),signal:controller.signal,save(){saves++;},waiting(){if(++attempts===3)controller.abort();},async complete(){throw new Error('Offline');}}),{name:'AbortError'});
   assert.equal(saves,0);assert.equal(attempts,3);
-});
-
-test('planning rejects expanding collections and destinations controlled by another creature',async()=>{
-  const invalid=['Interact with all discovered wood pieces.','Arrive at destination Flint indicates or complete exploration segment.'];
-  for(const task of invalid)assert.equal(unboundedMilestone(task),true);
-  assert.equal(unboundedMilestone('Inspect all three chosen blocks.'),false);
-  let calls=0;
-  const result=await planDecision({name:'Moss',turn:1,context:{},signal:new AbortController().signal,retryDelayMs:1,save(){},waiting(){},async complete(request){
-    const task=invalid[calls++];
-    if(task)return answer('set_plan',{goal:'Investigate wood.',steps:['Find one wood block.','Strike the chosen block.',task],explanation:'Explore the material.'});
-    assert.match(JSON.parse((request.messages[1] as {content:string}).content).correction,/fixed scope/);
-    return answer('set_plan',{goal:'Investigate wood.',steps:['Find one wood block.','Strike the chosen block.','Observe its response.'],explanation:'Learn how one block responds.'});
-  }});
-  assert.equal(calls,3);assert.equal(result.steps[2].task,'Observe its response.');
-});
-
-test('legacy unbounded plans are reviewed immediately and must close before replacement',async()=>{
-  const source:AgentPlan={...structuredClone(plan),steps:[plan.steps[0],{task:'Interact with all discovered wood pieces.',status:'pending'}]},saved:AgentPlan[]=[];
-  assert.equal(needsPlanReview(source,2),true);
-  let calls=0;
-  await planDecision({name:'Moss',turn:2,plan:source,context:{},signal:new AbortController().signal,retryDelayMs:1,save(value){saved.push(value);},waiting(){},async complete(){
-    calls++;
-    if(calls===1)return answer('review_plan',{outcome:'continue',steps:[{status:'completed',evidence:'Rewritten old evidence.'},{status:'pending',evidence:'Keep finding more.'}],explanation:'Continue exploring.'});
-    if(calls===2)return answer('review_plan',{outcome:'abandon',steps:[{status:'completed',evidence:'Rewritten old evidence.'},{status:'abandoned',evidence:'The collection has no fixed finish.'}],explanation:'Choose a bounded activity.'});
-    return answer('set_plan',{goal:'Investigate wood.',steps:['Find one block.','Strike that block.','Observe its response.'],explanation:'Test one object.'});
-  }});
-  assert.equal(calls,3);assert.equal(saved[0].status,'abandoned');assert.deepEqual(saved[0].steps[0],source.steps[0]);
 });

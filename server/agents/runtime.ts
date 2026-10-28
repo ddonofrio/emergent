@@ -2,26 +2,23 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Engine } from '../../src/core/engine';
 import { clone, distance, type Action, type ActionResult, type AgentPlan, type Observation } from '../../src/core/types';
 import { validateJsonSchemaValue } from '../../vendor/deepseek-harness/json-schema';
-import { PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
+import { PLAN_REMINDER_INTERVAL, PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import type { Store } from '../store';
 import { ProviderChain, type ProviderConfig, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
-import { compactResult, compactView, historicalActions, inventoryContext, planningActions, recentActions, relevantKnowledge, rounded } from './context';
+import { compactResult, compactView, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded } from './context';
 import { compactJournal } from './journal-compaction';
 import { needsPlanReview, planDecision } from './planning';
+import { milestoneEvidence, milestoneOptions } from './milestones';
 
 interface Message { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
-interface ActionQueue { calls:ToolCall[];createdTick:number;provider:string;model:string; }
-interface SequenceInterruption { reason:string;pending:{action:string;arguments:unknown}[]; }
 interface Mind extends Memory {
   plan?: AgentPlan;
   turns: number; modelTurns: number; lastResult?: unknown;
   carriedMoves?: number; carryingReminder?: string; emptyHandMoves?: number;
   knownDiscoveries?: string[]; lastEncounters?: Record<string,number>; lastSpoken?: Record<string,number>;
   journalOffer?: string;
-  actionQueue?: ActionQueue;
-  sequenceInterruption?: SequenceInterruption;
 }
 export interface PreparedDecision {
   id: string;
@@ -42,8 +39,6 @@ export interface PreparedDecision {
   stopFollowing?: boolean;
   viewAngle?: number;
   usage?: unknown;
-  queued?: boolean;
-  generatedCalls?: ToolCall[];
 }
 export interface PreparedTurn { tick: number; decisions: PreparedDecision[]; }
 export interface PreparedMovementPrompt {
@@ -64,10 +59,9 @@ export class AgentRuntime {
     this.inference = new ProviderChain(config.providers);
     this.mode = this.inference.enabled ? 'llm' : 'demo';
     for (const entity of engine.entities.filter(e => e.controller === 'agent')) {
-      const saved = store.loadMind<Mind & {cycles?:Message[][]}>(entity.id);
+      const saved = store.loadMind<Mind & {cycles?:Message[][];actionQueue?:unknown;sequenceInterruption?:unknown}>(entity.id);
       if(saved){
-        const {cycles:_legacyCycles,...mind}=saved;
-        if(!Array.isArray(mind.actionQueue?.calls)||!mind.actionQueue.calls.length)delete mind.actionQueue;
+        const {cycles:_legacyCycles,actionQueue:_legacyQueue,sequenceInterruption:_legacyInterruption,...mind}=saved;
         this.minds.set(entity.id,{...mind,notes:saved.notes.slice(-PRIVATE_NOTE_LIMIT),modelTurns:saved.modelTurns??0});
       }else this.minds.set(entity.id,{notes:[],turns:0,modelTurns:0});
       if(engine.discoveries.get(entity.id)?.delete('unsafe-terrain-edge'))engine.event(entity.id,'knowledge-correction','Removed the generic terrain-edge discovery; only the deep-water island boundary is learned.',{removed:'unsafe-terrain-edge'});
@@ -114,10 +108,8 @@ export class AgentRuntime {
     for(const decision of decisions){
       const entity=this.engine.entity(decision.id);
       if(!entity.movementPrompt||decision.tick!==this.engine.tick)continue;
-      const heard=entity.movementPrompt.messages.map(message=>`${message.speakerName} said "${message.word}"`).join('; ');
       if(this.mode==='llm')this.engine.event(decision.id,'movement-decision',decision.content?.slice(0,500)||`Chose ${decision.choice}.`,{choice:decision.choice,provider:decision.provider,model:decision.model,latencyMs:decision.latencyMs,attempts:decision.attempts,usage:decision.usage??null});
       const result=this.engine.resolveMovementPrompt(decision.id,decision.choice);
-      interruptActionQueue(decision.mind,`Speech interrupted the queued sequence while moving: ${heard}.`);
       decision.mind.lastResult=result;this.minds.set(decision.id,decision.mind);
     }
   }
@@ -127,33 +119,26 @@ export class AgentRuntime {
     // Capture every observation before starting requests. Responses cannot change the world.
     const inputs = [...this.minds].sort(([a], [b]) => a.localeCompare(b)).flatMap(([id, mind]) => {
       const entity = this.engine.entity(id);
-      if (!this.engine.active(entity)) { interruptActionQueue(mind,'The queued sequence was cancelled because you were disabled.');report(id, { state: 'disabled' }); return []; }
+      if (!this.engine.active(entity)) { report(id, { state: 'disabled' }); return []; }
       if (entity.motion&&!entity.following) { report(id, { state: 'moving' }); return []; }
-      const observation=this.engine.observe(id),interruption=queueInterruptionReason(mind,observation);
-      if(interruption)interruptActionQueue(mind,interruption);
-      if (this.mode === 'llm' && !mind.actionQueue && this.config.maxTurns !== null && mind.modelTurns >= this.config.maxTurns) { report(id, { state: 'turn limit' }); return []; }
-      return [{ id, mind: clone(mind), observation }];
+      if (this.mode === 'llm' && this.config.maxTurns !== null && mind.modelTurns >= this.config.maxTurns) { report(id, { state: 'turn limit' }); return []; }
+      return [{ id, mind: clone(mind), observation: this.engine.observe(id) }];
     });
     const parallelRequests=this.parallelRequests;
     const prepare=async ({ id, mind, observation }:typeof inputs[number]) => {
       signal.throwIfAborted();
-      const cached = this.store.loadPending<PreparedDecision>(tick, id, this.inference.cacheKey);
-      if (cached && (this.mode==='demo'||cached.mind.plan)) {
+      const cached = this.store.loadPending<PreparedDecision & {queued?:boolean;generatedCalls?:ToolCall[]}>(tick, id, this.inference.cacheKey);
+      if (cached && !cached.queued && (this.mode==='demo'||cached.mind.plan)) {
         cached.mind.notes=cached.mind.notes.slice(-PRIVATE_NOTE_LIMIT);
-        delete (cached.mind as Mind & {cycles?:Message[][]}).cycles;
+        delete (cached.mind as Mind & {cycles?:Message[][];actionQueue?:unknown;sequenceInterruption?:unknown}).cycles;
+        delete (cached.mind as Mind & {actionQueue?:unknown}).actionQueue;
+        delete (cached.mind as Mind & {sequenceInterruption?:unknown}).sequenceInterruption;
+        delete cached.generatedCalls;
+        delete cached.queued;
         report(id, { state: 'ready' }); return cached;
       }
       mind.turns++;
-      let prepared:PreparedDecision;
-      if(this.mode==='demo')prepared=this.demoDecision(id,mind,observation,tick);
-      else if(mind.actionQueue){
-        const previousFocus=planFocus(mind.plan),planEvents=await this.preparePlan(id,mind,observation,signal,report);
-        if(mind.actionQueue&&planFocus(mind.plan)===previousFocus)prepared=this.queuedDecision(id,mind,observation,planEvents);
-        else{
-          interruptActionQueue(mind,'The queued sequence was cancelled because the goal or current milestone changed.');
-          prepared=await this.request(id,mind,observation,signal,report,planEvents);
-        }
-      }else prepared=await this.request(id,mind,observation,signal,report);
+      const prepared=this.mode==='demo'?this.demoDecision(id,mind,observation,tick):await this.request(id,mind,observation,signal,report);
       signal.throwIfAborted();
       // Ready decisions survive outages, pause/resume and process restarts.
       this.store.savePending(tick, id, this.inference.cacheKey, prepared);
@@ -174,23 +159,18 @@ export class AgentRuntime {
     const call={id:'demo-'+tick+'-'+id,type:'function' as const,function:{name,arguments:JSON.stringify(args)}};
     return{id,mind,observation,content:null,calls:[call],latencyMs:0,attempts:0,provider:'demo',model:'demo'};
   }
-  private queuedDecision(id:string,mind:Mind,observation:Observation,planEvents:AgentPlan[]):PreparedDecision {
-    const queue=mind.actionQueue!,[call,...remaining]=queue.calls;
-    if(remaining.length)mind.actionQueue={...queue,calls:remaining};else delete mind.actionQueue;
-    return {id,mind,observation,content:null,calls:[call],queued:true,planEvents,latencyMs:0,attempts:0,provider:queue.provider,model:queue.model};
-  }
-  private async preparePlan(id:string,mind:Mind,observation:Observation,signal:AbortSignal,report:Report) {
-    if(!needsPlanReview(mind.plan,mind.turns))return [];
-    type StagedPlan={plan:AgentPlan;events:AgentPlan[];modelCalls:number};
+  private async preparePlan(id:string,mind:Mind,observation:Observation,signal:AbortSignal,report:Report,alreadyCounted=0) {
+    type StagedPlan={plan:AgentPlan;events:AgentPlan[];modelCalls:number;acknowledged?:boolean};
     const actor=`plan:${id}`,cached=this.store.loadPending<StagedPlan>(observation.tick,actor,this.inference.cacheKey);
+    if(!cached&&!needsPlanReview(mind.plan,mind.turns))return [];
     const staged:StagedPlan=cached??{plan:mind.plan!,events:[],modelCalls:0};
     if(!cached||staged.plan.status!=='active'){
       const capabilities=worldTools(this.engine,id,mind,{following:!!observation.following})
         .filter(tool=>tool.name!=='journal'&&!tool.description.startsWith('Disabled'))
         .map(tool=>tool.name);
-      const context=abstractPlanningContext(this.engine,observation,mind,capabilities,
-        recentActions(this.store.actionEventsAt(observation.tick,id)).slice(-PLAN_REVIEW_INTERVAL));
-      staged.plan=await planDecision({name:observation.self.name,turn:mind.turns,plan:cached?.plan??mind.plan,context,signal,retryDelayMs:this.config.retryDelayMs,
+      const actions=recentActions(this.store.actionEventsAt(observation.tick,id,PLAN_REVIEW_INTERVAL*2),PLAN_REVIEW_INTERVAL*2);
+      const context=abstractPlanningContext(this.engine,observation,mind,capabilities,actions.slice(-PLAN_REVIEW_INTERVAL));
+      staged.plan=await planDecision({name:observation.self.name,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,context,milestones:milestoneOptions(observation),actions,signal,retryDelayMs:this.config.retryDelayMs,
         complete:async(request,abort)=>{
           report(id,{state:'planning',message:'Planning a goal and reviewing steps; world time is held.'});
           const answer=await this.inference.complete(request,abort,(provider)=>report(id,{state:'planning',message:`Planning with ${provider.name}; world time is held.`}));
@@ -200,13 +180,14 @@ export class AgentRuntime {
         save:plan=>{staged.plan=clone(plan);staged.events.push(clone(plan));this.store.savePending(observation.tick,actor,this.inference.cacheKey,staged);},
       });
     }
-    signal.throwIfAborted();mind.plan=clone(staged.plan);mind.modelTurns+=staged.modelCalls;
+    signal.throwIfAborted();mind.plan=clone(staged.plan);mind.modelTurns+=staged.modelCalls-alreadyCounted;
     return staged.events;
   }
-  private async request(id: string, mind: Mind, observation: Observation, signal: AbortSignal, report: Report, priorPlanEvents:AgentPlan[]=[]): Promise<PreparedDecision> {
+  private async request(id: string, mind: Mind, observation: Observation, signal: AbortSignal, report: Report): Promise<PreparedDecision> {
     let following=!!observation.self.following,stopFollowing=false,viewAngle=0,speechMenu=false;
     const started = Date.now();
-    const planEvents=[...priorPlanEvents,...await this.preparePlan(id,mind,observation,signal,report)];
+    const planEvents=await this.preparePlan(id,mind,observation,signal,report);
+    const actions=recentActions(this.store.actionEventsAt(observation.tick,id,PLAN_REVIEW_INTERVAL*2),PLAN_REVIEW_INTERVAL*2);
     const completedGoal=[...planEvents].reverse().find(plan=>plan.status==='completed');
     if(completedGoal)mind.journalOffer=goalLearningOffer(completedGoal);
     const journalCompactions:NonNullable<PreparedDecision['journalCompactions']>=[];
@@ -222,6 +203,16 @@ export class AgentRuntime {
         journalCompactions.push({before:[...notes],after,incoming});return after;
       },
       onJournalEntry:(note:string)=>{journalEntries.push(note);journalHint=undefined;},
+      onFinishGoal:(outcome:'completed'|'abandoned',reason:string)=>{
+        const staged=this.store.loadPending<{modelCalls:number;acknowledged?:boolean}>(observation.tick,`plan:${id}`,this.inference.cacheKey);
+        if(staged?.acknowledged)return {ok:false,message:'You already changed goals in this decision. Choose one physical action before changing again.'};
+        const evidence=milestoneEvidence(mind.plan!,actions);
+        if(outcome==='completed'&&!evidence.length)return {ok:false,message:'No recorded effect proves this milestone yet. Finding is not collecting and holding is not placing. Continue, or abandon with a reason.'};
+        const closed:AgentPlan={...clone(mind.plan!),status:outcome,reviewedTurn:mind.turns,explanation:reason,steps:mind.plan!.steps.map(step=>step.status!=='pending'?step:{...step,status:outcome,evidence:outcome==='completed'?evidence[0].message:reason,...(outcome==='completed'?{evidenceEventIds:evidence.map(item=>item.eventId)}:{})})};
+        this.store.savePending(observation.tick,`plan:${id}`,this.inference.cacheKey,{plan:closed,events:[...planEvents,closed],modelCalls:staged?.modelCalls??0,acknowledged:true});
+        mind.plan=closed;
+        return {ok:true,message:'Goal closed. Choose a new milestone before your next physical action.',planningCalls:staged?.modelCalls??0};
+      },
     };
     let tools = worldTools(this.engine, id, mind,{following,speechMenu,...journalOptions});
     const discoveries=[...(this.engine.discoveries.get(id)??[])];
@@ -240,8 +231,7 @@ export class AgentRuntime {
     for(const notice of observation.encounters)mind.lastEncounters[notice.otherId]=Math.max(mind.lastEncounters[notice.otherId]??0,notice.tick);
     const listeners=observation.interactions.speak.filter(other=>(mind.lastSpoken?.[other.id]??-1)<(mind.lastEncounters![other.id]??0));
     if(listeners.length)hints.push(`You can greet or reply to ${listeners.map(other=>other.name).join(', ')} with say.`);
-    const sequenceInterruption=mind.sequenceInterruption;delete mind.sequenceInterruption;
-    const system = ()=>[this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),'You may return one or more physical tool calls in execution order. They run one at a time on later world turns without asking you again, until all finish or the sequence is interrupted. Use only arguments you can decide now.',!following&&mind.notes.length?'Notes are past records, oldest first; your current plan takes priority. Use journal with replace for outdated notes. Old locations and directions may no longer apply.':undefined,journalHint].filter(Boolean).join('\n');
+    const system = ()=>[this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),'End this decision with exactly one physical action. You may use supporting tools first; call finish_goal alone to close a goal before acting. Prefer choose_action with a current choices ID. Facts and current results override your intentions. If blocked, use the navigation summary before repeating a move.',!following&&mind.notes.length?'Notes are past records, oldest first; your current plan takes priority. Use journal with replace for outdated notes. Old locations and directions may no longer apply.':undefined,journalHint].filter(Boolean).join('\n');
     delete mind.carryingReminder;
     const held=observation.self.inventory?.selected===null||!observation.self.inventory?undefined:observation.self.inventory.stacks[observation.self.inventory.selected];
     let reminder=held&&(mind.carriedMoves??0)>=10?carryingReminder(held.kind,held.contents,observation.interactions.hit.length>0):undefined;
@@ -254,22 +244,28 @@ export class AgentRuntime {
     }
     if(reminder&&held?.kind==='wood')hints.splice(0,hints.length,...hints.filter(hint=>!hint.includes('shapeable')));
     const notes=()=>mind.notes.length?{notes:mind.notes}:{};
-    const recent=historicalActions(recentActions(this.store.actionEventsAt(observation.tick,id))),learned=relevantKnowledge(this.engine,observation);
+    const recent=historicalActions(actions),learned=relevantKnowledge(this.engine,observation);
     const lastResult=(observation.self.lastAction??mind.lastResult) as ActionResult|undefined;
     const heard=observation.heard.length?{heard:observation.heard.map(({tick,direction,distance,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND,directionWhenHeard:direction,distanceWhenHeard:distance}))}:{};
     const {attention,...view}=compactView(observation);
-    const pendingSteps=mind.plan!.steps.filter(step=>step.status==='pending').map(step=>step.task);
-    const completed=mind.plan!.steps.filter(step=>step.status==='completed').map(({task,evidence})=>({task,evidence}));
-    const planContext={goal:mind.plan!.goal,...(completed.length?{completed}:{}),currentStep:pendingSteps[0],...(pendingSteps.length>1?{laterSteps:pendingSteps.slice(1)}:{})};
-    const normalContext=()=>rounded({...(sequenceInterruption?{sequenceInterruption}:{}),...(attention?{attention}:{}),...(lastResult?{lastResult:compactResult(lastResult)}:{}),plan:planContext,...notes(),...view,body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...(learned.length?{learned}:{}),...(recent.length?{recent}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{})});
-    const initial=following?{...(sequenceInterruption?{sequenceInterruption}:{}),following:observation.following,plan:planContext,...heard}:normalContext();
+    const planContext=()=>{
+      const plan=mind.plan!,elapsed=mind.turns-plan.reviewedTurn,reached=milestoneEvidence(plan,actions);
+      return {goal:plan.goal,currentStep:plan.steps.find(step=>step.status==='pending')?.task,reviewInDecisions:Math.max(0,PLAN_REVIEW_INTERVAL-elapsed),
+        ...(plan.steps.length!==1||!plan.steps[0].criterion?{legacyPlan:'This older plan has no verifiable completion criterion. Use finish_goal with abandoned to replace it with one coherent milestone. Do not continue work whose prerequisite was abandoned.'}:{}),
+        ...(reached.length?{milestoneReached:reached,instruction:'This milestone is achieved. Call finish_goal with completed now; do not repeat or enlarge it.'}:{}),
+        ...(elapsed>0&&elapsed%PLAN_REMINDER_INTERVAL===0?{reviewReminder:'Check your goal against recorded progress. Use finish_goal if achieved or no longer useful; otherwise continue. This reminder does not call the planner.'}:{}),
+      };
+    };
+    const terrainChanges=observation.terrainChanges.length?{terrainChanges:observation.terrainChanges.map(notice=>notice.message)}:{};
+    const normalContext=()=>rounded({...(attention?{attention}:{}),...(lastResult?{lastResult:compactResult(lastResult)}:{}),...(viewAngle?compactView(this.engine.observeAt(id,viewAngle)):view),plan:planContext(),progress:progressContext(recent),...notes(),body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...terrainChanges,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...(learned.length?{learned}:{}),...(recent.length?{recent:recent.slice(-4)}:{}),...(reminder?{reminder}:{}),...(hints.length?{hints}:{})});
+    const initial=following?{following:observation.following,plan:planContext(),...heard,...terrainChanges}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
     let attempts=0,supporting=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
     const complete=async()=>{
       while(true){
         signal.throwIfAborted();attempts++;
         report(id,{state:attempts===1?'thinking':'waiting',attempts,message:'Waiting for an inference provider; world time is held.'});
-        try{return await this.inference.complete({messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:10000,reasoning:'minimum'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
+        try{return await this.inference.complete({messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'minimum'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
         catch(error){signal.throwIfAborted();report(id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});}
       }
     };
@@ -285,13 +281,27 @@ export class AgentRuntime {
         else if(tool.physical){
           let errors:string[];
           try{const args=JSON.parse(call.function.arguments);errors=validateJsonSchemaValue(tool.parameters,args);if(!errors.length){const problem=tool.validate?.(args);if(problem)errors.push(problem);}}catch{errors=['Invalid JSON arguments.'];}
-          if(!errors.length){physical.push(call);continue;}
+          if(!errors.length){
+            if(tool.resolveAction){
+              const {action,...args}=tool.resolveAction(JSON.parse(call.function.arguments));
+              physical.push({...call,function:{name:action,arguments:JSON.stringify(args)}});
+            }else physical.push(call);
+            continue;
+          }
           invalidPhysical=true;
           result={ok:false,message:errors.join('; ')};
         }
         else if(tool.name==='look'&&supporting++>=2)result={ok:false,message:'Use at most two look calls before acting. Journal remains freely available.'};
+        else if(tool.name==='finish_goal'&&answer.calls.length!==1)result={ok:false,message:'Call finish_goal alone before choosing your next physical action.'};
         else{try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{signal.throwIfAborted();result={ok:false,message:'Invalid tool arguments.'};}}
         cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
+        if(call.function.name==='finish_goal'&&(result as {ok?:boolean})?.ok){
+          const finished=mind.plan!;
+          planEvents.splice(0,planEvents.length,...await this.preparePlan(id,mind,observation,signal,report,(result as {planningCalls:number}).planningCalls));
+          if(finished.status==='completed'){journalHint=goalLearningOffer(finished);journalOfferUsed=journalHint;}
+          tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
+          cycle.splice(0,cycle.length,{role:'user',content:JSON.stringify(normalContext())});
+        }
         if(call.function.name==='journal'&&(result as {ok?:boolean})?.ok){
           tools=worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,...journalOptions});
         }
@@ -313,14 +323,11 @@ export class AgentRuntime {
           tools=worldTools(this.engine,id,mind,{following:false,viewAngle,speechMenu,...journalOptions});
         }
       }
-      if(invalidPhysical){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'The sequence was not accepted because another physical action was invalid. Submit the complete corrected sequence again.'})});}
-      else if(physical.length){
-        const [current,...queued]=physical;
-        if(queued.length)mind.actionQueue={calls:queued,createdTick:observation.tick,provider,model};else delete mind.actionQueue;
-        return{id,mind,observation,content,calls:[current],generatedCalls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(journalOfferUsed?{journalOffer:journalOfferUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
-      }
+      if(invalidPhysical){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'This response contains an invalid physical action. Choose exactly one valid physical action.'})});}
+      else if(physical.length===1)return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(!following&&reminder?{reminder}:{}),...(!following&&hints.length?{hints}:{}),...(journalOfferUsed?{journalOffer:journalOfferUsed}:{}),...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
+      else if(physical.length>1)for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action per response.'})});
       if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(normalContext())});
-      else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose one or more follow calls, or stop_follow.':'Choose one or more available physical actions.'});
+      else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose exactly one: follow or stop_follow.':'Choose exactly one available physical action.'});
     }
   }
   commit(turn: PreparedTurn) {
@@ -338,10 +345,10 @@ export class AgentRuntime {
       if(mind.plan)this.engine.entity(id).plan=clone(mind.plan);
       if (this.mode === 'llm') {
         for(const plan of decision.planEvents??[])this.engine.event(id,'plan',`${plan.status==='active'?'Plan':plan.status==='completed'?'Goal completed':'Goal abandoned'}: ${plan.goal} ${plan.explanation}`,{plan});
-        if(!decision.queued)this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, attention:observation.following&&!decision.stopFollowing?null:compactView(observation).attention??null, reminder:decision.reminder??null, hints:decision.hints??[], journalOffer:decision.journalOffer??null, turn: mind.turns });
+        this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, attention:observation.following&&!decision.stopFollowing?null:compactView(observation).attention??null, reminder:decision.reminder??null, hints:decision.hints??[], journalOffer:decision.journalOffer??null, turn: mind.turns });
         for(const compaction of decision.journalCompactions??[])this.engine.event(id,'journal-compaction',`Condensed ${compaction.before.length} private notes into ${compaction.after.length} before saving a new note.`,compaction);
-        this.engine.event(id, 'decision', decision.queued?`Executing queued action ${calls[0]?.function.name}.`:content?.slice(0, 500) || `Requested ${(decision.generatedCalls??calls).length} physical tool calls.`, {
-          provider: decision.provider, model: decision.model, latencyMs: decision.latencyMs, attempts: decision.attempts, usage: decision.usage ?? null, queued:decision.queued??false, toolCalls: decision.generatedCalls??calls,
+        this.engine.event(id, 'decision', content?.slice(0, 500) || `Requested one physical action.`, {
+          provider: decision.provider, model: decision.model, latencyMs: decision.latencyMs, attempts: decision.attempts, usage: decision.usage ?? null, toolCalls: calls,
         });
       }
       if(decision.stopFollowing)this.engine.act(id,{action:'stop_follow'});
@@ -362,7 +369,6 @@ export class AgentRuntime {
         this.engine.entity(id).lastAction=result as import('../../src/core/types').ActionResult;
         const held=observation.self.inventory?.selected===null||!observation.self.inventory?undefined:observation.self.inventory.stacks[observation.self.inventory.selected];
         const succeeded=(result as {ok?:boolean})?.ok===true;
-        if(!succeeded)interruptActionQueue(mind,`The queued sequence stopped because ${call.function.name} failed: ${(result as {message?:string})?.message??'the action was rejected'}`);
         if(succeeded){
           if(call.function.name==='say'){
             const recipients=(result as {feedback?:{recipientIds?:string[]}}).feedback?.recipientIds??[];
@@ -377,6 +383,7 @@ export class AgentRuntime {
         }
       }
       this.engine.acknowledgeEncounters(id,observation.encounters??[]);
+      this.engine.acknowledgeTerrainChanges(id,observation.terrainChanges??[]);
       if (this.mode === 'llm') {
         for(const note of decision.journalEntries??mind.notes.filter(note=>!previousMind.notes.includes(note)))this.engine.event(id,'memory',note,{notes:mind.notes});
       }
@@ -384,30 +391,6 @@ export class AgentRuntime {
     }
     this.engine.wakeMovingListenersFromSpeech();
   }
-}
-
-function planFocus(plan:AgentPlan|undefined) {
-  return plan?`${plan.goal}\n${plan.steps.find(step=>step.status==='pending')?.task??''}`:'';
-}
-
-function queueInterruptionReason(mind:Mind,observation:Observation) {
-  const queue=mind.actionQueue;if(!queue)return undefined;
-  const speech=observation.heard.find(message=>message.tick>queue.createdTick);
-  if(speech)return `${speech.from} said "${speech.word}" while actions were queued.`;
-  const result=observation.self.lastAction,outcome=String(result?.feedback?.outcome??'');
-  if(result&&!result.ok)return `The previous action did not complete normally: ${result.message}`;
-  if(['blocked','collision','stopped','rejected'].includes(outcome))return `The previous action ended with ${outcome}: ${result?.message??'no further detail'}`;
-  return undefined;
-}
-
-function interruptActionQueue(mind:Mind,reason:string) {
-  const queue=mind.actionQueue;if(!queue?.calls.length)return;
-  mind.sequenceInterruption={reason,pending:queue.calls.map(call=>({action:call.function.name,arguments:parseArguments(call.function.arguments)}))};
-  delete mind.actionQueue;
-}
-
-function parseArguments(value:string):unknown {
-  try{return JSON.parse(value);}catch{return value;}
 }
 
 function carryingReminder(kind:string,contents?:string,canDig=false) {
@@ -444,7 +427,8 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
     learned:relevantKnowledge(engine,observation),
     notes:mind.notes,
     ...(observation.heard.length?{heard:observation.heard.map(({tick,speakerId:_,direction:__,distance:___,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND}))}:{}),
-    actionsSinceLastReview:planningActions(actions),
+    actionsSinceLastReview:planningActions(actions.slice(-5)),
+    progress:progressContext(actions),
     ...(observation.following?{following:{name:observation.following.name}}:{}),
   });
 }

@@ -6,6 +6,7 @@ import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { compactView } from './context';
 import { impactPoints } from '../../src/core/impact-points';
 import { validCompactedNotes } from './journal-compaction';
+import { actionChoices } from './choices';
 export { impactPoints } from '../../src/core/impact-points';
 
 export interface Memory { notes: string[]; }
@@ -13,11 +14,12 @@ export interface WorldTool {
   name: string; description: string; parameters: JsonSchemaNode;
   physical: boolean;
   validate?(args: unknown): string | undefined;
+  resolveAction?(args: unknown): Action;
   output: { schema: JsonSchemaNode; render(args: unknown, value: unknown): { type: 'text'; text: string }[] };
   execute(args: unknown, exec?: { signal?: AbortSignal }): Promise<unknown>;
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
 }
-export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;speechMenu?:boolean;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void} = {}): WorldTool[] {
+export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;speechMenu?:boolean;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned',reason:string)=>unknown} = {}): WorldTool[] {
   const tool = (name: string, description: string, parameters: JsonSchemaNode, physical: boolean, run: (args: any) => unknown): WorldTool => {
     assertSupportedJsonSchema(parameters);
     return { name, description, parameters, physical, output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
@@ -77,6 +79,20 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
     action('walk','Walk; stop before obstacles or unsafe terrain.',movement(32),'walk'),
     action('turn','Turn your body and forward view.',object({angle:{type:'number',description:'Degrees (-360..360); negative left, positive right.'}},['angle']),'turn'),
   ];
+  if(view){
+    const choices=actionChoices(view);
+    const resolveAction=(args:unknown)=>{
+      const choice=choices.find(choice=>choice.id===(args as {option:string}).option);
+      if(!choice)throw new Error('Choose an option from the current observation.');
+      return structuredClone(choice.action);
+    };
+    const choose=tool('choose_action','Prefer this for checked movement, reachable interactions, and named inventory items. Select one current choices ID; it performs exactly one physical action. Look refreshes the choices.',object({option:{type:'string',enum:choices.map(choice=>choice.id)}},['option']),true,args=>engine.act(id,resolveAction(args)));
+    choose.resolveAction=resolveAction;tools.unshift(choose);
+  }
+  if(options.onFinishGoal)tools.push(tool('finish_goal','Close your current goal early, without a physical action. Complete only when milestoneReached proves it; abandon when blocked or no longer useful. This selects a new goal and resets the 30-decision review clock. Call this alone, before acting.',object({outcome:{type:'string',enum:['completed','abandoned']},reason:{type:'string',description:'Brief reason, 1..300 characters.'}},['outcome','reason']),false,({outcome,reason})=>{
+    if(!reason.trim()||reason.length>300)return {ok:false,message:'Give a reason of 1..300 characters.'};
+    return options.onFinishGoal!(outcome,reason.trim());
+  }));
   const raw=held&&['dirt','grass','sand','stone','wood','leaves'].includes(held.kind);
   if(raw)tools.push(tool('run',`Disabled while you hold ${held!.kind}; store, place, or throw it before running.`,movement(24),false,()=>({ok:false,message:`Run is unavailable while you hold ${held!.kind}. Store, place, or throw it first.`})));
   else tools.push(action('run','Run across clear terrain at twice the speed of walking.',movement(24),'run'));

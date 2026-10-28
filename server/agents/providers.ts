@@ -136,7 +136,7 @@ export class ProviderChain {
     const content = typeof answer.content === 'string' ? answer.content.slice(0, 5000) : null;
     if (content && detectTokenLoop(tokenizeLoopText(content))) throw new Error(`${provider.name} returned repeating output.`);
     const calls = answer.tool_calls ?? [];
-    if (!Array.isArray(calls) || calls.some(call => typeof call.id !== 'string' || call.type !== 'function' || typeof call.function?.name !== 'string' || typeof call.function?.arguments !== 'string')) {
+    if (!Array.isArray(calls) || calls.length > 16 || calls.some(call => typeof call.id !== 'string' || call.type !== 'function' || typeof call.function?.name !== 'string' || typeof call.function?.arguments !== 'string')) {
       throw new Error(`${provider.name} returned invalid tool calls.`);
     }
     return { provider: provider.id, providerName: provider.name, model: payload.model ?? provider.model, content, calls, ...(payload.usage === undefined ? {} : { usage: payload.usage }) };

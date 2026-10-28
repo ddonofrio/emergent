@@ -4,14 +4,16 @@ export interface Material { color: string; solid: boolean; floats: boolean; stac
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }
+export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'communicate'|'shape'; subject?:string; }
 export interface AgentPlan {
   goal: string;
   status: 'active' | 'completed' | 'abandoned';
-  steps: { task: string; status: 'pending' | 'completed' | 'abandoned'; evidence?: string }[];
+  steps: { task: string; status: 'pending' | 'completed' | 'abandoned'; evidence?: string; criterion?:MilestoneCriterion; evidenceEventIds?:number[] }[];
   explanation: string;
   createdTurn: number;
   reviewedTurn: number;
   stalledReviews?: number;
+  startedAtSecond?: number;
 }
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander'; position: Vec3; yaw: number;
@@ -25,11 +27,12 @@ export interface Entity {
   motion?: { kind?: 'walk' | 'run' | 'jump' | 'bounce' | 'scan'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number };
   lastAction?: ActionResult;
 }
-export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; }
+export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; settleAfter?: number; }
 export interface WorldEvent { id: number; tick: number; time: number; day: number; actor: string; type: string; message: string; data?: unknown; }
 export interface EncounterNotice { eventId:number; tick:number; otherId:string; otherName:string; message:string; }
+export interface TerrainNotice { eventId:number; tick:number; target:Vec3; kind:string; message:string; }
 export interface HeardVoice { from: string; word: string; tick: number; speakerId?: string; direction?: string; distance?: number; }
-export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, HeardVoice[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; }
+export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, HeardVoice[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; terrainNotices:Record<string,TerrainNotice[]>; }
 export interface WorldState extends DynamicState { blocks: Block[]; }
 export interface Frame extends DynamicState { changes: [string, string | null][]; events: WorldEvent[]; }
 export interface ModuleManifest {
@@ -59,6 +62,7 @@ export interface Observation {
   following?: { entityId: string; name: string; metres?: number; direction?: string; message: string };
   beingFollowed?: { id: string; name: string; message: string }[];
   encounters: (EncounterNotice & {canSpeakNow:boolean})[];
+  terrainChanges: TerrainNotice[];
   surfaces: { kind: string; count: number; nearest: Vec3 }[];
   navigation: NavigationReport;
   interactions: InteractionTargets;

@@ -4,24 +4,29 @@ import { distance, type Action, type ActionResult, type Observation, type Vec3, 
 import { impactPointName } from '../../src/core/impact-points';
 import { INVENTORY_STACKS, STACK_SIZE } from '../../src/core/inventory';
 import { RECENT_ACTION_LIMIT } from '../../src/core/memory';
+import { actionChoices, directionLabel, localGeometry, type LocalView } from './choices';
 
 // These projections are only for inference. Recorded world state retains full precision.
 export function rounded<T>(value:T):T {
   return JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='number'?Math.round(item*100)/100:item));
 }
-export function compactView(view:Pick<Observation,'description'|'navigation'|'interactions'>&{self?:Observation['self'];viewAngle?:number;bodyYaw?:number}) {
+export function compactView(view:LocalView) {
   const inventory=view.self?.inventory,held=inventory&&inventory.selected!==null?inventory.stacks[inventory.selected]:undefined;
   const blockAction=held?.kind==='shovel'?'dig':'hit';
   const cracked=view.interactions.hit.find(block=>block.cracks>0);
   const attention=cracked?blockAction==='dig'?`The cracked ${cracked.kind} at [${cracked.target.join(',')}] is within reach of your shovel. Use dig to remove it.`:`The ${cracked.kind} block at [${cracked.target.join(',')}] ${cracked.cracks>=2?'has deep cracks and looks close to breaking':'has visible cracks; its surface is changing'}. Try hit on that same block again to see what happens.`:undefined;
-  return rounded({...(attention?{attention}:{}),perception:view.description,...(view.viewAngle===undefined?{}:{viewAngle:view.viewAngle}),
+  const blocked=view.navigation.paths.every(path=>path.clearance<.5);
+  const jumps=view.navigation.paths.filter(path=>path.jump);
+  const navigationSummary=blocked?`Walking is blocked in the three checked directions.${jumps.length?` A checked jump is available ${jumps.map(path=>directionLabel(path.turn)).join(' or ')}. Choose its option to cross the obstacle.`:' Look or turn to inspect another direction, or clear a reachable obstruction.'}`:undefined;
+  return rounded({...(navigationSummary?{navigationSummary}:{}),...(attention?{attention}:{}),choices:actionChoices(view),geometry:localGeometry(view),perception:view.description,...(view.viewAngle===undefined?{}:{viewAngle:view.viewAngle}),
     paths:view.navigation.paths.map(path=>({angle:path.turn,clearMetres:path.clearance,...(path.issue?{obstacle:path.issue.message,...(path.issue.target?{target:path.issue.target}:{})}:{}),...(path.approach?{walk:path.approach}:{}),...(path.jump?{jump:path.jump}:{})})),
     interactions:Object.fromEntries(Object.entries(view.interactions).filter(([,targets])=>targets.length).map(([name,targets])=>[name==='hit'?blockAction:name,targets])),
   });
 }
 export function inventoryContext(observation:Observation) {
   const inventory=observation.self.inventory;
-  return {stackSlots:INVENTORY_STACKS,freeStackSlots:INVENTORY_STACKS-(inventory?.stacks.length??0),maxPerStack:STACK_SIZE,hand:inventory?.selected??null,...(inventory?.stacks.length?{stacks:inventory.stacks.map((stack,index)=>({index,...stack}))}:{})};
+  const held=inventory?.selected==null?undefined:inventory.stacks[inventory.selected];
+  return {stackSlots:INVENTORY_STACKS,freeStackSlots:INVENTORY_STACKS-(inventory?.stacks.length??0),maxPerStack:STACK_SIZE,hand:inventory?.selected??null,holding:held?`${held.kind}${held.contents?` containing ${held.contents}`:''}`:'empty',...(inventory?.stacks.length?{stacks:inventory.stacks.map((stack,index)=>({index,...stack,ref:`hold_${stack.kind}${stack.contents?`_${stack.contents}`:''}`}))}:{})};
 }
 export function relevantKnowledge(engine:Engine,observation:Observation) {
   return [...(engine.discoveries.get(observation.self.id)??[])].filter(fact=>engine.module.relevantKnowledge?.(observation,fact)??true).map(knowledgeDescription);
@@ -42,10 +47,14 @@ export function compactResult(result:ActionResult) {
     ...(typeof feedback.blockOutcome==='string'?{blockOutcome:feedback.blockOutcome}:{}),
     ...(typeof feedback.cracks==='number'?{cracks:feedback.cracks}:{}),
     ...(typeof feedback.collected==='string'?{collected:feedback.collected}:{}),
+    ...(typeof feedback.placed==='string'?{placed:feedback.placed}:{}),
+    ...(typeof feedback.shaped==='string'?{shaped:feedback.shaped}:{}),
+    ...(Array.isArray(feedback.recipientIds)?{heardBy:feedback.recipientIds as string[]}:{}),
+    ...(Array.isArray(feedback.inventoryDelta)?{inventoryDelta:feedback.inventoryDelta as {kind:string;contents?:string;change:number}[]}:{}),
   });
 }
-export function recentActions(events:WorldEvent[]) {
-  const recent:{atSecond:number;action:string;args:Record<string,unknown>;result:ReturnType<typeof compactResult>;reaction?:{choice:string;message:string}}[]=[];
+export function recentActions(events:WorldEvent[],limit=RECENT_ACTION_LIMIT) {
+  const recent:{eventId:number;atSecond:number;action:string;args:Record<string,unknown>;result:ReturnType<typeof compactResult>;reaction?:{choice:string;message:string}}[]=[];
   const moving=new Map<string,typeof recent[number]>();
   for(const event of events){
     const movement=moving.get(event.actor);
@@ -75,7 +84,7 @@ export function recentActions(events:WorldEvent[]) {
     if(name==='stop_follow'&&movement){
       movement.result=compactResult({ok:true,message:'You stopped following.',feedback:{from:movement.result.from,to:data.result?.feedback?.to,outcome:'stopped'}});
     }
-    const entry={atSecond:event.time,action:name as string,args:args as Record<string,unknown>,result:compactResult(data.result??{ok:event.type==='action',message:event.message})};
+    const entry={eventId:event.id,atSecond:event.time,action:name as string,args:args as Record<string,unknown>,result:compactResult(data.result??{ok:event.type==='action',message:event.message})};
     if(name==='strike_held'&&data.action.impact){
       const point=impactPointName(data.action.impact);
       if(point){delete entry.args.impact;entry.args.point=point;}
@@ -83,7 +92,22 @@ export function recentActions(events:WorldEvent[]) {
     recent.push(entry);
     if(entry.result.ok){if(['walk','run','jump','follow','find_material','find_entity'].includes(name))moving.set(event.actor,entry);else moving.delete(event.actor);}
   }
-  return rounded(recent.slice(-RECENT_ACTION_LIMIT));
+  return rounded(recent.slice(-limit));
+}
+
+export function progressContext(actions:ReturnType<typeof historicalActions>) {
+  const window=actions.slice(-10),moves=window.filter(entry=>['walk','run','jump'].includes(entry.action));
+  const blocked=moves.filter(entry=>['rejected','partial','blocked','collision'].includes(entry.result.outcome));
+  const from=moves.find(entry=>entry.result.from)?.result.from,to=moves.findLast(entry=>entry.result.to)?.result.to;
+  const noMovement=blocked.length>=3&&(from&&to?distance(from,to)<1:moves.every(entry=>['rejected','blocked'].includes(entry.result.outcome)));
+  const repeatedScans=window.filter(entry=>entry.action==='find_material'||entry.action==='find_entity').length>=3;
+  return {actionsReviewed:window.length,
+    collected:window.filter(entry=>entry.result.collected).map(entry=>({eventId:entry.eventId,kind:entry.result.collected})),
+    placed:window.filter(entry=>entry.result.ok&&entry.result.placed).map(entry=>({eventId:entry.eventId,kind:entry.result.placed,target:entry.args.target})),
+    inventoryChanges:window.flatMap(entry=>(entry.result.inventoryDelta??[]).map(change=>({eventId:entry.eventId,...change}))),
+    ...(noMovement?{blockage:'At least three movement attempts failed or stopped early, with less than one metre of net progress. Use a checked jump, inspect another direction, or clear a reachable obstruction. You can use finish_goal to abandon an unhelpful goal before its scheduled review.'}:{}),
+    ...(repeatedScans?{scanReminder:'Repeated scans only locate things. They do not collect or place anything.'}:{}),
+  };
 }
 
 // A past bearing describes a past pose, not a direction to follow now.

@@ -1,8 +1,8 @@
 import { Voxels } from './voxels';
-import { TICKS_PER_SECOND } from './time';
+import { TICKS_PER_SECOND, TURN_TICKS } from './time';
 import { exchangeInventory, normalizeInventory } from './inventory';
 import { knowledgeDescription } from './knowledge';
-import { clone, distance, key, type Action, type ActionResult, type Body, type EncounterNotice, type Entity, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
+import { clone, distance, key, type Action, type ActionResult, type Body, type EncounterNotice, type Entity, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
 
 const ok = (message: string): ActionResult => ({ ok: true, message });
 const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
@@ -25,6 +25,7 @@ export class Engine {
   readonly inbox = new Map<string, HeardVoice[]>();
   private contacts=new Map<string,Set<string>>();
   private encounterNotices=new Map<string,EncounterNotice[]>();
+  private terrainNotices=new Map<string,TerrainNotice[]>();
   constructor(readonly module: WorldModule, state?: WorldState) {
     const initial = state ?? module.generate();
     this.voxels = new Voxels(module.manifest.materials, initial.blocks);
@@ -36,6 +37,7 @@ export class Engine {
       for (const [id, messages] of Object.entries(state.inbox ?? {})) this.inbox.set(id, clone(messages));
       for(const [id,contacts] of Object.entries(state.contacts??{}))this.contacts.set(id,new Set(contacts));
       for(const [id,notices] of Object.entries(state.encounterNotices??{}))this.encounterNotices.set(id,clone(notices));
+      for(const [id,notices] of Object.entries(state.terrainNotices??{}))this.terrainNotices.set(id,clone(notices));
     }
     // Old recordings may contain follow chains. Repair them without creating a new replay event during load.
     for(const entity of [...this.entities].sort((a,b)=>a.id.localeCompare(b.id)))if(entity.following&&this.followersOf(entity).length){
@@ -53,7 +55,7 @@ export class Engine {
     if (this.active(entity) === enabled) return false;
     entity.enabled = enabled; delete entity.motion; delete entity.speech; delete entity.following; delete entity.movementPrompt; delete entity.followInvitation;
     if(!enabled)for(const follower of this.entities)if(follower.following?.entityId===id)this.endFollowing(follower,`${entity.name} is no longer available to follow.`);
-    if(!enabled){this.contacts.delete(id);this.encounterNotices.delete(id);for(const contacts of this.contacts.values())contacts.delete(id);for(const [actor,notices] of this.encounterNotices)this.encounterNotices.set(actor,notices.filter(notice=>notice.otherId!==id));}
+    if(!enabled){this.contacts.delete(id);this.encounterNotices.delete(id);this.terrainNotices.delete(id);for(const contacts of this.contacts.values())contacts.delete(id);for(const [actor,notices] of this.encounterNotices)this.encounterNotices.set(actor,notices.filter(notice=>notice.otherId!==id));}
     entity.status = enabled ? 'idle' : 'disabled';
     this.event('world', 'entity-control', `${entity.name} was ${enabled ? 'enabled' : 'disabled'}.`, { entityId: id, enabled });
     return true;
@@ -70,7 +72,7 @@ export class Engine {
     learned.add(knowledge);this.discoveries.set(actor,learned);this.event(actor,'discovery',message,{knowledge,...(data===undefined?{}:{detail:clone(data)})});return true;
   }
   state(): WorldState { return { ...this.dynamic(), blocks: this.voxels.serialize() }; }
-  dynamic() { return clone({ tick: this.tick, time: this.time, entities: this.entities, bodies: this.bodies, lost: this.lost, inbox: Object.fromEntries(this.inbox), blockDamage: Object.fromEntries(this.blockDamage), discoveries:Object.fromEntries([...this.discoveries].map(([actor,learned])=>[actor,[...learned]])),contacts:Object.fromEntries([...this.contacts].map(([actor,contacts])=>[actor,[...contacts]])),encounterNotices:Object.fromEntries(this.encounterNotices) }); }
+  dynamic() { return clone({ tick: this.tick, time: this.time, entities: this.entities, bodies: this.bodies, lost: this.lost, inbox: Object.fromEntries(this.inbox), blockDamage: Object.fromEntries(this.blockDamage), discoveries:Object.fromEntries([...this.discoveries].map(([actor,learned])=>[actor,[...learned]])),contacts:Object.fromEntries([...this.contacts].map(([actor,contacts])=>[actor,[...contacts]])),encounterNotices:Object.fromEntries(this.encounterNotices),terrainNotices:Object.fromEntries(this.terrainNotices) }); }
   frame(): Frame {
     const frame = { ...this.dynamic(), changes: [...this.voxels.changes], events: this.pendingEvents.splice(0) };
     this.voxels.changes.clear(); return frame;
@@ -134,6 +136,7 @@ export class Engine {
     const navigation = this.navigationReport(e);
     const items = clone(this.bodies.filter(b => this.visible(e, b.position)).sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)));
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
+    const obstacles=new Set(navigation.paths.flatMap(path=>path.issue?.target?[key(path.issue.target)]:[]));
     const held=this.held(e),emptyHands=!held,hasShovel=held?.kind==='shovel';
     const followCandidates=[...entities];
     const invited=e.followInvitation&&e.followInvitation.untilTick>=this.tick?this.entities.find(other=>other.id===e.followInvitation!.speakerId&&this.active(other)):undefined;
@@ -142,7 +145,7 @@ export class Engine {
       hit: emptyHands||hasShovel ? blocks.filter(block=>{
         const target=block.slice(0,3) as Vec3;
         return this.blockInReach(e,target)&&!this.standingOn(target)&&(!hasShovel||['sand','dirt','grass'].includes(block[3]));
-      }).sort((a,b)=>(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0)||Number(b[3]==='wood')-Number(a[3]==='wood'))
+      }).sort((a,b)=>(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0)||Number(obstacles.has(key(b.slice(0,3) as Vec3)))-Number(obstacles.has(key(a.slice(0,3) as Vec3)))||Number(b[3]==='wood')-Number(a[3]==='wood'))
         .slice(0,2).map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
       pickup: emptyHands ? items.filter(item=>distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
         .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).slice(0,3).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
@@ -157,6 +160,7 @@ export class Engine {
     return { tick: this.tick, time: this.time, self: clone(e), blocks: [...samples.values()].slice(0,maxBlocks), surfaces: [...surfaces.values()], entities,
       items, heard: clone((this.inbox.get(id) ?? []).filter(m => this.tick - m.tick < 1200)),
       encounters:clone((this.encounterNotices.get(id)??[]).map(notice=>({...notice,canSpeakNow:this.canSpeakTo(e,this.entity(notice.otherId))}))),
+      terrainChanges:clone(this.terrainNotices.get(id)??[]),
       navigation,
       interactions,
       ...(following?{following}:{}),
@@ -166,6 +170,10 @@ export class Engine {
   acknowledgeEncounters(id:string,notices:EncounterNotice[]){
     const seen=new Set(notices.map(notice=>notice.eventId));
     if(seen.size)this.encounterNotices.set(id,(this.encounterNotices.get(id)??[]).filter(notice=>!seen.has(notice.eventId)));
+  }
+  acknowledgeTerrainChanges(id:string,notices:TerrainNotice[]){
+    const seen=new Set(notices.map(notice=>notice.eventId));
+    if(seen.size)this.terrainNotices.set(id,(this.terrainNotices.get(id)??[]).filter(notice=>!seen.has(notice.eventId)));
   }
   private canSpeakTo(speaker:Entity,listener:Entity){return speaker.id!==listener.id&&this.active(speaker)&&this.active(listener)&&distance(this.eye(speaker),this.eye(listener))<=10&&this.voxels.clearLine(this.eye(speaker),this.eye(listener));}
   canFollow(follower:Entity,target:Entity,viewAngle=0){
@@ -243,7 +251,7 @@ export class Engine {
         const jump=path.jump&&Math.abs(turn)<=90?{...path.jump,angle:turn}:undefined;
         return {...path,turn,options:path.options?.filter(option=>option!=='jump'||!!jump),approach:path.approach?{...path.approach,angle:turn}:undefined,jump};
       });
-      return {description:this.describe(entity,observation.surfaces,observation.entities,observation.items,observation.navigation,yaw),self:{...observation.self,yaw},viewAngle:angle,bodyYaw:yaw,navigation:{...observation.navigation,paths},interactions:observation.interactions};
+      return {description:this.describe(entity,observation.surfaces,observation.entities,observation.items,observation.navigation,yaw),self:{...observation.self,yaw},blocks:observation.blocks,viewAngle:angle,bodyYaw:yaw,navigation:{...observation.navigation,paths},interactions:observation.interactions};
     }
     finally { entity.yaw = yaw; }
   }
@@ -426,13 +434,22 @@ export class Engine {
   act(id: string, action: Action): ActionResult {
     const e = this.entity(id);
     if (!this.active(e)) return fail('This entity is disabled.');
-    const previousYaw=e.yaw;
+    const previousYaw=e.yaw,previousInventory=clone(e.inventory?.stacks??[]);
     let result: ActionResult;
     try { result = this.execute(e, action); }
     catch (error) { result = fail(error instanceof Error ? error.message : 'Invalid action.'); }
     if(e.yaw!==previousYaw)result.feedback={...result.feedback,facing:e.yaw};
     if(result.ok&&action.action==='follow')result.feedback={...result.feedback,outcome:'following',from:clone(e.position)};
     if(result.ok&&action.action==='stop_follow')result.feedback={...result.feedback,outcome:'stopped',to:clone(e.position)};
+    if(result.ok){
+      const counts=new Map<string,{kind:string;contents?:string;change:number}>();
+      for(const [stacks,sign] of [[previousInventory,-1],[e.inventory?.stacks??[],1]] as const)for(const stack of stacks){
+        const id=JSON.stringify([stack.kind,stack.contents??null]),entry=counts.get(id)??{kind:stack.kind,...(stack.contents?{contents:stack.contents}:{}),change:0};
+        entry.change+=sign*stack.count;counts.set(id,entry);
+      }
+      const inventoryDelta=[...counts.values()].filter(entry=>entry.change!==0);
+      if(inventoryDelta.length)result.feedback={...result.feedback,inventoryDelta};
+    }
     e.lastAction = clone(result);
     this.event(id, result.ok ? 'action' : 'rejected', result.message, { action, result });
     return result;
@@ -529,7 +546,7 @@ export class Engine {
       const result = this.canHold(e, body.kind,body.contents??(body.water?'water':undefined));
       if (!result.ok) return result;
       this.addInventory(e, body.kind, body.contents??(body.water?'water':undefined),true); this.bodies = this.bodies.filter(b => b !== body);
-      return ok(`Picked up ${body.kind}.`);
+      return {...ok(`Picked up ${body.kind}.`),feedback:{collected:body.kind}};
     }
     if (a.action === 'throw') {
       const held=this.held(e);if(!held)return fail('Your hands are empty.');
@@ -551,9 +568,9 @@ export class Engine {
       if(!this.replaceHeld(e,{kind:made,count}))return fail('No space for the result: at most 10 different stacks, 64 identical items each. Put something down first.');
       const discovery=made==='plank'?'Discovered that a centered strike on the bottom of wood makes five planks, each 0.20 metres thick.':made==='shovel'?'Discovered a wooden shovel that removes sand, dirt, and grass with one strike.':`Discovered how to shape wood into a ${made.replaceAll('_',' ')}.`;
       this.discover(e.id,`wood-shape:${made}`,discovery,{source:'wood',product:made,impact:a.impact,...(a.orientation?{orientation:a.orientation}:{})});
-      if(made==='plank')return ok('The wood splits into five wooden planks, each 0.20 metres thick.');
-      if(made==='door_half_up'||made==='door_half_down')return ok(`The wood changes shape. You now hold the ${made==='door_half_up'?'upper':'lower'} half of a rustic wooden door.`);
-      return ok(`The wood changes shape under the strike. You now hold a wooden ${made.replaceAll('_',' ')}.`);
+      if(made==='plank')return {...ok('The wood splits into five wooden planks, each 0.20 metres thick.'),feedback:{shaped:made}};
+      if(made==='door_half_up'||made==='door_half_down')return {...ok(`The wood changes shape. You now hold the ${made==='door_half_up'?'upper':'lower'} half of a rustic wooden door.`),feedback:{shaped:made}};
+      return {...ok(`The wood changes shape under the strike. You now hold a wooden ${made.replaceAll('_',' ')}.`),feedback:{shaped:made}};
     }
     if(a.action==='join'){
       const inventory=e.inventory;if(!inventory)return fail('You have no wooden door halves to join.');
@@ -586,10 +603,10 @@ export class Engine {
       if(!rawBlock(held.kind)){
         if(!this.voxels.solid([target[0]+.5,target[1]-.01,target[2]+.5]))return fail('A placed object needs solid ground directly beneath it.');
         const placed=held.kind,placedY=placed==='door_half_down'?target[1]+.45:placed==='door_half_up'?target[1]+1.35:placed==='door'?target[1]+.95:target[1]+.09;this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:placed,position:[point[0],placedY,point[2]],velocity:[0,0,0],resting:true});this.consume(e);
-        return ok(`You set the ${placed} down on the ground. It remains a loose object that can be picked up.`);
+        return {...ok(`You set the ${placed} down on the ground. It remains a loose object that can be picked up.`),feedback:{placed,target}};
       }
       if (![[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]].some(d => this.voxels.solid(target.map((v,i) => v + d[i]) as Vec3))) return fail('A placed block needs an adjacent solid block.');
-      const material = held.kind; this.voxels.set(target, material); this.consume(e); return ok(`Placed one ${material}.`);
+      const material = held.kind; this.voxels.set(target, material); this.consume(e); return {...ok(`Placed one ${material}.`),feedback:{placed:material,target}};
     }
     if (a.action === 'hit'||a.action==='dig') {
       const held=this.held(e),usingShovel=held?.kind==='shovel';
@@ -661,7 +678,13 @@ export class Engine {
     if(--stack.count===0){e.inventory.stacks.splice(index,1);e.inventory.selected=e.inventory.stacks.length?Math.min(index,e.inventory.stacks.length-1):null;}
     if(!e.inventory.stacks.length)e.inventory=null;
   }
-  private wakeBodies() { for (const body of this.bodies) body.resting = false; }
+  private wakeBodies() {
+    const settleAfter=this.tick+TURN_TICKS;
+    for (const body of this.bodies) {
+      body.resting=false;
+      if(rawBlock(body.kind)&&!body.contents)body.settleAfter=Math.max(body.settleAfter??0,settleAfter);
+    }
+  }
   private learnMovementIssue(e:Entity,issue:MovementIssue){
     if(e.controller!=='agent')return;
     if(issue.kind==='water')this.discover(e.id,'deep-water-limit',knowledgeDescription('deep-water-limit'),{issue});
@@ -802,9 +825,21 @@ export class Engine {
     }
     const fixed=new Set<string>();
     for(const body of this.bodies){
-      if(!body.resting||!rawBlock(body.kind)||body.contents)continue;
+      if(!body.resting||!rawBlock(body.kind)||body.contents||this.tick<=(body.settleAfter??-1))continue;
       const target:[number,number,number]=[Math.floor(body.position[0]),Math.floor(body.position[1]),Math.floor(body.position[2])];
-      if(this.inside(target)&&!this.voxels.get(target)){this.voxels.set(target,body.kind);fixed.add(body.id);this.event('world','settled',`A ${body.owner?'thrown':'loose'} ${body.kind} settled into the terrain.`,{itemId:body.id,target,kind:body.kind});if(body.owner)this.discover(body.owner,'thrown-blocks-settle','Discovered that thrown blocks settle and become part of the terrain.',{material:body.kind,target});}
+      if(this.inside(target)&&!this.voxels.get(target)&&!this.cellOccupied(target)){
+        this.voxels.set(target,body.kind);fixed.add(body.id);
+        const delayed=body.settleAfter!==undefined;
+        const event=this.event('world','settled',`A ${body.owner?'thrown':'loose'} ${body.kind} settled into the terrain.`,{itemId:body.id,target,kind:body.kind,delayed});
+        if(delayed){
+          const message=`A separate loose ${body.kind} block fell and settled at [${target.join(',')}]. This is a falling block becoming terrain, not a broken block remaining in place.`;
+          for(const observer of this.entities)if(this.active(observer)&&observer.controller==='agent'&&this.visible(observer,center(target),true)){
+            const notices=[...(this.terrainNotices.get(observer.id)??[]),{eventId:event.id,tick:this.tick,target:clone(target),kind:body.kind,message}].slice(-8);
+            this.terrainNotices.set(observer.id,notices);
+          }
+        }
+        if(body.owner)this.discover(body.owner,'thrown-blocks-settle','Discovered that thrown blocks settle and become part of the terrain.',{material:body.kind,target});
+      }
     }
     if(fixed.size)this.bodies=this.bodies.filter(body=>!fixed.has(body.id));
     this.bodies = this.bodies.filter(body => {

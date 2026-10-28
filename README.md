@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open http://127.0.0.1:3000. Without a configured provider the app runs a clearly labelled **scripted demo**, not an LLM experiment. Copy `.env.example` to `.env` and configure OpenRouter and/or a local OpenAI-compatible server. Providers are attempted in declaration order; exhaustion pauses world time and retries indefinitely. Keys remain server-side. Agent decisions are unlimited unless an optional positive `AGENT_MAX_TURNS` is explicitly configured. Context retains complete tool/result groups plus twelve private notes.
+Open http://127.0.0.1:3000. Without a configured provider the app runs a clearly labelled **scripted demo**, not an LLM experiment. Copy `.env.example` to `.env` and configure OpenRouter and/or a local OpenAI-compatible server. Providers are attempted in declaration order; exhaustion pauses world time and retries indefinitely. Keys remain server-side. Agent decisions are unlimited unless an optional positive `AGENT_MAX_TURNS` is explicitly configured. Context keeps ten private notes, four recent actions, and a factual progress summary. Agents can select labeled, checked actions and inspect visible local geometry.
 
 `npm run build` builds production assets; `npm start` serves them. `npm test` checks the physical invariants, replay and an agent loop against a local mock provider.
 
@@ -27,6 +27,8 @@ Open http://127.0.0.1:3000. Without a configured provider the app runs a clearly
 Records live in `data/`; restarting resumes the world. A world day is ten simulation minutes. Change `DATA_DIR` to start a fresh experiment. Export downloads the complete recording as NDJSON. Ready decisions survive pause, provider outages and restart. Unfinished requests are reissued after restart; a partially committed turn finishes its remaining physics before asking again.
 
 Inference has no deadline and consumes no world time. A missing response holds the shared turn indefinitely; connection failures retry with bounded backoff until availability returns. Live status uses a separate telemetry stream, so camera controls and history remain usable. At 1x, replay shows one world second per real second, omitting inference waits. Reaching the recording edge waits for new frames without accumulating time debt or switching to Live. Pause world cancels unfinished requests or finishes the current committed second. Set `WORLD_START_PAUSED=true` to start paused. Old wall-clock recordings require a fresh world; clock versions cannot be mixed.
+
+Goals have one observable milestone. Automatic planning reviews run every 30 agent decisions; a brief reminder appears every five without a separate model request. `finish_goal` lets an agent acknowledge verified completion or abandon an unhelpful goal early, then choose a new milestone and restart the 30-decision clock. Completion uses recorded effects, not model claims. Older multi-step plans can be abandoned through the same tool or replaced at their next scheduled review.
 
 ## MVP boundaries
 

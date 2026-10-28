@@ -11,6 +11,7 @@ import { worldTools } from '../server/agents/tools';
 import { apply } from '../server/agents/harness-plugin';
 import { compactResult, compactView, historicalActions, inventoryContext, planningActions, recentActions, relevantKnowledge, rounded } from '../server/agents/context';
 import { exchangeInventory } from '../src/core/inventory';
+import { TURN_TICKS } from '../src/core/time';
 
 const entity = (id = 't1', x = .5, z = .5): Entity => ({ id, name: id, kind: 'troglodyte', controller: 'agent', position: [x,1,z], height: 2, yaw: 0, inventory: null, color: '#ffffff', status: 'idle' });
 function fixture(blocks: Block[] = [], entities = [entity()]): Engine {
@@ -244,6 +245,33 @@ test('breaking a tree reports its visible collapse along with the collected bloc
   const result=engine.act('t1',{action:'hit',target:[0,1,1]});
   assert.equal(result.ok,true);assert.match(result.message,/pick it up.*unsupported part of the tree falls/);
   assert.equal(engine.bodies.length,2);assert.equal(engine.held(engine.entity('t1'))?.kind,'wood');
+});
+
+test('a fallen tree block stays visibly loose for a full turn before it can replace removed terrain',()=>{
+  const engine=fixture([[0,1,1,'wood']]);
+  engine.entity('t1').position=[.5,1,-.5];
+  engine.bodies.push({id:'fallen-leaves',kind:'leaves',position:[.5,1.3,1.5],velocity:[0,0,0],resting:true});
+  for(let hit=0;hit<3;hit++)assert.equal(engine.act('t1',{action:'hit',target:[0,1,1]}).ok,true);
+  assert.equal(engine.voxels.get([0,1,1]),undefined);
+  assert.ok(engine.bodies.some(body=>body.id==='fallen-leaves'&&body.settleAfter===TURN_TICKS));
+  for(let tick=0;tick<TURN_TICKS;tick++){
+    engine.step();
+    assert.equal(engine.voxels.get([0,1,1]),undefined,'The observer must see the removed cell remain empty for the entire decision turn.');
+  }
+  engine.step();
+  assert.equal(engine.voxels.get([0,1,1]),'leaves');
+  const changes=engine.observe('t1').terrainChanges;
+  assert.equal(changes.length,1);assert.match(changes[0].message,/separate loose leaves block.*not a broken block remaining in place/i);
+  engine.acknowledgeTerrainChanges('t1',changes);
+  assert.deepEqual(engine.observe('t1').terrainChanges,[]);
+});
+
+test('a loose raw block cannot solidify inside an active character',()=>{
+  const engine=fixture();
+  engine.bodies.push({id:'occupied-dirt',kind:'dirt',position:[.5,1.3,.5],velocity:[0,0,0],resting:true});
+  engine.step();
+  assert.equal(engine.voxels.get([0,1,0]),undefined);
+  assert.ok(engine.bodies.some(body=>body.id==='occupied-dirt'));
 });
 
 test('pickup explains visible settling without disclosing a hidden settlement location',()=>{
@@ -844,7 +872,7 @@ test('running is disabled only while a raw block is in hand, not while stored',(
 });
 test('the Harness schema guard validates contextual embodied tools', async () => {
   const engine = fixture([[1,1,0,'wood']],[entity(),entity('t2',.5,-3.5)]), memory = {notes:[] as string[]}, tools=worldTools(engine,'t1',memory);
-  assert.deepEqual(tools.map(t=>t.name),['look','find_material','find_entity','walk','turn','run','jump','hit','wait','journal']);
+  assert.deepEqual(tools.map(t=>t.name),['choose_action','look','find_material','find_entity','walk','turn','run','jump','hit','wait','journal']);
   const scan=tools.find(tool=>tool.name==='find_material')!.invoke({}) as any;
   assert.equal(scan.ok,true);assert.ok(scan.feedback.materials.some((item:any)=>item.material==='wood'&&Number.isFinite(item.bodyRelativeDegrees)&&Number.isFinite(item.directionXZ.x)&&Number.isFinite(item.directionXZ.z)));
   assert.equal(engine.entity('t1').motion?.kind,'scan');for(let tick=0;tick<20;tick++)engine.step();assert.equal(engine.entity('t1').motion,undefined);
