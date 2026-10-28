@@ -5,12 +5,13 @@ import { validateJsonSchemaValue } from '../../vendor/deepseek-harness/json-sche
 import { PLAN_REMINDER_INTERVAL, PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import type { Store } from '../store';
-import { InvalidCompletionError, ProviderChain, type ProviderConfig, type ToolCall } from './providers';
+import { InvalidCompletionError, ProviderChain, type CompletionRequest, type ProviderConfig, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
-import { compactResult, compactView, goalAffordances, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded } from './context';
+import { actionFeedback, compactResult, compactView, decisionView, goalAffordances, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
 import { compactJournal } from './journal-compaction';
 import { needsPlanReview, planDecision } from './planning';
-import { milestoneEvidence, milestoneOptions } from './milestones';
+import { inventoryAmounts, milestoneEvidence, milestoneOptions } from './milestones';
+import { auditedCompletion, InferenceAuditError } from './audit';
 
 interface Message { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
 interface Mind extends Memory {
@@ -19,6 +20,7 @@ interface Mind extends Memory {
   carriedMoves?: number; carryingReminder?: string; emptyHandMoves?: number;
   knownDiscoveries?: string[]; lastEncounters?: Record<string,number>; lastSpoken?: Record<string,number>;
   journalOffer?: string;
+  acknowledgedSpeechTick?: number;
 }
 export interface PreparedDecision {
   id: string;
@@ -76,6 +78,9 @@ export class AgentRuntime {
     }
   }
   persistence(): [string, unknown][] { return [...this.minds]; }
+  private infer(id:string,phase:string,request:CompletionRequest,signal:AbortSignal,onAttempt:(provider:ProviderConfig,index:number)=>void) {
+    return auditedCompletion(this.store,this.engine.tick,id,phase,request,signal,()=>this.inference.complete(request,signal,onAttempt));
+  }
   setParallelRequests(enabled:boolean) { this.store.saveParallelRequests(enabled);this.parallelRequests=enabled; }
   async prepareMovementPrompts(signal:AbortSignal,report:Report):Promise<PreparedMovementPrompt[]> {
     const tick=this.engine.tick,inputs=this.engine.movementPrompts().map(entity=>({id:entity.id,mind:clone(this.minds.get(entity.id)!),prompt:clone(entity.movementPrompt!),motion:clone(entity.motion!)}));
@@ -94,14 +99,14 @@ export class AgentRuntime {
       while(true){
         signal.throwIfAborted();attempts++;report(input.id,{state:attempts===1?'thinking':'waiting',attempts,message:'Considering speech heard during movement; world time is held.'});
         try{
-          const answer=await this.inference.complete({messages,tools,max_tokens:300,reasoning:'minimum'},signal,(candidate,index)=>report(input.id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));
+          const answer=await this.infer(input.id,'movement',{messages,tools,max_tokens:300,reasoning:'minimum'},signal,(candidate,index)=>report(input.id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));
           input.mind.modelTurns++;provider=answer.provider;model=answer.model;usage=answer.usage;content=answer.content;
           const calls=answer.calls.filter(call=>call.function.name==='continue_moving'||call.function.name==='stop_moving');
           if(calls.length===1){
             try{const args=JSON.parse(calls[0].function.arguments);if(args&&typeof args==='object'&&!Array.isArray(args)&&Object.keys(args).length===0)return {id:input.id,tick,choice:calls[0].function.name as 'continue_moving'|'stop_moving',mind:input.mind,content,latencyMs:Date.now()-started,attempts,provider,model,...(usage===undefined?{}:{usage})};}catch{}
           }
           messages.push({role:'assistant',content:answer.content,...(answer.calls.length?{tool_calls:answer.calls}:{})},{role:'user',content:'Choose exactly one: continue_moving or stop_moving, with no arguments.'});
-        }catch(error){signal.throwIfAborted();report(input.id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});}
+        }catch(error){signal.throwIfAborted();if(error instanceof InferenceAuditError)throw error;report(input.id,{state:'waiting',attempts,message:error instanceof Error?error.message:'Inference providers unavailable.'});await delay(Math.min(10000,(this.config.retryDelayMs??1000)*2**Math.min(attempts-1,4)),undefined,{signal});}
       }
     };
     const decisions:PreparedMovementPrompt[]=[];
@@ -167,18 +172,18 @@ export class AgentRuntime {
   private async preparePlan(id:string,mind:Mind,observation:Observation,signal:AbortSignal,report:Report,alreadyCounted=0) {
     type StagedPlan={plan:AgentPlan;events:AgentPlan[];modelCalls:number;acknowledged?:boolean};
     const actor=`plan:${id}`,cached=this.store.loadPending<StagedPlan>(observation.tick,actor,this.inference.cacheKey);
-    if(!cached&&!needsPlanReview(mind.plan,mind.turns))return [];
+    const actions=recentActions(this.store.actionEventsAt(observation.tick,id,PLAN_REVIEW_INTERVAL*2),PLAN_REVIEW_INTERVAL*2);
+    if(!cached&&!needsPlanReview(mind.plan,mind.turns,actions))return [];
     const staged:StagedPlan=cached??{plan:mind.plan!,events:[],modelCalls:0};
-    if(!cached||staged.plan.status!=='active'){
+    if(!cached||staged.plan.status!=='active'||staged.plan.version!==2){
       const capabilities=worldTools(this.engine,id,mind,{following:!!observation.following})
         .filter(tool=>tool.name!=='journal'&&!tool.description.startsWith('Disabled'))
         .map(tool=>tool.name);
-      const actions=recentActions(this.store.actionEventsAt(observation.tick,id,PLAN_REVIEW_INTERVAL*2),PLAN_REVIEW_INTERVAL*2);
       const context=abstractPlanningContext(this.engine,observation,mind,capabilities,actions.slice(-PLAN_REVIEW_INTERVAL));
-      staged.plan=await planDecision({name:observation.self.name,planningInstructions:this.engine.module.manifest.planningInstructions,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,context,milestones:milestoneOptions(observation),actions,signal,retryDelayMs:this.config.retryDelayMs,
+      staged.plan=await planDecision({name:observation.self.name,planningInstructions:this.engine.module.manifest.planningInstructions,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,context,milestones:milestoneOptions(observation),actions,observation,signal,retryDelayMs:this.config.retryDelayMs,
         complete:async(request,abort)=>{
           report(id,{state:'planning',message:'Planning a goal and reviewing steps; world time is held.'});
-          const answer=await this.inference.complete(request,abort,(provider)=>report(id,{state:'planning',message:`Planning with ${provider.name}; world time is held.`}));
+          const answer=await this.infer(id,'planning',request,abort,(provider)=>report(id,{state:'planning',message:`Planning with ${provider.name}; world time is held.`}));
           staged.modelCalls++;return answer;
         },
         waiting:message=>report(id,{state:'waiting',message}),
@@ -199,7 +204,7 @@ export class AgentRuntime {
     const journalOptions={
       compactJournal:async(notes:readonly string[],incoming:string)=>{
         const after=await compactJournal({name:observation.self.name,notes,incoming,signal,retryDelayMs:this.config.retryDelayMs,
-          complete:async(request,abort)=>{const result=await this.inference.complete(request,abort,(candidate)=>report(id,{state:'thinking',message:`Compacting journal with ${candidate.name}; world time is held.`}));mind.modelTurns++;return result;},
+          complete:async(request,abort)=>{const result=await this.infer(id,'journal',request,abort,(candidate)=>report(id,{state:'thinking',message:`Compacting journal with ${candidate.name}; world time is held.`}));mind.modelTurns++;return result;},
           waiting:message=>report(id,{state:'waiting',message})});
         journalCompactions.push({before:[...notes],after,incoming});return after;
       },
@@ -207,9 +212,10 @@ export class AgentRuntime {
       onFinishGoal:(outcome:'completed'|'abandoned',reason:string)=>{
         const staged=this.store.loadPending<{modelCalls:number;acknowledged?:boolean}>(observation.tick,`plan:${id}`,this.inference.cacheKey);
         if(staged?.acknowledged)return {ok:false,message:'You already changed goals in this decision. Choose one physical action before changing again.'};
-        const evidence=milestoneEvidence(mind.plan!,actions);
-        if(outcome==='completed'&&!evidence.length)return {ok:false,message:'No recorded effect proves this milestone yet. Finding is not collecting and holding is not placing. Continue, or abandon with a reason.'};
-        const closed:AgentPlan={...clone(mind.plan!),status:outcome,reviewedTurn:mind.turns,explanation:reason,steps:mind.plan!.steps.map(step=>step.status!=='pending'?step:{...step,status:outcome,evidence:outcome==='completed'?evidence[0].message:reason,...(outcome==='completed'?{evidenceEventIds:evidence.map(item=>item.eventId)}:{})})};
+        const evidence=milestoneEvidence(mind.plan!,actions,observation);
+        if(outcome==='completed'&&!evidence.length)return {ok:false,message:'No recorded effect proves this milestone yet. Hold and store only change your hands; they do not collect items. Success requires the stated goal condition. Continue, or abandon with a reason.'};
+        const closed:AgentPlan={...clone(mind.plan!),intention:undefined,status:outcome,reviewedTurn:mind.turns,explanation:reason,steps:mind.plan!.steps.map(step=>step.status!=='pending'?step:{...step,status:outcome,evidence:outcome==='completed'?evidence[0].message:reason,...(outcome==='completed'?{evidenceEventIds:evidence.map(item=>item.eventId)}:{})})};
+        delete closed.intention;
         this.store.savePending(observation.tick,`plan:${id}`,this.inference.cacheKey,{plan:closed,events:[...planEvents,closed],modelCalls:staged?.modelCalls??0,acknowledged:true});
         mind.plan=closed;
         return {ok:true,message:'Goal closed. Choose a new milestone before your next physical action.',planningCalls:staged?.modelCalls??0};
@@ -218,32 +224,36 @@ export class AgentRuntime {
     const currentCriterion=()=>mind.plan?.steps.find(step=>step.status==='pending')?.criterion;
     const makeTools=()=>{
       const staged=this.store.loadPending<{acknowledged?:boolean}>(observation.tick,`plan:${id}`,this.inference.cacheKey);
-      return worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,goalCriterion:currentCriterion(),...journalOptions,...(staged?.acknowledged?{onFinishGoal:undefined}:{})});
+      return worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,concise:true,goalCriterion:currentCriterion(),...journalOptions,...(staged?.acknowledged?{onFinishGoal:undefined}:{})}).map(tool=>tool.physical?{...tool,parameters:{...tool.parameters,properties:{...tool.parameters.properties,intention:{type:'string' as const}}}}:tool);
     };
     let tools = makeTools();
     const system = ()=>[
-      `CURRENT GOAL: ${mind.plan!.goal}\nREQUIRED RESULT: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??'Close or replace the finished goal.'}\n${milestoneEvidence(mind.plan!,actions).length?'STATUS: Achieved. Call finish_goal with completed now.':'STATUS: Not yet achieved. Choose the next action to achieve this result.'} Available tools and incidental objects are capabilities, not competing tasks.`,
+      `CURRENT GOAL: ${mind.plan!.goal}\n${milestoneEvidence(mind.plan!,actions,observation).length?`STATUS: Achieved. ${following?'Use stop_follow, then ':''}Call finish_goal with completed now.`:'STATUS: Not yet achieved.'}`,
       this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),
-      'End this decision with exactly one physical action. You may use supporting tools first; call finish_goal alone to close a goal before acting. Prefer choose_action with a current choices ID. Facts and current results override your intentions. If blocked, use the navigation summary before repeating a move.',
+      'End this decision with exactly one physical action. You may use supporting tools first; call finish_goal alone before acting. Prefer choose_action for checked options; other physical tools allow custom actions. Optional intention: a next-step reminder of 1..200 characters, replaced each decision and never automatically executed. Current facts override reminders. Past speech is historical; its directions are not current bearings.',
       !following&&mind.notes.length?'Notes are past records, oldest first; your current plan takes priority. Use journal with replace for outdated notes. Old locations and directions may no longer apply.':undefined,
     ].filter(Boolean).join('\n');
     const notes=()=>mind.notes.length?{notes:mind.notes}:{};
     const recent=historicalActions(actions),learned=relevantKnowledge(this.engine,observation);
     const lastResult=(observation.self.lastAction??mind.lastResult) as ActionResult|undefined;
-    const heard=observation.heard.length?{heard:observation.heard.map(({tick,direction,distance,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND,directionWhenHeard:direction,distanceWhenHeard:distance}))}:{};
-    const {attention,...view}=compactView(observation,currentCriterion());
+    const latest=recent.at(-1),lastRecorded=latest&&latest.result.message===lastResult?.message?latest:undefined;
+    const priorActions=lastRecorded?recent.slice(-4,-1):recent.slice(-4);
+    const heard=speechContext(observation,mind.acknowledgedSpeechTick);
     const planContext=()=>{
-      const plan=mind.plan!,elapsed=mind.turns-plan.reviewedTurn,reached=milestoneEvidence(plan,actions);
+      const plan=mind.plan!,elapsed=mind.turns-plan.reviewedTurn,reached=milestoneEvidence(plan,actions,observation);
       const step=plan.steps.find(step=>step.status==='pending');
-      return {goal:plan.goal,currentStep:step?.task,criterion:step?.criterion,...(!following&&!reached.length?goalAffordances(this.engine.observeAt(id,viewAngle),step?.criterion):{}),reviewInDecisions:Math.max(0,PLAN_REVIEW_INTERVAL-elapsed),
+      const amounts=inventoryAmounts(observation.self.inventory);
+      const inventoryChange=[...new Set([...Object.keys(amounts),...Object.keys(plan.inventoryBaseline??{})])].map(key=>({kind:JSON.parse(key)[0],contents:JSON.parse(key)[1],change:(amounts[key]??0)-(plan.inventoryBaseline?.[key]??0)})).filter(item=>item.change!==0);
+      return {goal:plan.goal,criterion:step?.criterion,goalAchieved:!!reached.length,...(step?.criterion?.kind==='collect'?{inventoryChangeSinceGoal:inventoryChange}:{}),...(!following&&!reached.length?goalAffordances(this.engine.observeAt(id,viewAngle),step?.criterion):{}),reviewInDecisions:Math.max(0,PLAN_REVIEW_INTERVAL-elapsed),
         ...(plan.steps.length!==1||!plan.steps[0].criterion?{legacyPlan:'This older plan has no verifiable completion criterion. Use finish_goal with abandoned to replace it with one coherent milestone. Do not continue work whose prerequisite was abandoned.'}:{}),
-        ...(reached.length?{milestoneReached:reached,instruction:'This milestone is achieved. Call finish_goal with completed now; do not repeat or enlarge it.'}:{}),
+        ...(reached.length?{milestoneReached:reached,instruction:following?'This milestone is achieved. Use stop_follow, then finish_goal with completed.':'This milestone is achieved. Call finish_goal with completed now.'}:{}),
         ...(elapsed>0&&elapsed%PLAN_REMINDER_INTERVAL===0?{reviewReminder:'Check your goal against recorded progress. Use finish_goal if achieved or no longer useful; otherwise continue. This reminder does not call the planner.'}:{}),
       };
     };
     const terrainChanges=observation.terrainChanges.length?{terrainChanges:observation.terrainChanges.map(notice=>notice.message)}:{};
-    const normalContext=()=>rounded({plan:planContext(),...(attention?{attention}:{}),...(lastResult?{lastResult:compactResult(lastResult)}:{}),...(viewAngle?compactView(this.engine.observeAt(id,viewAngle),currentCriterion()):view),progress:progressContext(recent),...notes(),body:{position:observation.self.position,yaw:observation.self.yaw},...heard,...terrainChanges,...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),inventory:inventoryContext(observation),...(learned.length?{learned}:{}),...(recent.length?{recent:recent.slice(-4)}:{}),actionRequest:milestoneEvidence(mind.plan!,actions).length?'Call finish_goal with completed now.':`Choose one action toward this required result: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??'Close or replace the finished goal.'}`});
-    const initial=following?{plan:planContext(),following:observation.following,...heard,...terrainChanges}:normalContext();
+    const continuation=()=>mind.plan?.intention?{previousIntention:{text:mind.plan.intention,status:lastResult?.ok===false?'The action failed; reconsider this intention.':'Unverified reminder; check current facts before continuing.'}}:{};
+    const normalContext=()=>rounded({plan:planContext(),...continuation(),...(lastResult?{lastResult:{...(lastRecorded?{action:lastRecorded.action,args:lastRecorded.args}:{}),...actionFeedback(compactResult(lastResult))}}:{}),inventory:inventoryContext(observation),...heard,...terrainChanges,...decisionView(this.engine.observeAt(id,viewAngle),currentCriterion()),body:{position:observation.self.position,yaw:observation.self.yaw},...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),progress:progressContext(recent.filter(entry=>entry.atSecond>(mind.plan?.startedAtSecond??0))),...(learned.length?{learned}:{}),...notes(),...(priorActions.length?{recent:priorActions.map(entry=>({...entry,result:actionFeedback(entry.result)}))}:{})});
+    const initial=following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
     let attempts=0,supportingCalls=0,lookCalls=0,correctionRounds=0,invalidCompletions=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null;
     const stopLoop=(reason:string):never=>{
@@ -254,9 +264,10 @@ export class AgentRuntime {
       while(true){
         signal.throwIfAborted();attempts++;
         report(id,{state:attempts===1?'thinking':'waiting',attempts,message:'Waiting for an inference provider; world time is held.'});
-        try{return await this.inference.complete({messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'minimum'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
+        try{return await this.infer(id,'action',{messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'minimum'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));}
         catch(error){
           signal.throwIfAborted();
+          if(error instanceof InferenceAuditError)throw error;
           if(error instanceof InvalidCompletionError){
             invalidCompletions++;
             if(invalidCompletions>=MAX_CORRECTION_ROUNDS)stopLoop(`The model returned ${invalidCompletions} invalid completions. Last error: ${error.message}`);
@@ -271,6 +282,7 @@ export class AgentRuntime {
       const answer=await complete();signal.throwIfAborted();mind.modelTurns++;provider=answer.provider;model=answer.model;usage=answer.usage;content=answer.content;
       cycle.push({role:'assistant',content:answer.content,...(answer.calls.length?{tool_calls:answer.calls}:{})});
       const physical:ToolCall[]=[];
+      const intentions=new Map<string,string>();
       let invalidPhysical=false;
       let rejectedCall='';
       const wasFollowing=following;
@@ -279,12 +291,14 @@ export class AgentRuntime {
         if(!tool){invalidPhysical=true;result={ok:false,message:'Unknown tool.'};}
         else if(tool.physical){
           let errors:string[];
-          try{const args=JSON.parse(call.function.arguments);errors=validateJsonSchemaValue(tool.parameters,args);if(!errors.length){const problem=tool.validate?.(args);if(problem)errors.push(problem);}}catch{errors=['Invalid JSON arguments.'];}
+          try{const args=JSON.parse(call.function.arguments);errors=validateJsonSchemaValue(tool.parameters,args);if(!errors.length){const problem=tool.validate?.(args);if(problem)errors.push(problem);if(typeof args.intention==='string'&&(!args.intention.trim()||args.intention.length>200))errors.push('Intention must contain 1..200 characters.');}}catch{errors=['Invalid JSON arguments.'];}
           if(!errors.length){
+            const {intention,...parameters}=JSON.parse(call.function.arguments);
+            if(intention)intentions.set(call.id,intention.trim());
             if(tool.resolveAction){
-              const {action,...args}=tool.resolveAction(JSON.parse(call.function.arguments));
+              const {action,...args}=tool.resolveAction(parameters);
               physical.push({...call,function:{name:action,arguments:JSON.stringify(args)}});
-            }else physical.push(call);
+            }else physical.push({...call,function:{name:call.function.name,arguments:JSON.stringify(parameters)}});
             continue;
           }
           invalidPhysical=true;
@@ -295,7 +309,7 @@ export class AgentRuntime {
           if(supportingCalls>MAX_SUPPORTING_CALLS)stopLoop(`The model exceeded the limit of ${MAX_SUPPORTING_CALLS} supporting tool calls without choosing a physical action.`);
           if(tool.name==='look'&&lookCalls++>=2)result={ok:false,message:'Use at most two look calls before acting.'};
           else if(tool.name==='finish_goal'&&answer.calls.length!==1)result={ok:false,message:'Call finish_goal alone before choosing your next physical action.'};
-          else{try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch{signal.throwIfAborted();result={ok:false,message:'Invalid tool arguments.'};}}
+          else{try{result=await tool.invoke(JSON.parse(call.function.arguments),{signal});}catch(error){signal.throwIfAborted();if(error instanceof InferenceAuditError)throw error;result={ok:false,message:'Invalid tool arguments.'};}}
         }
         if((result as {ok?:boolean})?.ok===false)rejectedCall=(result as {message?:string}).message??`${call.function.name} was rejected.`;
         if(call.function.name==='look'&&typeof (result as {viewAngle?:number})?.viewAngle==='number'){
@@ -329,7 +343,11 @@ export class AgentRuntime {
         }
       }
       if(invalidPhysical){for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'This response contains an invalid physical action. Choose exactly one valid physical action.'})});}
-      else if(physical.length===1)return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
+      else if(physical.length===1){
+        const intention=intentions.get(physical[0].id);
+        if(intention)mind.plan!.intention=intention;else delete mind.plan!.intention;
+        return{id,mind,observation,content,calls:physical,planEvents,latencyMs:Date.now()-started,attempts,provider,model,...(journalEntries.length?{journalEntries}:{}),...(journalCompactions.length?{journalCompactions}:{}),...(stopFollowing?{stopFollowing}:{}),...(viewAngle?{viewAngle}:{}),...(usage===undefined?{}:{usage})};
+      }
       else if(physical.length>1)for(const call of physical)cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({ok:false,message:'Choose exactly one physical action per response.'})});
       const correction=invalidPhysical?'The model chose an invalid physical action.':physical.length>1?'The model chose more than one physical action.':rejectedCall||(!answer.calls.length?'The model returned no tool call.':'');
       if(correction&&++correctionRounds>=MAX_CORRECTION_ROUNDS)stopLoop(`${correction} The correction limit of ${MAX_CORRECTION_ROUNDS} was reached.`);
@@ -391,6 +409,7 @@ export class AgentRuntime {
       }
       this.engine.acknowledgeEncounters(id,observation.encounters??[]);
       this.engine.acknowledgeTerrainChanges(id,observation.terrainChanges??[]);
+      mind.acknowledgedSpeechTick=Math.max(mind.acknowledgedSpeechTick??-1,...observation.heard.map(voice=>voice.tick));
       if (this.mode === 'llm') {
         for(const note of decision.journalEntries??mind.notes.filter(note=>!previousMind.notes.includes(note)))this.engine.event(id,'memory',note,{notes:mind.notes});
       }
@@ -423,7 +442,7 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
     inventory:inventoryContext(observation),
     learned:relevantKnowledge(engine,observation),
     notes:mind.notes,
-    ...(observation.heard.length?{heard:observation.heard.map(({tick,speakerId:_,direction:__,distance:___,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND}))}:{}),
+    ...speechContext(observation,mind.acknowledgedSpeechTick),
     actionsSinceLastReview:planningActions(actions.slice(-5)),
     progress:progressContext(actions),
     ...(observation.following?{following:{name:observation.following.name}}:{}),

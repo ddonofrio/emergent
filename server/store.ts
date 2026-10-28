@@ -22,7 +22,8 @@ export class Store {
       CREATE INDEX IF NOT EXISTS events_tick ON events(tick);
       CREATE INDEX IF NOT EXISTS events_actor_type_id ON events(actor, type, id);
       CREATE TABLE IF NOT EXISTS minds (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS pending_decisions (tick INTEGER NOT NULL, actor TEXT NOT NULL, model TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tick, actor));`);
+      CREATE TABLE IF NOT EXISTS pending_decisions (tick INTEGER NOT NULL, actor TEXT NOT NULL, model TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tick, actor));
+      CREATE TABLE IF NOT EXISTS inference_audit (id INTEGER PRIMARY KEY, tick INTEGER NOT NULL, actor TEXT NOT NULL, phase TEXT NOT NULL, version TEXT NOT NULL, request BLOB NOT NULL, response BLOB, status TEXT NOT NULL);`);
     const clock = this.db.prepare('SELECT value FROM meta WHERE key = ?').get('clock') as { value: string } | undefined;
     if ((clock && clock.value !== CLOCK_VERSION) || (!clock && this.hasWorld())) {
       this.db.close(); throw new Error('This recording uses an older clock. Archive it and start a new world.');
@@ -95,6 +96,13 @@ export class Store {
   }
   savePending(tick: number, actor: string, model: string, value: unknown) {
     this.db.prepare('INSERT OR REPLACE INTO pending_decisions VALUES (?, ?, ?, ?)').run(tick, actor, model, JSON.stringify(value));
+  }
+  // Server-side diagnostics, separate from replay and browser event streams. Never pass provider config here.
+  beginInference(tick:number,actor:string,phase:string,version:string,request:unknown) {
+    return this.db.prepare('INSERT INTO inference_audit (tick,actor,phase,version,request,status) VALUES (?,?,?,?,?,?)').run(tick,actor,phase,version,pack(request),'pending').lastInsertRowid;
+  }
+  finishInference(id:number|bigint,response:unknown,status:'completed'|'failed'|'cancelled') {
+    this.db.prepare('UPDATE inference_audit SET response = ?, status = ? WHERE id = ?').run(pack(response),status,id);
   }
   loadParallelRequests() { return (this.db.prepare('SELECT value FROM meta WHERE key = ?').get('parallelRequests') as {value:string}|undefined)?.value !== 'false'; }
   saveParallelRequests(enabled:boolean) { this.db.prepare('INSERT OR REPLACE INTO meta VALUES (?, ?)').run('parallelRequests',String(enabled)); }

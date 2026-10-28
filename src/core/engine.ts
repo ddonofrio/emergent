@@ -251,7 +251,7 @@ export class Engine {
         const jump=path.jump&&Math.abs(turn)<=90?{...path.jump,angle:turn}:undefined;
         return {...path,turn,options:path.options?.filter(option=>option!=='jump'||!!jump),approach:path.approach?{...path.approach,angle:turn}:undefined,jump};
       });
-      return {description:this.describe(entity,observation.surfaces,observation.entities,observation.items,observation.navigation,yaw),self:{...observation.self,yaw},blocks:observation.blocks,viewAngle:angle,bodyYaw:yaw,navigation:{...observation.navigation,paths},interactions:observation.interactions};
+      return {...observation,description:this.describe(entity,observation.surfaces,observation.entities,observation.items,observation.navigation,yaw),self:{...observation.self,yaw},viewAngle:angle,bodyYaw:yaw,navigation:{...observation.navigation,paths}};
     }
     finally { entity.yaw = yaw; }
   }

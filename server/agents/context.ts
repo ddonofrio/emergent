@@ -4,6 +4,7 @@ import { distance, type Action, type ActionResult, type MilestoneCriterion, type
 import { impactPointName } from '../../src/core/impact-points';
 import { INVENTORY_STACKS, STACK_SIZE } from '../../src/core/inventory';
 import { RECENT_ACTION_LIMIT } from '../../src/core/memory';
+import { TICKS_PER_SECOND } from '../../src/core/time';
 import { actionChoices, directionLabel, localGeometry, type LocalView } from './choices';
 
 // These projections are only for inference. Recorded world state retains full precision.
@@ -15,6 +16,7 @@ export function goalAffordances(view:LocalView,criterion:MilestoneCriterion|unde
   if(!criterion)return {matchingReachableChoices:[] as string[]};
   const subject=criterion.subject,choices=actionChoices(view,criterion);
   const matching=choices.filter(({action})=>{
+    if(criterion.kind==='approach'&&action.action==='follow')return action.entityId===criterion.entityId;
     if(['scan','locate'].includes(criterion.kind)&&action.action==='find_material')return true;
     if(criterion.kind==='collect'&&action.action==='pickup')return view.interactions.pickup.some(item=>item.itemId===action.itemId&&item.kind===subject);
     const target='target' in action?action.target:undefined;
@@ -38,6 +40,52 @@ export function compactView(view:LocalView,criterion?:MilestoneCriterion) {
     paths:view.navigation.paths.map(path=>({angle:path.turn,clearMetres:path.clearance,...(path.issue?{obstacle:path.issue.message,...(path.issue.target?{target:path.issue.target}:{})}:{}),...(path.approach?{walk:path.approach}:{}),...(path.jump?{jump:path.jump}:{})})),
     interactions:Object.fromEntries(Object.entries(view.interactions).filter(([,targets])=>targets.length).map(([name,targets])=>[name==='hit'?blockAction:name,targets])),
   });
+}
+
+// One representation per reachable object; prose describes state, never proposes a task.
+export function decisionView(view:Observation,criterion?:MilestoneCriterion) {
+  const compact=compactView(view,criterion);
+  const matching=new Set(goalAffordances(view,criterion).matchingReachableChoices);
+  compact.choices.sort((a,b)=>Number(matching.has(b.id))-Number(matching.has(a.id)));
+  const targets=new Set(compact.choices.flatMap(choice=>'target' in choice.action&&choice.action.target?[choice.action.target.join(',')]:[]));
+  const surfaces=(compact.geometry?.visibleSurfaces??[]).filter(surface=>!targets.has(surface.target.join(',')));
+  for(const surface of surfaces)targets.add(surface.target.join(','));
+  const distant=view.surfaces.filter(surface=>!targets.has(surface.nearest.join(',')))
+    .map(({kind,nearest})=>({material:kind,target:nearest}));
+  const held=inventoryContext(view).holding;
+  return rounded({
+    ...(compact.navigationSummary?{navigationSummary:compact.navigationSummary}:{}),
+    ...(view.interactions.hit.some(block=>block.cracks>0)?{attention:'Cracks below are observed changes on those specific blocks.'}:{}),
+    choices:compact.choices,perception:held==='empty'?'Your hands are empty.':`You hold ${held}.`,
+    ...(compact.viewAngle===undefined?{}:{viewAngle:compact.viewAngle}),paths:compact.paths,
+    surfaces:[...surfaces,...distant],
+    creatures:view.entities.map(entity=>({id:entity.id,name:entity.name,position:entity.position})),
+    interactions:{speak:view.interactions.speak,follow:view.interactions.follow},
+    unknown:'Unseen space is unknown. Bearings are body-relative. Only current sightings give current locations.',
+  });
+}
+
+export function speechContext(observation:Observation,acknowledgedTick=-1) {
+  const fresh=observation.heard.filter(voice=>voice.tick>acknowledgedTick);
+  const past=observation.heard.filter(voice=>voice.tick<=acknowledgedTick);
+  return rounded({
+    ...(fresh.length?{newSpeech:fresh.map(({tick,direction,distance,...voice})=>({...voice,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND,directionWhenHeard:direction,distanceWhenHeard:distance}))}:{}),
+    ...(past.length?{pastSpeech:past.slice(-3).map(({tick,from,word})=>({from,word,secondsAgo:(observation.tick-tick)/TICKS_PER_SECOND}))}:{}),
+  });
+}
+
+export function actionFeedback<T extends {ok:boolean;outcome:string;inventoryDelta?:unknown;collected?:string}>(result:T) {
+  const {ok,outcome,...effects}=result;
+  return {actionAccepted:ok,actionStatus:outcome,...effects,inventoryDelta:result.inventoryDelta??[],collected:result.collected??null};
+}
+
+export function decisionCycle(actions:{eventId:number;action:string;args:Record<string,unknown>;result:{message:string}}[]) {
+  const window=actions.slice(-6);
+  if(window.length<6)return undefined;
+  const signature=(entry:typeof window[number])=>JSON.stringify({action:entry.action,args:entry.args,result:entry.result});
+  // Equal outcomes as well as equal calls: three strikes with growing cracks are progress.
+  if(!window.every((entry,index)=>index<2||signature(entry)===signature(window[index%2])))return undefined;
+  return {eventIds:window.map(entry=>entry.eventId),message:`The same action/result cycle occurred three times: ${window.slice(0,2).map(entry=>`${entry.action}: ${entry.result.message}`).join(' Then ')} Reconsider your method or goal using current facts.`};
 }
 export function inventoryContext(observation:Observation) {
   const inventory=observation.self.inventory;
@@ -117,7 +165,8 @@ export function progressContext(actions:ReturnType<typeof historicalActions>) {
   const from=moves.find(entry=>entry.result.from)?.result.from,to=moves.findLast(entry=>entry.result.to)?.result.to;
   const noMovement=blocked.length>=3&&(from&&to?distance(from,to)<1:moves.every(entry=>['rejected','blocked'].includes(entry.result.outcome)));
   const repeatedScans=window.filter(entry=>entry.action==='find_material'||entry.action==='find_entity').length>=3;
-  return {actionsReviewed:window.length,
+  const cycle=decisionCycle(actions);
+  return {actionsReviewed:window.length,...(cycle?{cycle}:{}),
     collected:window.filter(entry=>entry.result.collected).map(entry=>({eventId:entry.eventId,kind:entry.result.collected})),
     placed:window.filter(entry=>entry.result.ok&&entry.result.placed).map(entry=>({eventId:entry.eventId,kind:entry.result.placed,target:entry.args.target})),
     inventoryChanges:window.flatMap(entry=>(entry.result.inventoryDelta??[]).map(change=>({eventId:entry.eventId,...change}))),
@@ -141,7 +190,7 @@ export function planningActions(actions:ReturnType<typeof recentActions>) {
   return historicalActions(actions).map(({atSecond,action,args,result,reaction})=>({
     atSecond,action,
     ...(['target','itemId','entityId','point','stack'].some(key=>args[key]!==undefined)?{object:Object.fromEntries(['target','itemId','entityId','point','stack'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]))}:{}),
-    result:{ok:result.ok,outcome:result.outcome,message:result.message,
+    result:{actionAccepted:result.ok,actionStatus:result.outcome,message:result.message,
       ...(result.material?{material:result.material}:{}),...(result.blockOutcome?{blockOutcome:result.blockOutcome}:{}),
       ...(result.materials?{materials:result.materials}:{}),...(result.entities?{entities:result.entities}:{}),
     },...(reaction?{reaction}:{}),

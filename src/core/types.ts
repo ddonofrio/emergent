@@ -4,8 +4,9 @@ export interface Material { color: string; solid: boolean; floats: boolean; stac
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }
-export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'communicate'|'shape'; subject?:string; }
+export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'approach'|'communicate'|'shape'; subject?:string; entityId?:string; }
 export interface AgentPlan {
+  version?: 2;
   goal: string;
   status: 'active' | 'completed' | 'abandoned';
   steps: { task: string; status: 'pending' | 'completed' | 'abandoned'; evidence?: string; criterion?:MilestoneCriterion; evidenceEventIds?:number[] }[];
@@ -14,6 +15,9 @@ export interface AgentPlan {
   reviewedTurn: number;
   stalledReviews?: number;
   startedAtSecond?: number;
+  inventoryBaseline?: Record<string,number>;
+  reviewedEventId?: number;
+  intention?: string;
 }
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander'; position: Vec3; yaw: number;

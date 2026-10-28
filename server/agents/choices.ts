@@ -36,9 +36,10 @@ export function actionChoices(view: LocalView, criterion?:MilestoneCriterion): A
   for(const item of view.interactions.pickup)choices.push({id:`pickup_${item.itemId}`,label:`Pick up loose ${item.kind} (${item.metres} m away).`,action:{action:'pickup',itemId:item.itemId}});
   for(const [index,stack] of inventory?.stacks.entries()??[]){
     if(index===inventory?.selected)continue;
-    choices.push({id:`hold_${stack.kind}${stack.contents?`_${stack.contents}`:''}`,label:`Hold ${stack.kind}${stack.contents?` containing ${stack.contents}`:''} (${stack.count} in inventory).`,action:{action:'hold',stack:index}});
+    choices.push({id:`hold_${stack.kind}${stack.contents?`_${stack.contents}`:''}`,label:`Hold ${stack.kind}${stack.contents?` containing ${stack.contents}`:''} already owned (${stack.count} in inventory). Collects nothing; quantity unchanged.`,action:{action:'hold',stack:index}});
   }
-  if(held)choices.push({id:'free_hands',label:`Store ${held.kind} to free your hands; keep everything in inventory.`,action:{action:'store'}});
+  if(held)choices.push({id:'free_hands',label:`Store ${held.kind} to free your hands. Collects nothing; quantity unchanged.`,action:{action:'store'}});
+  for(const entity of view.interactions.follow)choices.push({id:`follow_${entity.id}`,label:`Follow ${entity.name} (${entity.metres} m away).`,action:{action:'follow',entityId:entity.id}});
   return choices;
 }
 

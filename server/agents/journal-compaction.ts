@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { InferenceAuditError } from './audit';
 import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import type { CompletionRequest, CompletionResult } from './providers';
 
@@ -41,6 +42,7 @@ export async function compactJournal(options: {
       options.waiting('Waiting for a valid journal compaction; original notes are retained.');
     } catch (error) {
       signal.throwIfAborted();
+      if(error instanceof InferenceAuditError)throw error;
       options.waiting(error instanceof Error ? error.message : 'Waiting for journal compaction inference.');
     }
     await delay(options.retryDelayMs ?? 1000, undefined, { signal });

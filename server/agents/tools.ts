@@ -3,7 +3,7 @@ import type { Engine } from '../../src/core/engine';
 import type { Action, MilestoneCriterion } from '../../src/core/types';
 import { knowledgeDescription } from '../../src/core/knowledge';
 import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
-import { compactView } from './context';
+import { compactView, decisionView } from './context';
 import { impactPoints } from '../../src/core/impact-points';
 import { validCompactedNotes } from './journal-compaction';
 import { actionChoices } from './choices';
@@ -19,7 +19,7 @@ export interface WorldTool {
   execute(args: unknown, exec?: { signal?: AbortSignal }): Promise<unknown>;
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
 }
-export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;speechMenu?:boolean;goalCriterion?:MilestoneCriterion;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned',reason:string)=>unknown} = {}): WorldTool[] {
+export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;concise?:boolean;speechMenu?:boolean;goalCriterion?:MilestoneCriterion;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned',reason:string)=>unknown} = {}): WorldTool[] {
   const tool = (name: string, description: string, parameters: JsonSchemaNode, physical: boolean, run: (args: any) => unknown): WorldTool => {
     assertSupportedJsonSchema(parameters);
     return { name, description, parameters, physical, output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
@@ -73,7 +73,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   ];
   const movement=(maximum:number)=>object({distance:{type:'number',description:`Metres: greater than 0, at most ${maximum}.`},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right.'}},['distance']);
   const tools:WorldTool[]=[
-    tool('look','Look without turning your body or spending time.',object({angle:{type:'number',description:'Body-relative viewing angle (-180..180 degrees).'}}),false,({angle=0}:{angle?:number})=>compactView(engine.observeAt(id,Math.max(-180,Math.min(180,angle))),options.goalCriterion)),
+    tool('look','Look without turning your body or spending time.',object({angle:{type:'number',description:'Body-relative viewing angle (-180..180 degrees).'}}),false,({angle=0}:{angle?:number})=>(options.concise?decisionView:compactView)(engine.observeAt(id,Math.max(-180,Math.min(180,angle))),options.goalCriterion)),
     action('find_material','Scan 360 degrees for visible materials. Returns the nearest block target, distance to its centre and body-relative angle per material; one world second.',noArgs,'find_material'),
     action('find_entity','Scan 360 degrees for visible living beings within 18 metres. Returns each ID, name, kind, distance and body-relative angle; one world second.',noArgs,'find_entity'),
     action('walk','Walk; stop before obstacles or unsafe terrain.',movement(32),'walk'),
@@ -119,13 +119,13 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
       if(held.contents){if(!availableOnly||targets!.empty.length)tools.push(action('empty','Empty one held bucket at target coordinates; hold the empty bucket. Matching contents stack together.',target,'empty'));}
       else if(!availableOnly||targets!.fill.length)tools.push(action('fill','Fill one held bucket from reachable water, dirt, or sand; hold the filled bucket. Matching contents stack together.',target,'fill'));
     }
-    tools.push(action('store','Free your hands; inventory space stays unchanged.',noArgs,'store'));
+    tools.push(action('store','Free your hands. Item quantities stay unchanged; this does not collect anything.',noArgs,'store'));
   }
   if(held?.kind==='shovel'&&(!availableOnly||targets!.hit.length))tools.push(action('dig','Remove reachable sand, dirt, or grass with one shovel strike; keep holding the shovel.',target,'dig'));
   if(entity.inventory?.stacks.some(stack=>stack.kind==='door_half_up'&&stack.count>0)&&entity.inventory.stacks.some(stack=>stack.kind==='door_half_down'&&stack.count>0))
     tools.push(action('join','Join one upper and one lower wooden half into a rustic door.',noArgs,'join'));
   const stacks=entity.inventory?.stacks.flatMap((_,index)=>index!==entity.inventory!.selected?[index]:[])??[];
-  if(stacks.length||(!availableOnly&&entity.inventory?.stacks.length))tools.push(action('hold','Take an inventory stack into your hands.',object({stack:choice(stacks,'integer')},['stack']),'hold'));
+  if(stacks.length||(!availableOnly&&entity.inventory?.stacks.length))tools.push(action('hold','Take an already owned inventory stack into your hands. This does not collect anything.',object({stack:choice(stacks,'integer')},['stack']),'hold'));
   if(!availableOnly||targets!.follow.length)tools.push(tool('follow','Start following a visible creature within 20 metres and stay one metre away. Later turns offer only follow and stop_follow until you stop.',object({entityId:choice(targets?.follow.map(other=>other.id)??[])},['entityId']),true,({entityId}:{entityId:string})=>engine.act(id,{action:'follow',entityId,angle:options.viewAngle??0})));
   if(!availableOnly||targets!.speak.length)tools.push(tool('say','Open your available communication ideas. This takes no world time.',noArgs,false,()=>({ok:true,message:'Choose one idea to communicate, or use do_not_reply if you do not want to answer.',options:engine.module.manifest.vocabulary})));
   tools.push(action('wait','Wait and watch.',noArgs,'wait'));
@@ -141,5 +141,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
       return undefined;
     };
   }
-  return tools;
+  // These enum-only actions are fully represented by current choices. Coordinate and movement
+  // tools remain available for actions beyond the small checked menu.
+  return options.concise&&view?tools.filter(tool=>!['hold','store','follow','pickup'].includes(tool.name)||!tool.physical):tools;
 }
