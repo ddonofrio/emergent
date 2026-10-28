@@ -1,7 +1,7 @@
 import type { Store } from '../store';
 import type { CompletionRequest, CompletionResult } from './providers';
 
-export const PROMPT_VERSION='decision-contract-v2';
+export const PROMPT_VERSION='self-authored-goals-v3';
 export class InferenceAuditError extends Error {}
 
 function persist<T>(write:()=>T):T {

@@ -1,5 +1,7 @@
 # Decision contract smoke evaluation
 
+Historical evaluation of the version-2 milestone contract. These results do not evaluate the current version-3 self-authored goals or establish diversity between fresh runs.
+
 On 2026-10-28, the configured local `omnicoder-9b` ran two repetitions of four isolated scenarios against baseline commit `92c87d1` and the revised decision contract. Each trial used a fresh in-memory world and at most six shared world seconds. No application server or saved world was changed. The model chose all evaluated actions; fixture setup and success checks were deterministic.
 
 | Scenario and externally checked outcome | Baseline | Revised |

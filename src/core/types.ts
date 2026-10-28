@@ -6,10 +6,10 @@ export interface Inventory { stacks: Stack[]; selected: number | null; capacity:
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }
 export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'approach'|'communicate'|'shape'; subject?:string; entityId?:string; }
 export interface AgentPlan {
-  version?: 2;
+  version?: 2 | 3;
   goal: string;
   status: 'active' | 'completed' | 'abandoned';
-  steps: { task: string; status: 'pending' | 'completed' | 'abandoned'; evidence?: string; criterion?:MilestoneCriterion; evidenceEventIds?:number[] }[];
+  steps: { task: string; status: 'pending' | 'completed' | 'abandoned'; evidence?: string; criterion?:MilestoneCriterion; evidenceEventIds?:number[]; assessment?:'agent' }[];
   explanation: string;
   createdTurn: number;
   reviewedTurn: number;
@@ -81,7 +81,6 @@ export interface WorldModule {
   movementSpeed?(entity:Entity,feet:Vec3,speed:number):number;
   describeObstacle?(issue: MovementIssue): string | undefined;
   encounterMessage?(observer:Entity,other:Entity,metres:number):string|undefined;
-  agentHints?(observation:Observation,learned:ReadonlySet<string>):string[];
   relevantKnowledge?(observation:Observation,knowledge:string):boolean;
   respondToSpeech?(listener:Entity,speaker:Entity,word:string):string|undefined;
 }

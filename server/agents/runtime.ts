@@ -10,7 +10,7 @@ import { worldTools, type Memory } from './tools';
 import { actionFeedback, compactResult, compactView, decisionView, goalAffordances, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
 import { compactJournal } from './journal-compaction';
 import { needsPlanReview, planDecision } from './planning';
-import { inventoryAmounts, milestoneEvidence, milestoneOptions } from './milestones';
+import { inventoryAmounts, milestoneEvidence, goalEvidence, referencedGoalEvidence } from './milestones';
 import { auditedCompletion, InferenceAuditError } from './audit';
 
 interface Message { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
@@ -173,12 +173,12 @@ export class AgentRuntime {
     const actions=recentActions(this.store.actionEventsAt(observation.tick,id,PLAN_REVIEW_INTERVAL*2),PLAN_REVIEW_INTERVAL*2);
     if(!cached&&!needsPlanReview(mind.plan,mind.turns,actions))return [];
     const staged:StagedPlan=cached??{plan:mind.plan!,events:[],modelCalls:0};
-    if(!cached||staged.plan.status!=='active'||staged.plan.version!==2){
+    if(!cached||staged.plan.status!=='active'||![2,3].includes(staged.plan.version??0)){
       const capabilities=worldTools(this.engine,id,mind,{following:!!observation.following})
         .filter(tool=>tool.name!=='journal'&&!tool.description.startsWith('Disabled'))
         .map(tool=>tool.name);
       const context=abstractPlanningContext(this.engine,observation,mind,capabilities,actions.slice(-PLAN_REVIEW_INTERVAL));
-      staged.plan=await planDecision({name:observation.self.name,planningInstructions:this.engine.module.manifest.planningInstructions,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,context,milestones:milestoneOptions(observation),actions,observation,signal,retryDelayMs:this.config.retryDelayMs,
+      staged.plan=await planDecision({name:observation.self.name,planningInstructions:this.engine.module.manifest.planningInstructions,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,context,actions,observation,signal,retryDelayMs:this.config.retryDelayMs,
         complete:async(request,abort)=>{
           report(id,{state:'planning',message:'Planning a goal and reviewing steps; world time is held.'});
           const answer=await this.infer(id,'planning',request,abort,(provider)=>report(id,{state:'planning',message:`Planning with ${provider.name}; world time is held.`}));
@@ -207,16 +207,17 @@ export class AgentRuntime {
         journalCompactions.push({before:[...notes],after,incoming});return after;
       },
       onJournalEntry:(note:string)=>{journalEntries.push(note);},
-      onFinishGoal:(outcome:'completed'|'abandoned',reason:string)=>{
+      onFinishGoal:(outcome:'completed'|'abandoned',reason:string,evidenceEventIds?:number[])=>{
         const staged=this.store.loadPending<{modelCalls:number;acknowledged?:boolean}>(observation.tick,`plan:${id}`,this.inference.cacheKey);
         if(staged?.acknowledged)return {ok:false,message:'You already changed goals in this decision. Choose one physical action before changing again.'};
-        const evidence=milestoneEvidence(mind.plan!,actions,observation);
-        if(outcome==='completed'&&!evidence.length)return {ok:false,message:'No recorded effect proves this milestone yet. Hold and store only change your hands; they do not collect items. Success requires the stated goal condition. Continue, or abandon with a reason.'};
-        const closed:AgentPlan={...clone(mind.plan!),intention:undefined,status:outcome,reviewedTurn:mind.turns,explanation:reason,steps:mind.plan!.steps.map(step=>step.status!=='pending'?step:{...step,status:outcome,evidence:outcome==='completed'?evidence[0].message:reason,...(outcome==='completed'?{evidenceEventIds:evidence.map(item=>item.eventId)}:{})})};
+        const free=mind.plan!.version===3;
+        const evidence=free?referencedGoalEvidence(mind.plan!,actions,evidenceEventIds):milestoneEvidence(mind.plan!,actions,observation);
+        if(outcome==='completed'&&!evidence?.length)return {ok:false,message:free?'Cite one or more event IDs from plan.availableEvidence and explain how their actual outcomes satisfy your success condition. No recorded evidence was cited.':'No recorded effect proves this milestone yet. Hold and store only change your hands; they do not collect items. Success requires the stated goal condition. Continue, or abandon with a reason.'};
+        const closed:AgentPlan={...clone(mind.plan!),intention:undefined,status:outcome,reviewedTurn:mind.turns,explanation:reason,steps:mind.plan!.steps.map(step=>step.status!=='pending'?step:{...step,status:outcome,evidence:free?reason:outcome==='completed'?evidence![0].message:reason,...(outcome==='completed'?{evidenceEventIds:evidence!.map(item=>item.eventId),...(free?{assessment:'agent' as const}:{})}:{})})};
         delete closed.intention;
         this.store.savePending(observation.tick,`plan:${id}`,this.inference.cacheKey,{plan:closed,events:[...planEvents,closed],modelCalls:staged?.modelCalls??0,acknowledged:true});
         mind.plan=closed;
-        return {ok:true,message:'Goal closed. Choose a new milestone before your next physical action.',planningCalls:staged?.modelCalls??0};
+        return {ok:true,message:'Goal closed. Write your next goal before your next physical action.',planningCalls:staged?.modelCalls??0};
       },
     };
     const currentCriterion=()=>mind.plan?.steps.find(step=>step.status==='pending')?.criterion;
@@ -225,7 +226,7 @@ export class AgentRuntime {
       return worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,concise:true,goalCriterion:currentCriterion(),...journalOptions,...(staged?.acknowledged?{onFinishGoal:undefined}:{})}).map(tool=>tool.physical?{...tool,parameters:{...tool.parameters,properties:{...tool.parameters.properties,intention:{type:'string' as const}}}}:tool);
     };
     const system = ()=>[
-      `CURRENT GOAL: ${mind.plan!.goal}\n${milestoneEvidence(mind.plan!,actions,observation).length?`STATUS: Achieved. ${following?'Use stop_follow, then ':''}Call finish_goal with completed now.`:'STATUS: Not yet achieved.'}`,
+      `CURRENT GOAL: ${mind.plan!.goal}\nSUCCESS CONDITION: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??mind.plan!.goal}\n${mind.plan!.version===3?'Assess progress using current observations and recorded outcomes.':milestoneEvidence(mind.plan!,actions,observation).length?`STATUS: Achieved. ${following?'Use stop_follow, then ':''}Call finish_goal with completed now.`:'STATUS: Not yet achieved.'}`,
       this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),
       'End this decision with exactly one physical action. You may use supporting tools first; call finish_goal alone before acting. Prefer choose_action for checked options; other physical tools allow custom actions. Optional intention: a next-step reminder of 1..200 characters, replaced each decision and never automatically executed. Current facts override reminders. Past speech is historical; its directions are not current bearings.',
       lookCalls>=2?'The look limit is exhausted for this decision. Choose from the current observation and available tools.':undefined,
@@ -243,8 +244,8 @@ export class AgentRuntime {
       const step=plan.steps.find(step=>step.status==='pending');
       const amounts=inventoryAmounts(observation.self.inventory);
       const inventoryChange=[...new Set([...Object.keys(amounts),...Object.keys(plan.inventoryBaseline??{})])].map(key=>({kind:JSON.parse(key)[0],contents:JSON.parse(key)[1],change:(amounts[key]??0)-(plan.inventoryBaseline?.[key]??0)})).filter(item=>item.change!==0);
-      return {goal:plan.goal,criterion:step?.criterion,goalAchieved:!!reached.length,...(step?.criterion?.kind==='collect'?{inventoryChangeSinceGoal:inventoryChange}:{}),...(!following&&!reached.length?goalAffordances(this.engine.observeAt(id,viewAngle),step?.criterion):{}),reviewInDecisions:Math.max(0,PLAN_REVIEW_INTERVAL-elapsed),
-        ...(plan.steps.length!==1||!plan.steps[0].criterion?{legacyPlan:'This older plan has no verifiable completion criterion. Use finish_goal with abandoned to replace it with one coherent milestone. Do not continue work whose prerequisite was abandoned.'}:{}),
+      return {goal:plan.goal,successCondition:step?.task,...(plan.version===3?{assessment:'Completion is your assessment. Cite relevant availableEvidence in finish_goal; an accepted action alone does not establish success.',availableEvidence:goalEvidence(plan,actions).slice(-10),inventoryChangeSinceGoal:inventoryChange}:{criterion:step?.criterion,goalAchieved:!!reached.length,...(step?.criterion?.kind==='collect'?{inventoryChangeSinceGoal:inventoryChange}:{}),...(!following&&!reached.length?goalAffordances(this.engine.observeAt(id,viewAngle),step?.criterion):{})}),reviewInDecisions:Math.max(0,PLAN_REVIEW_INTERVAL-elapsed),
+        ...(plan.version!==3&&(plan.steps.length!==1||!plan.steps[0].criterion)?{legacyPlan:'This older plan has no verifiable completion criterion. Use finish_goal with abandoned to write your own new goal. Do not continue work whose prerequisite was abandoned.'}:{}),
         ...(reached.length?{milestoneReached:reached,instruction:following?'This milestone is achieved. Use stop_follow, then finish_goal with completed.':'This milestone is achieved. Call finish_goal with completed now.'}:{}),
         ...(elapsed>0&&elapsed%PLAN_REMINDER_INTERVAL===0?{reviewReminder:'Check your goal against recorded progress. Use finish_goal if achieved or no longer useful; otherwise continue. This reminder does not call the planner.'}:{}),
       };
@@ -380,7 +381,7 @@ export class AgentRuntime {
       const previousMind=this.minds.get(id)!,mind = clone(decision.mind);
       if(mind.plan)this.engine.entity(id).plan=clone(mind.plan);
       if (this.mode === 'llm') {
-        for(const plan of decision.planEvents??[])this.engine.event(id,'plan',`${plan.status==='active'?'Plan':plan.status==='completed'?'Goal completed':'Goal abandoned'}: ${plan.goal} ${plan.explanation}`,{plan});
+        for(const plan of decision.planEvents??[])this.engine.event(id,'plan',`${plan.status==='active'?'Plan':plan.status==='completed'?plan.version===3?'Agent considers goal complete':'Goal completed':'Goal abandoned'}: ${plan.goal} ${plan.explanation}`,{plan});
         this.engine.event(id, 'observation', 'Observed the shared turn boundary.', { provider: decision.provider, model: decision.model, observation, memory: mind.notes, attention:observation.following&&!decision.stopFollowing?null:compactView(observation).attention??null, reminder:decision.reminder??null, hints:decision.hints??[], journalOffer:decision.journalOffer??null, turn: mind.turns });
         for(const compaction of decision.journalCompactions??[])this.engine.event(id,'journal-compaction',`Condensed ${compaction.before.length} private notes into ${compaction.after.length} before saving a new note.`,compaction);
         this.engine.event(id, 'decision', content?.slice(0, 500) || `Requested one physical action.`, {
@@ -449,7 +450,6 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
       },
     },
     capabilities,
-    suggestions:engine.module.agentHints?.(observation,engine.discoveries.get(observation.self.id)??new Set())??[],
     inventory:inventoryContext(observation),
     learned:relevantKnowledge(engine,observation),
     notes:mind.notes,

@@ -37,7 +37,7 @@ async function provider(manualPlanning=false) {
       if(!manualPlanning){
         const context=JSON.parse(data.messages[1].content);
         respondTool(request,planningTool,planningTool==='set_plan'
-          ?{milestone:'scan',explanation:'I want to learn about this place.'}
+          ?{goal:'Inspect the surroundings with one scan.',successCondition:'I have observed a scan of the surroundings.',explanation:'I want to learn about this place.'}
           :{outcome:context.allowedOutcomes[0],explanation:'I reviewed the recorded progress.'});return;
       }
     }
@@ -107,12 +107,13 @@ test('planning holds time, reminds every five decisions and reviews after thirty
     r.advance(60000);assert.equal(engine.tick,0);assert.equal(engine.entity('t1').plan,undefined);
     respondTool(first,'set_plan',{goal:'',steps:[],explanation:'Nothing.'});
     const retry=await nextRequest();assert.equal(engine.tick,0);
-    respondTool(retry,'set_plan',{milestone:'scan',explanation:'I want to learn how nearby creatures behave.'});
+    respondTool(retry,'set_plan',{goal:'Inspect the surroundings with one scan.',successCondition:'I have observed a scan of the surroundings.',explanation:'I want to learn how nearby creatures behave.'});
     for(let turn=1;turn<=30;turn++){
       const action=await nextRequest(),prompt=JSON.parse(action.body.messages.at(-1).content);
       assert.equal(prompt.plan.goal,'Inspect the surroundings with one scan.');
-      assert.equal(prompt.plan.criterion.kind,'scan');
-      if(turn>1)assert.ok(prompt.plan.milestoneReached.length);
+      assert.equal(prompt.plan.criterion,undefined);
+      assert.equal(prompt.plan.successCondition,'I have observed a scan of the surroundings.');
+      if(turn>1)assert.ok(prompt.plan.availableEvidence.length);
       assert.equal(!!prompt.plan.reviewReminder,turn>1&&(turn-1)%5===0);
       assert.equal(p.planningRequests.length,2,'Reminders do not make separate planning requests.');
       assert.equal(action.body.tools.some((tool:any)=>['set_plan','review_plan'].includes(tool.function.name)),false);
@@ -122,19 +123,23 @@ test('planning holds time, reminds every five decisions and reviews after thirty
     const review=await nextRequest();assert.equal(review.body.tools[0].function.name,'review_plan');
     const situation=JSON.parse(review.body.messages[1].content);
     assert.equal(situation.situation.actionsSinceLastReview.length,5);assert.equal(situation.previousPlan.reviewedTurn,1);
-    assert.equal(situation.verifiedProgress.complete,true);
-    respondTool(review,'review_plan',{outcome:'complete',explanation:'I investigated nearby movement.'});
+    assert.equal(situation.verifiedProgress,undefined);
+    const scan=situation.availableEvidence.find((entry:any)=>entry.action==='find_material');assert.ok(scan);
+    respondTool(review,'review_plan',{outcome:'complete',explanation:'The recorded scan shows the surroundings.',evidenceEventIds:[scan.eventId]});
     const replacement=await nextRequest();assert.deepEqual(replacement.body.tools.map((tool:any)=>tool.function.name),['set_plan']);
     assert.equal(JSON.parse(replacement.body.messages[1].content).previousPlan.status,'completed');
     assert.equal(engine.tick,600,'Closing and replacing a plan must not consume world time.');
-    respondTool(replacement,'set_plan',{milestone:'collect_wood',explanation:'I now want to investigate wood.'});
-    const action=await nextRequest();assert.equal(JSON.parse(action.body.messages.at(-1).content).plan.goal,'Collect one additional item from wood, increasing your inventory above its starting amount.');
+    respondTool(replacement,'set_plan',{goal:'Collect some wood to examine its texture.',successCondition:'I have gathered wood and examined its surface.',explanation:'I now want to investigate wood.'});
+    const action=await nextRequest();assert.equal(JSON.parse(action.body.messages.at(-1).content).plan.goal,'Collect some wood to examine its texture.');
     assert.doesNotMatch(action.body.messages[0].content,/What memorable fact did you learn about the world/);
     respond(action,{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     const historical=store.stateAt(600).entities.find(entity=>entity.id==='t1')!.plan!;
     const current=store.stateAt(620).entities.find(entity=>entity.id==='t1')!.plan!;
     assert.equal(historical.goal,'Inspect the surroundings with one scan.');assert.equal(historical.steps[0].status,'pending');
-    assert.equal(current.goal,'Collect one additional item from wood, increasing your inventory above its starting amount.');assert.equal(current.reviewedTurn,31);
+    assert.equal(current.goal,'Collect some wood to examine its texture.');assert.equal(current.reviewedTurn,31);
+    assert.equal(current.steps[0].task,'I have gathered wood and examined its surface.');
+    const completed=(store.eventsAt(620,'t1',300).find(event=>event.type==='plan'&&(event.data as any).plan.status==='completed')!.data as any).plan;
+    assert.equal(completed.steps[0].assessment,'agent');
     assert.deepEqual(store.eventsAt(620,'t1',300).filter(event=>event.type==='plan').map(event=>(event.data as any).plan.status),['active','completed','active']);
     assert.equal(store.stateAt(0).entities.find(entity=>entity.id==='t1')!.plan,undefined);
     assert.deepEqual(r.failures,[]);
@@ -149,10 +154,10 @@ test('early goal acknowledgment requires evidence, survives restart and resets t
     engine.setEntityEnabled('t2',false);engine.setEntityEnabled('duck',false);
     store.record(engine.frame(),engine.state(),r.runtime.persistence());r.clock.pump();
     respondTool(await next(),'finish_goal',{outcome:'completed',reason:'I intend to scan.'});
-    const rejected=await next();assert.match(rejected.body.messages.at(-1).content,/No recorded effect/);assert.equal(p.planningRequests.length,1);
+    const rejected=await next();assert.match(rejected.body.messages.at(-1).content,/No recorded evidence/);assert.equal(p.planningRequests.length,1);
     respond(rejected,{action:'find_material'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);r.clock.pump();
-    const achieved=await next();assert.ok(JSON.parse(achieved.body.messages.at(-1).content).plan.milestoneReached.length);
-    respondTool(achieved,'finish_goal',{outcome:'completed',reason:'The scan finished.'});
+    const achieved=await next();const evidence=JSON.parse(achieved.body.messages.at(-1).content).plan.availableEvidence;assert.ok(evidence.length);
+    respondTool(achieved,'finish_goal',{outcome:'completed',reason:'The scan finished.',evidenceEventIds:[evidence[0].eventId]});
     const replacement=await next();assert.equal(p.planningRequests.length,2);assert.equal(engine.tick,20);
     assert.equal(JSON.parse(replacement.body.messages.at(-1).content).plan.reviewInDecisions,30);
     assert.equal(store.stateAt(20).entities.find(item=>item.id==='t1')!.plan!.reviewedTurn,1);
@@ -380,7 +385,7 @@ test('execution foregrounds the assigned result and current matching targets wit
   }finally{r.clock.close();store.close();p.close();}
 });
 
-test('curiosity suggestions reach the planner without becoming execution instructions',async()=>{
+test('wood possession supplies observed inventory without injecting a shaping goal',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);
@@ -388,7 +393,9 @@ test('curiosity suggestions reach the planner without becoming execution instruc
     r.runtime.minds.get('t1')!.carriedMoves=10;
     r.clock.pump();await until(()=>p.requests.length===1);
     const planning=JSON.parse(p.planningRequests[0].body.messages[1].content);
-    assert.match(planning.situation.suggestions.join(' '),/shapeable/);
+    assert.equal(planning.situation.suggestions,undefined);
+    assert.equal(planning.milestoneOptions,undefined);
+    assert.doesNotMatch(JSON.stringify(planning),/looks shapeable|try strike_held/);
     const execution=JSON.parse(p.requests[0].body.messages.at(-1).content);
     assert.equal(execution.hints,undefined);assert.equal(execution.reminder,undefined);
     assert.equal(execution.inventory.holding,'wood');
@@ -707,19 +714,19 @@ test('journal favors durable world knowledge and persists notes for future promp
   try{
     engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
     assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='journal').function.description,/memorable fact learned about the world/i);
-    assert.match(p.requests[0].body.messages[0].content,/current goal and its one observable milestone/);
-    assert.match(p.requests[0].body.messages[0].content,/Your mission is to complete/);
+    assert.match(p.requests[0].body.messages[0].content,/You chose your current goal and success condition/);
+    assert.match(p.requests[0].body.messages[0].content,/Use current observations/);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/curious|curiosity/i);
     assert.match(p.planningRequests[0].body.messages[0].content,/You are t1, a curious Troglodyte/);
-    assert.match(p.planningRequests[0].body.messages[0].content,/Choose worthwhile activities from curiosity/);
+    assert.match(p.planningRequests[0].body.messages[0].content,/Decide for yourself what you want to do/);
     assert.doesNotMatch(p.planningRequests[0].body.messages[0].content,/Your mission is to complete/);
-    assert.match(p.requests[0].body.messages[0].content,/milestoneReached confirms success, use finish_goal/);
-    assert.match(p.requests[0].body.messages[0].content,/Prefer a labeled choice for reachable interactions or checked movement/);
+    assert.match(p.requests[0].body.messages[0].content,/Use finish_goal when you judge it achieved/);
+    assert.match(p.requests[0].body.messages[0].content,/Labeled choices describe available physical actions/);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/journal/);
     const firstContext=JSON.parse(p.requests[0].body.messages.at(-1).content);
-    assert.deepEqual(firstContext.plan.matchingReachableChoices,['scan_surroundings']);
-    assert.equal(firstContext.choices[0].id,'scan_surroundings');
-    assert.ok(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='choose_action').function.parameters.properties.option.enum.includes('scan_surroundings'));
+    assert.equal(firstContext.plan.matchingReachableChoices,undefined);
+    assert.equal(firstContext.plan.goalAchieved,undefined);
+    assert.ok(p.requests[0].body.tools.some((tool:any)=>tool.function.name==='find_material'));
     for(let index=0;index<3;index++){
       respondTool(p.requests[index],'journal',{note:`I want to explore area ${index}.`});await until(()=>p.requests.length===index+2);
       assert.equal(engine.tick,0);

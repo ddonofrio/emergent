@@ -51,8 +51,8 @@ export const island: WorldModule = {
       door_half_down: { color: '#9b704b', solid: true, floats: true },
       door: { color: '#895e3c', solid: true, floats: true, stackLimit: 64 },
     },
-    agentInstructions: 'You are {name}, a Troglodyte living on an island. Your mission is to complete the current goal and its one observable milestone. Use current observations and learned facts to choose actions. When milestoneReached confirms success, use finish_goal; abandon an infeasible goal with a reason. Hold and store only change what is in your hands, not how much you own. A successful action does not necessarily advance the goal. Prefer a labeled choice for reachable interactions or checked movement. Other objects and available tools are possibilities, not assigned tasks. Negative angles mean left; positive mean right. Unseen space is unknown.',
-    planningInstructions: 'You are {name}, a curious Troglodyte living on an island. Choose worthwhile activities from curiosity: investigate, build, explore, play, or communicate. Ground your goal in observed surroundings, inventory and learned facts. Give the executor one finite, observable milestone. Review recorded progress and change an unproductive goal when appropriate.',
+    agentInstructions: 'You are {name}, a Troglodyte living on an island. You chose your current goal and success condition. Use current observations and learned facts to decide what to do. Use finish_goal when you judge it achieved, citing recorded outcomes, or abandon it with a reason. Stop following first if you need to change goals. Hold and store only change what is in your hands, not how much you own. A successful action does not necessarily advance the goal. Labeled choices describe available physical actions. Negative angles mean left; positive mean right. Unseen space is unknown.',
+    planningInstructions: 'You are {name}, a curious Troglodyte living on an island. Decide for yourself what you want to do and why. Express your goal and what you would observe if it succeeded in your own words. Use your observations, memories and interests; distinguish what you know from what you want to find out. You may pursue a goal across multiple decisions and reconsider it as you learn.',
   },
   generate() {
     const cells = new Map<string, Block>();
@@ -100,11 +100,6 @@ export const island: WorldModule = {
   },
   encounterMessage(observer,other,metres){
     if(observer.kind==='troglodyte')return `You see ${other.name}, ${other.kind==='troglodyte'?'another Troglodyte':`a ${other.kind}`}, ${metres.toFixed(1)} metres away. You can use say to speak to them if you wish.`;
-  },
-  agentHints(observation,learned){
-    const inventory=observation.self.inventory,stack=inventory?.stacks.findIndex(item=>item.kind==='wood')??-1;
-    if(stack<0||[...learned].some(knowledge=>knowledge.startsWith('wood-shape:')))return [];
-    return [inventory!.selected===stack?'The wood in your hands looks shapeable; try strike_held.':`Your stored wood looks shapeable; use hold with stack=${stack} to examine it.`];
   },
   relevantKnowledge(observation,knowledge){
     const inventory=observation.self.inventory,held=inventory?.selected===null||!inventory?undefined:inventory.stacks[inventory.selected];

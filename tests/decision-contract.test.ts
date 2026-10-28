@@ -6,7 +6,7 @@ import { island } from '../src/modules/island';
 import type { AgentPlan, Block, Entity } from '../src/core/types';
 import { Store } from '../server/store';
 import { AgentRuntime, type PreparedTurn } from '../server/agents/runtime';
-import { inventoryAmounts, milestoneEvidence, milestoneOptions } from '../server/agents/milestones';
+import { inventoryAmounts, milestoneEvidence } from '../server/agents/milestones';
 import { actionFeedback, compactResult, decisionCycle, decisionView, recentActions, speechContext } from '../server/agents/context';
 import { needsPlanReview } from '../server/agents/planning';
 import type { CompletionRequest, CompletionResult } from '../server/agents/providers';
@@ -21,8 +21,7 @@ function fixture() {
   const engine=new Engine({...island,generate:()=>({blocks,entities:[entity,other]})});
   const store=new Store(':memory:',engine.module.manifest);
   const runtime=new AgentRuntime(engine,store,{providers:[{id:'stub',name:'Stub',baseUrl:'http://unused.invalid',apiKey:'secret-not-for-recordings',model:'stub'}],maxTurns:null,retryDelayMs:1});
-  const option=milestoneOptions(engine.observe('t1')).find(item=>item.id==='collect_wood')!;
-  const plan:AgentPlan={version:2,goal:option.task,steps:[{task:option.task,criterion:option.criterion,status:'pending'}],status:'active',explanation:'Gather more wood.',createdTurn:0,reviewedTurn:0,startedAtSecond:0,inventoryBaseline:inventoryAmounts(entity.inventory)};
+  const plan:AgentPlan={version:2,goal:'Collect one more wood.',steps:[{task:'Collect one more wood.',criterion:{kind:'collect',subject:'wood'},status:'pending'}],status:'active',explanation:'Gather more wood.',createdTurn:0,reviewedTurn:0,startedAtSecond:0,inventoryBaseline:inventoryAmounts(entity.inventory)};
   runtime.minds.get('t1')!.plan=plan;
   store.record(engine.frame(),engine.state(),runtime.persistence());
   return {engine,store,runtime,plan};
@@ -46,9 +45,8 @@ test('collection requires a new unit, not recycling an owned block; unknown tran
     for(let i=0;i<3;i++)assert.equal(engine.act('t1',{action:'hit',target:[0,1,2]}).ok,true);
     assert.equal(milestoneEvidence(plan,recentActions(engine.recentEvents),engine.observe('t1')).length,1);
     engine.voxels.set([1,1,2],'plant');engine.act('t1',{action:'store'});
-    const option=milestoneOptions(engine.observe('t1')).find(item=>item.id==='collect_plant')!;
-    assert.doesNotMatch(JSON.stringify(option),/stick/);
-    const plantPlan={...plan,steps:[{task:option.task,status:'pending' as const,criterion:option.criterion}],inventoryBaseline:inventoryAmounts(engine.entity('t1').inventory),startedAtSecond:engine.time};
+    const plantPlan:AgentPlan={...plan,steps:[{task:'Collect a plant.',status:'pending',criterion:{kind:'collect',subject:'plant'}}],inventoryBaseline:inventoryAmounts(engine.entity('t1').inventory),startedAtSecond:engine.time};
+    assert.doesNotMatch(JSON.stringify(decisionView(engine.observe('t1'))),/stick/);
     engine.step();for(let i=0;i<3;i++)engine.act('t1',{action:'hit',target:[1,1,2]});
     assert.equal(milestoneEvidence(plantPlan,recentActions(engine.recentEvents),engine.observe('t1')).length,1);
   }finally{store.close();}
@@ -57,8 +55,7 @@ test('collection requires a new unit, not recycling an owned block; unknown tran
 test('approaching a named creature requires a current local sighting within range',()=>{
   const {engine,store,plan}=fixture();
   try{
-    const option=milestoneOptions(engine.observe('t1')).find(item=>item.id==='approach_t2')!;
-    const social={...plan,goal:option.task,steps:[{task:option.task,criterion:option.criterion,status:'pending' as const}]};
+    const social:AgentPlan={...plan,goal:'Approach Moss.',steps:[{task:'Get within two metres of Moss.',criterion:{kind:'approach',entityId:'t2'},status:'pending'}]};
     engine.step();engine.act('t1',{action:'walk',distance:2,angle:-90});
     for(let i=0;i<20;i++)engine.step();
     const actions=recentActions(engine.recentEvents);
@@ -67,7 +64,7 @@ test('approaching a named creature requires a current local sighting within rang
     assert.equal(milestoneEvidence(social,actions,engine.observe('t1')).length,1);
     engine.entity('t1').yaw=180;
     assert.deepEqual(milestoneEvidence(social,actions,engine.observe('t1')),[]);
-    assert.ok(!milestoneOptions(engine.observe('t1')).some(item=>item.id==='approach_t2'));
+    assert.ok(!engine.observe('t1').entities.some(item=>item.id==='t2'));
   }finally{store.close();}
 });
 
@@ -160,17 +157,19 @@ test('changing goals clears the old intention and regenerates the complete actio
     runtime.minds.get('t1')!.plan!.intention='Keep working on the wood.';
     runtime.inference.complete=async(request)=>{
       if(++calls===1)return answer('finish_goal',{outcome:'abandoned',reason:'Inspect the surroundings instead.'});
-      if(calls===2)return answer('set_plan',{milestone:'scan',explanation:'I want a fresh view.'});
+      if(calls===2)return answer('set_plan',{goal:'Find a quiet place to watch Moss.',successCondition:'I have found somewhere with a clear view of Moss.',explanation:'I want a fresh view.'});
       const prompt=context(request);
       assert.equal(prompt.previousIntention,undefined);
-      assert.equal(prompt.plan.goal,'Inspect the surroundings with one scan.');
-      assert.equal(prompt.choices[0].id,'scan_surroundings');
-      assert.ok((request.tools as any[]).find(tool=>tool.function.name==='choose_action').function.parameters.properties.option.enum.includes('scan_surroundings'));
-      return answer('choose_action',{option:'scan_surroundings'});
+      assert.equal(prompt.plan.goal,'Find a quiet place to watch Moss.');
+      assert.equal(prompt.plan.successCondition,'I have found somewhere with a clear view of Moss.');
+      assert.equal(prompt.plan.goalAchieved,undefined);
+      assert.ok((request.tools as any[]).some(tool=>tool.function.name==='find_material'));
+      return answer('find_material',{});
     };
     const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});commit(engine,store,runtime,turn);
     assert.equal(calls,3);assert.equal(runtime.minds.get('t1')!.plan!.intention,undefined);
-    assert.equal(runtime.minds.get('t1')!.plan!.goal,runtime.minds.get('t1')!.plan!.steps[0].task);
+    assert.equal(runtime.minds.get('t1')!.plan!.goal,'Find a quiet place to watch Moss.');
+    assert.equal(runtime.minds.get('t1')!.plan!.steps[0].criterion,undefined);
   }finally{store.close();}
 });
 
@@ -212,11 +211,11 @@ test('an older staged plan is reviewed without discarding a ready physical decis
     store.savePending(0,'plan:t1',runtime.inference.cacheKey,{plan:legacy,events:[],modelCalls:0});
     runtime.inference.complete=async(request)=>{
       if(++calls===1){assert.deepEqual(context(request).allowedOutcomes,['abandon']);return answer('review_plan',{outcome:'abandon',explanation:'Replace the older success contract.'});}
-      if(calls===2)return answer('set_plan',{milestone:'scan',explanation:'Inspect the area.'});
+      if(calls===2)return answer('set_plan',{goal:'Inspect this place.',successCondition:'I have scanned the area.',explanation:'Inspect the area.'});
       return answer('wait',{});
     };
     const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
-    assert.equal(turn.decisions[0].mind.plan!.version,2);assert.equal(calls,3);assert.equal(engine.tick,0);
+    assert.equal(turn.decisions[0].mind.plan!.version,3);assert.equal(calls,3);assert.equal(engine.tick,0);
     runtime.inference.complete=async()=>{throw new Error('Do not replace a ready physical decision.');};
     const cached=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
     assert.deepEqual(cached.decisions[0].calls,turn.decisions[0].calls);
@@ -227,8 +226,7 @@ test('a reached social goal can stop following and close before selecting the ne
   const {engine,store,runtime,plan}=fixture();
   try{
     engine.voxels.set([0,1,2],null);
-    const option=milestoneOptions(engine.observe('t1')).find(item=>item.id==='approach_t2')!;
-    runtime.minds.get('t1')!.plan={...plan,goal:option.task,steps:[{task:option.task,criterion:option.criterion,status:'pending'}]};
+    runtime.minds.get('t1')!.plan={...plan,goal:'Approach Moss.',steps:[{task:'Get within two metres of Moss.',criterion:{kind:'approach',entityId:'t2'},status:'pending'}]};
     runtime.inference.complete=async()=>answer('choose_action',{option:'follow_t2'});
     commit(engine,store,runtime,await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{}));
     runtime.inference.complete=async()=>answer('follow',{});
@@ -238,7 +236,7 @@ test('a reached social goal can stop following and close before selecting the ne
     runtime.inference.complete=async(request)=>{
       if(++calls===1){assert.equal(context(request).plan.goalAchieved,true);assert.match(context(request).plan.instruction,/stop_follow/);return answer('stop_follow',{});}
       if(calls===2){assert.ok((request.tools as any[]).some(tool=>tool.function.name==='finish_goal'));return answer('finish_goal',{outcome:'completed',reason:'I can see Moss within two metres.'});}
-      if(calls===3){assert.equal((request.tools[0] as any).function.name,'set_plan');return answer('set_plan',{milestone:'scan',explanation:'Inspect this place.'});}
+      if(calls===3){assert.equal((request.tools[0] as any).function.name,'set_plan');return answer('set_plan',{goal:'Inspect this place.',successCondition:'I have scanned this place.',explanation:'Inspect this place.'});}
       assert.ok((request.tools as any[]).some(tool=>tool.function.name==='wait'));
       return answer('wait',{});
     };

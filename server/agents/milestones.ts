@@ -1,7 +1,6 @@
-import { distance, type MilestoneCriterion, type Observation, type AgentPlan, type Inventory } from '../../src/core/types';
-import type { recentActions } from './context';
+import { distance, type Observation, type AgentPlan, type Inventory } from '../../src/core/types';
+import { historicalActions, type recentActions } from './context';
 
-export interface MilestoneOption { id:string; task:string; criterion:MilestoneCriterion; }
 export function inventoryAmounts(inventory:Inventory|null) {
   const amounts:Record<string,number>={};
   for(const stack of inventory?.stacks??[]){
@@ -10,32 +9,19 @@ export function inventoryAmounts(inventory:Inventory|null) {
   }
   return amounts;
 }
-export function milestoneOptions(observation:Observation):MilestoneOption[] {
-  const options:MilestoneOption[]=[
-    {id:'scan',task:'Inspect the surroundings with one scan.',criterion:{kind:'scan'}},
-    {id:'move',task:'Reach a different spot at least two metres away in one movement.',criterion:{kind:'move'}},
-  ];
-  const visible=[...new Set([...observation.surfaces.map(surface=>surface.kind),...observation.items.map(item=>item.kind)])];
-  for(const subject of visible){
-    options.push({id:`collect_${subject}`,task:`Collect one additional item from ${subject}, increasing your inventory above its starting amount.`,criterion:{kind:'collect',subject}});
-    if(observation.surfaces.some(surface=>surface.kind===subject)){
-      options.push({id:`locate_${subject}`,task:`Locate one ${subject} block with a scan.`,criterion:{kind:'locate',subject}});
-      options.push({id:`strike_${subject}`,task:`Strike one ${subject} block and observe its response.`,criterion:{kind:'strike',subject}});
-    }
-  }
-  for(const stack of observation.self.inventory?.stacks??[]){
-    if(!stack.contents)options.push({id:`place_${stack.kind}`,task:`Place one ${stack.kind} from inventory.`,criterion:{kind:'place',subject:stack.kind}});
-    if(stack.kind==='wood')options.push({id:'shape_wood',task:'Change the shape of one held wood block.',criterion:{kind:'shape',subject:'wood'}});
-  }
-  if(observation.interactions.speak.length)options.push({id:'communicate',task:'Say one idea to a nearby listener.',criterion:{kind:'communicate'}});
-  for(const entity of observation.entities){
-    if(distance(observation.self.position,entity.position)>2)
-      options.push({id:`approach_${entity.id}`,task:`Reach within two metres of ${entity.name}, confirmed by a current sighting.`,criterion:{kind:'approach',entityId:entity.id}});
-  }
-  return options;
+// These are references to observed outcomes, not a judgment that a free-form goal succeeded.
+export function goalEvidence(plan:AgentPlan,actions:ReturnType<typeof recentActions>) {
+  return historicalActions(actions).filter(entry=>entry.atSecond>(plan.startedAtSecond??Infinity))
+    .map(entry=>({eventId:entry.eventId,action:entry.action,message:entry.result.message,result:entry.result}));
+}
+export function referencedGoalEvidence(plan:AgentPlan,actions:ReturnType<typeof recentActions>,ids:unknown) {
+  if(!Array.isArray(ids)||!ids.length||ids.length>10||ids.some(id=>!Number.isInteger(id)))return undefined;
+  const available=goalEvidence(plan,actions),unique=[...new Set(ids)];
+  if(unique.some(id=>!available.some(entry=>entry.eventId===id)))return undefined;
+  return unique.map(id=>available.find(entry=>entry.eventId===id)!);
 }
 
-// Completion is derived from recorded effects, never the model's explanation.
+// Compatibility for saved version-2 plans only. New goals have no programmed criterion.
 export function milestoneEvidence(plan:AgentPlan,actions:ReturnType<typeof recentActions>,observation?:Observation) {
   const criterion=plan.steps.find(step=>step.status==='pending')?.criterion;
   const started=plan.startedAtSecond;

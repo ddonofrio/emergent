@@ -10,6 +10,7 @@
 - Model unavailability is an indefinite, cancellable wait. Retain ready decisions, retry transport failures, and never replace an unavailable agent's decision with an invented action.
 - Record authoritative events and state changes durably. Replay must use recorded history, never call a model or rerun decisions.
 - Agents receive local, occlusion-aware observations, bounded memory, and explicit action results. Never give them observer privileges.
+- Agents author their own goals and success conditions. Do not replace them with a fixed goal catalog, scripted activity sequence, or server-selected objective. Keep physical action validation separate from the agent's assessment of goal completion.
 - Keep each inference request focused on the current situation: short instructions, applicable tools, relevant learned facts, and at most 10 private notes (compact the existing ten into nine or fewer before appending a new note). Do not reveal undiscovered outcomes in tool descriptions.
 - Reuse the headless DeepSeek Harness core where practical; preserve upstream licenses and provenance. Do not import its chat UI.
 - Keep provider credentials on the server and out of source control, browser responses, and world recordings.

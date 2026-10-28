@@ -229,7 +229,7 @@ function renderDetails() {
       const steps=document.createElement('ol');
       for(const step of e.plan.steps){
         const item=document.createElement('li');item.dataset.status=step.status;
-        const status=document.createElement('span');status.className='plan-step-status';status.textContent=step.status;
+        const status=document.createElement('span');status.className='plan-step-status';status.textContent=step.assessment==='agent'?`${step.status} (agent assessment)`:step.status;
         const task=document.createElement('div');task.textContent=step.task;item.append(status,task);
         if(step.evidence){const evidence=document.createElement('p');evidence.className='muted';evidence.textContent=step.evidence;item.append(evidence);}
         steps.append(item);
