@@ -31,14 +31,15 @@ app.innerHTML = `
     <aside id="debug-panel" class="debug-panel collapsed" aria-label="Debug and journal">
       <header class="panel-heading"><button id="debug-toggle" class="panel-toggle" type="button" aria-expanded="false" aria-label="Expand debug panel" title="Expand debug panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg><span>Debug</span></button></header>
       <div class="debug-content">
-        <section class="turn-status-section"><h2>Turn status</h2><ul id="provider-status-list" class="provider-status-list" aria-label="Configured models"></ul><p id="provider-algorithm" class="provider-algorithm"></p><p id="provider-current-status" class="provider-current-status hidden" role="status"></p><p id="turn-status" role="status">One turn = one world second</p></section>
+        <section class="turn-status-section"><h2>Turn status</h2><ul id="provider-status-list" class="provider-status-list" aria-label="Configured models"></ul><p id="provider-algorithm" class="provider-algorithm"></p><p id="provider-current-status" class="provider-current-status empty" role="status" aria-hidden="true"></p><p id="turn-status" role="status">One turn = one world second</p></section>
         <section class="journal-section"><header class="journal-heading"><h2>Journal</h2><span id="event-count">0</span></header><div id="journal" class="journal"><p class="empty">Waiting for the first trace.</p></div></section>
       </div>
     </aside>
-    <aside id="inspector" class="inspector" aria-label="Inhabitants and in focus">
-      <header class="panel-heading"><h2>Inhabitants <span id="entity-count">03</span></h2><button id="focus-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-label="Collapse right panel" title="Collapse right panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span>Inhabitants</span></button></header>
-      <section class="inhabitants"><div id="entity-list"></div></section>
-      <section class="focus-section"><h2>In focus</h2><div id="details" class="details"></div></section>
+    <aside id="inspector" class="inspector" aria-label="Properties">
+      <header class="panel-heading"><h2>Properties</h2><button id="focus-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-label="Collapse Properties panel" title="Collapse Properties panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span>Properties</span></button></header>
+      <section class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">03</span></div><div id="entity-list"></div></section>
+      <section id="record-knowledge" class="record-knowledge" aria-label="Private notes and learned knowledge"></section>
+      <section class="focus-section"><div id="details" class="details"></div></section>
     </aside>
   </main>
   <section id="llm-settings" class="settings-screen hidden" aria-labelledby="settings-title" aria-hidden="true">
@@ -183,7 +184,8 @@ function renderProviderStatus(config:LlmConfig|undefined=meta?.llmConfig??llmCon
   const waitingName=waiting?shown?.entities.find(entity=>entity.id===waiting[0])?.name??waiting[0]:'';
   const providerError=config?.currentStatus&&/error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}|earlier provider failures|unsupported|access denied/i.test(config.currentStatus);
   current.textContent=providerError?config!.currentStatus!:waiting?`${waitingName}: ${waiting[1].message}`:config?.currentStatus||'';
-  current.classList.toggle('hidden',!current.textContent);
+  current.classList.toggle('empty',!current.textContent);
+  current.setAttribute('aria-hidden',String(!current.textContent));
   current.classList.toggle('error',/error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}/i.test(current.textContent));
 }
 function selectEntity(id: string) { selected = id; detailsSignature='';view.select(id);renderInspector();void loadMemory(); }
@@ -361,17 +363,15 @@ async function setEntityEnabled(id: string, enabled: boolean, toggle: HTMLInputE
 function renderDetails() {
   const e = shown.entities.find(e => e.id === selected); if (!e) return;
   const signature=JSON.stringify({id:e.id,name:e.name,kind:e.kind,status:e.status,enabled:e.enabled,inventory:e.inventory,plan:e.plan,memory:memoryView,knowledge:shown.discoveries?.[selected]});
-  const panel = $('details');
+  const panel = $('details'),recordPanel=$('record-knowledge');
   if(signature===detailsSignature){
-    const position=panel.querySelector<HTMLElement>('[data-detail="Position"] .detail-value');if(position)position.textContent=e.position.map(v=>v.toFixed(1)).join(' / ');
-    const facing=panel.querySelector<HTMLElement>('[data-detail="Facing"] .detail-value');if(facing)facing.textContent=`${Math.round(e.yaw)}°`;
+    const position=panel.querySelector<HTMLElement>('[data-detail="Position"] .detail-value');if(position)position.textContent=`${e.position.map(v=>v.toFixed(1)).join(' / ')} / ${Math.round(e.yaw)}º`;
     return;
   }
-  detailsSignature=signature;panel.replaceChildren();
-  const title = document.createElement('h3'); title.textContent = `${e.name} / ${e.kind}`; panel.append(title);
+  detailsSignature=signature;panel.replaceChildren();recordPanel.replaceChildren();
   const held=e.inventory?.selected===null||!e.inventory?undefined:e.inventory.stacks[e.inventory.selected];
   const inventory=e.inventory?.stacks.map((stack,index)=>`${index}: ${stack.count} × ${stack.kind}${stack.contents?` (${stack.contents})`:''}`).join(', ')??'Empty';
-  const pairs = [['Position',e.position.map(v => v.toFixed(1)).join(' / ')],['Facing',`${Math.round(e.yaw)}°`],['State',e.status],['Hands',held?`${held.kind}${held.contents?` · ${held.contents}`:''}`:'Empty'],['Inventory',inventory],['Perception',`${meta.module.perception.range} m · ${meta.module.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
+  const pairs = [['Position',`${e.position.map(v => v.toFixed(1)).join(' / ')} / ${Math.round(e.yaw)}º`],['Hands',held?`${held.kind}${held.contents?` · ${held.contents}`:''}`:'Empty'],['Inventory',inventory],['Perception',`${meta.module.perception.range} m · ${meta.module.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
   for (const [label,value] of pairs) { const row = document.createElement('div'); row.className = 'detail-row';row.dataset.detail=label; const a = document.createElement('span'); a.textContent = label; const b = document.createElement('span');b.className='detail-value'; b.textContent = value; row.append(a,b); panel.append(row); }
   if(e.controller==='agent'){
     const section=document.createElement('section');section.className='agent-plan';section.setAttribute('aria-label','Recorded goal and steps');
@@ -400,14 +400,14 @@ function renderDetails() {
     }else{const empty=document.createElement('p');empty.className='muted';empty.textContent='No plan recorded yet.';section.append(empty);}
     panel.append(section);
   }
-  const label = document.createElement('h4'); label.textContent = 'PRIVATE NOTES IN THIS RECORD'; panel.append(label);
-  if(memoryView?.actor!==selected){const p=document.createElement('p');p.className='muted';p.textContent='Loading private memory.';panel.append(p);}
-  else if(!memoryView.notes.length){const p=document.createElement('p');p.className='muted';p.textContent='No private memory notes yet.';panel.append(p);}
-  else for(const note of memoryView.notes){const p=document.createElement('p');p.textContent=note;panel.append(p);}
-  const knowledgeLabel=document.createElement('h4');knowledgeLabel.textContent='LEARNED KNOWLEDGE';panel.append(knowledgeLabel);
+  const label = document.createElement('h4'); label.textContent = 'Private Notes in This Record'; recordPanel.append(label);
+  if(memoryView?.actor!==selected){const p=document.createElement('p');p.className='muted';p.textContent='Loading private memory.';recordPanel.append(p);}
+  else if(!memoryView.notes.length){const p=document.createElement('p');p.className='muted';p.textContent='No private memory notes yet.';recordPanel.append(p);}
+  else for(const note of memoryView.notes){const p=document.createElement('p');p.textContent=note;recordPanel.append(p);}
+  const knowledgeLabel=document.createElement('h4');knowledgeLabel.textContent='Learned Knowledge';recordPanel.append(knowledgeLabel);
   const learned=(shown.discoveries?.[selected]??[]).map(knowledgeDescription);
-  if(!learned.length){const p=document.createElement('p');p.className='muted';p.textContent='Nothing discovered yet.';panel.append(p);}
-  else for(const knowledge of learned){const p=document.createElement('p');p.textContent=knowledge;panel.append(p);}
+  if(!learned.length){const p=document.createElement('p');p.className='muted';p.textContent='Nothing discovered yet.';recordPanel.append(p);}
+  else for(const knowledge of learned){const p=document.createElement('p');p.textContent=knowledge;recordPanel.append(p);}
 }
 function renderJournal() {
   const journal = $('journal'), wasAtTop = journal.scrollTop < 20; journal.replaceChildren();
@@ -450,7 +450,7 @@ $('debug-toggle').onclick=()=>{
 };
 $('focus-toggle').onclick=()=>{
   const panel=$('inspector'),open=panel.classList.contains('collapsed');panel.classList.toggle('collapsed',!open);
-  $('main').classList.toggle('focus-collapsed',!open);$('focus-toggle').setAttribute('aria-expanded',String(open));$('focus-toggle').setAttribute('aria-label',`${open?'Collapse':'Expand'} right panel`);$('focus-toggle').title=`${open?'Collapse':'Expand'} right panel`;
+  $('main').classList.toggle('focus-collapsed',!open);$('focus-toggle').setAttribute('aria-expanded',String(open));$('focus-toggle').setAttribute('aria-label',`${open?'Collapse':'Expand'} Properties panel`);$('focus-toggle').title=`${open?'Collapse':'Expand'} Properties panel`;
 };
 $('add-model').onclick=()=>{
   const number=$('model-list').children.length+1;
