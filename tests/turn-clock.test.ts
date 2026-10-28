@@ -517,15 +517,15 @@ test('OpenRouter can be disabled without removing its credential',()=>{
 });
 
 test('LM Studio discovery uses the loaded instance and exposes its full variant in the UI label',async()=>{
-  let completionModel='';
+  let completionModel='',reasoningEffort='';
   const server=createServer(async(req,res)=>{
     if(req.method==='GET'&&req.url==='/api/v1/models'){
       res.setHeader('Content-Type','application/json');
-      res.end(JSON.stringify({models:[{type:'llm',key:'local-author/ornith-9b-instruct',display_name:'Ornith 9B Instruct',selected_variant:'local-author/ornith-9b-instruct@q6_k',loaded_instances:[{id:'ornith-loaded-instance'}]}]}));
+      res.end(JSON.stringify({models:[{type:'llm',key:'local-author/ornith-9b-instruct',display_name:'Ornith 9B Instruct',selected_variant:'local-author/ornith-9b-instruct@q6_k',capabilities:{reasoning:{allowed_options:['off','on'],default:'off'}},loaded_instances:[{id:'ornith-loaded-instance'}]}]}));
       return;
     }
     let body='';for await(const chunk of req)body+=chunk;
-    completionModel=JSON.parse(body).model;
+    const completion=JSON.parse(body);completionModel=completion.model;reasoningEffort=completion.reasoning_effort;
     res.setHeader('Content-Type','application/json');
     res.end(JSON.stringify({model:completionModel,choices:[{message:{content:null,tool_calls:[{id:'wait',type:'function',function:{name:'wait',arguments:'{}'}}]}}]}));
   });
@@ -534,6 +534,7 @@ test('LM Studio discovery uses the loaded instance and exposes its full variant 
   try{
     const result=await chain.complete({messages:[],tools:[],max_tokens:20},new AbortController().signal,()=>{});
     assert.equal(completionModel,'ornith-loaded-instance');
+    assert.equal(reasoningEffort,'on');
     assert.equal(result.model,'ornith-loaded-instance');
     assert.match(chain.label,/local-author\/ornith-9b-instruct@q6_k/);
   }finally{server.closeAllConnections();server.close();}

@@ -52,9 +52,9 @@ test('Bedrock uses the European inference profile for Claude Sonnet 4.6',()=>{
   assert.equal(bedrockInferenceModelId({id:'sonnet',name:'Sonnet',apiKey:'test',baseUrl:'',model:'anthropic.claude-sonnet-4-6',region:'us-east-1'}),'anthropic.claude-sonnet-4-6');
 });
 
-test('Bedrock planner thinking reaches the wire with a separate budget, without changing executor requests',()=>{
+test('Bedrock reasoning defaults on with a separate thinking budget',()=>{
   const sonnet={...provider('sonnet'),model:'eu.anthropic.claude-sonnet-4-6'};
-  const planning={...request,max_tokens:2200,reasoning:'maximum' as const,messages:[{role:'user',content:'Review my recorded experience.'}]};
+  const planning={...request,max_tokens:2200,messages:[{role:'user',content:'Review my recorded experience.'}]};
   assert.deepEqual(bedrockThinkingConfig(sonnet,planning),{inferenceConfig:{maxTokens:10392},additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:'high'}}});
   assert.deepEqual(bedrockThinkingConfig(sonnet,{...planning,reasoning:'minimum'}),{inferenceConfig:{maxTokens:2200}});
   assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'unknown-model'},planning),{inferenceConfig:{maxTokens:2200}});

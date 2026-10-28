@@ -16,10 +16,11 @@ export interface ProviderConfig {
   timeoutMs?: number;
   headers?: Record<string, string>;
 }
-export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'off' | 'on' | 'none' | 'low' | 'medium' | 'high';
 export type ProviderStrategy = 'first-only' | 'round-robin' | 'fallback' | 'master-slaves';
 export interface ProviderHealth { state:'unknown'|'ok'|'bad'; detail:string; }
 export interface CompletionRequest { messages: unknown[]; tools: unknown[]; max_tokens: number; reasoning?: 'minimum' | 'maximum'; }
+export const DEFAULT_REASONING:NonNullable<CompletionRequest['reasoning']>='maximum';
 export interface CompletionResult {
   provider: string;
   providerName: string;
@@ -108,6 +109,7 @@ export class ProviderChain {
   }
 
   async complete(request: CompletionRequest, signal: AbortSignal, onAttempt: (provider: ProviderConfig, index: number) => void): Promise<CompletionResult> {
+    request={reasoning:DEFAULT_REASONING,...request};
     const failures: string[] = [];
     let invalid = 0;
     const order=this.providerOrder();
@@ -249,7 +251,7 @@ export class ProviderChain {
 // https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html
 export function bedrockThinkingConfig(provider:ProviderConfig,request:CompletionRequest):Pick<ConverseCommandInput,'inferenceConfig'|'additionalModelRequestFields'> {
   const base={inferenceConfig:{maxTokens:request.max_tokens}};
-  if(request.reasoning!=='maximum'||request.messages.some(message=>(message as {role?:string}).role==='assistant'))return base;
+  if((request.reasoning??DEFAULT_REASONING)!=='maximum'||request.messages.some(message=>(message as {role?:string}).role==='assistant'))return base;
   if(/anthropic\.claude-(?:sonnet|opus)-4-6(?:\b|-)/.test(provider.model))return {
     inferenceConfig:{maxTokens:request.max_tokens+8192},
     additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:'high'}},
@@ -279,18 +281,18 @@ interface LmStudioModel {
 
 function normalizeReasoningOptions(options:string[]|undefined):ReasoningEffort[]|undefined {
   if(!options?.length)return undefined;
-  const normalized=options.flatMap(value=>value==='off'?['none' as const]:value==='on'?['high' as const]:isReasoningEffort(value)?[value]:[]);
+  const normalized=options.filter(isReasoningEffort);
   return [...new Set(normalized)];
 }
 
 function isReasoningEffort(value:string):value is ReasoningEffort {
-  return ['none','low','medium','high'].includes(value);
+  return ['off','on','none','low','medium','high'].includes(value);
 }
 
 function selectReasoningEffort(options:ReasoningEffort[],profile:'minimum'|'maximum') {
   const preference:ReasoningEffort[]=profile==='minimum'
-    ?['none','low','medium','high']
-    :['high','medium','low','none'];
+    ?['off','none','low','medium','on','high']
+    :['high','on','medium','low','none','off'];
   return preference.find(value=>options.includes(value));
 }
 

@@ -6,7 +6,7 @@ import { PLAN_REMINDER_INTERVAL, PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from
 import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import { isObservedMaterialKnowledge } from '../../src/core/knowledge';
 import type { Store } from '../store';
-import { InvalidCompletionError, ProviderChain, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ToolCall } from './providers';
+import { DEFAULT_REASONING, InvalidCompletionError, ProviderChain, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
 import { actionFeedback, bodyContext, compactResult, compactView, decisionView, goalAffordances, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
 import { compactJournal } from './journal-compaction';
@@ -80,6 +80,7 @@ export class AgentRuntime {
   persistence(): [string, unknown][] { return [...this.minds]; }
   get mode(): 'llm' | 'demo' { return this.inference.enabled ? 'llm' : 'demo'; }
   private infer(id:string,phase:string,request:CompletionRequest,signal:AbortSignal,onAttempt:(provider:ProviderConfig,index:number)=>void) {
+    request={reasoning:DEFAULT_REASONING,...request};
     return auditedCompletion(this.store,this.engine.tick,id,phase,request,signal,()=>this.inference.complete(request,signal,onAttempt));
   }
   setParallelRequests(enabled:boolean) { this.store.saveParallelRequests(enabled);this.parallelRequests=enabled; }
@@ -104,7 +105,7 @@ export class AgentRuntime {
       while(true){
         signal.throwIfAborted();attempts++;report(input.id,{state:attempts===1?'thinking':'waiting',attempts,message:'Considering speech heard during movement; world time is held.'});
         try{
-          const answer=await this.infer(input.id,'movement',{messages,tools,max_tokens:300,reasoning:'minimum'},signal,(candidate,index)=>report(input.id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));
+          const answer=await this.infer(input.id,'movement',{messages,tools,max_tokens:300},signal,(candidate,index)=>report(input.id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));
           input.mind.modelTurns++;provider=answer.provider;model=answer.model;usage=answer.usage;content=answer.content;
           const calls=answer.calls.filter(call=>call.function.name==='continue_moving'||call.function.name==='stop_moving');
           if(calls.length===1){
@@ -300,7 +301,7 @@ export class AgentRuntime {
         signal.throwIfAborted();attempts++;
         report(id,{state:attempts===1?'thinking':'waiting',attempts,message:lastProviderError?`Model error: ${lastProviderError}. Retrying; world time is held.`:'Waiting for an inference provider; world time is held.'});
         try{
-          const answer=await this.infer(id,'action',{messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'minimum'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}${lastProviderError?`; previous model error: ${lastProviderError}`:''}; world time is held.`}));
+          const answer=await this.infer(id,'action',{messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}${lastProviderError?`; previous model error: ${lastProviderError}`:''}; world time is held.`}));
           lastProviderError=undefined;return answer;
         }
         catch(error){
