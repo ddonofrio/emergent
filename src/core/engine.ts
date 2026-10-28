@@ -502,22 +502,31 @@ export class Engine {
     if (a.action === 'walk' || a.action === 'run') {
       const held=this.held(e), running=a.action==='run', maximum=running?24:32;
       if (running && held && rawBlock(held.kind)) return fail('You cannot run while carrying a raw block.');
-      if (!Number.isFinite(a.distance) || a.distance! <= 0 || a.distance! > maximum) return fail(`${running?'Run':'Walk'} distance must be greater than zero and at most ${maximum} metres.`);
-      if (a.angle !== undefined) {
+      const mapTarget=a.action==='walk'&&(a.x!==undefined||a.y!==undefined);
+      if(mapTarget&&(a.distance!==undefined||a.angle!==undefined))return fail('Walk accepts either distance with an optional relative angle, or both map coordinates x and y, not both forms.');
+      if(mapTarget&&(!Number.isFinite(a.x)||!Number.isFinite(a.y)))return fail('Absolute walking requires finite horizontal map coordinates x and y.');
+      let requestedDistance:number,yaw=e.yaw;
+      if(mapTarget){
+        const dx=a.x!-e.position[0],dz=a.y!-e.position[2];requestedDistance=Math.hypot(dx,dz);
+        yaw=((Math.atan2(dx,dz)*180/Math.PI)%360+360)%360;
+      }else requestedDistance=a.distance!;
+      if (!Number.isFinite(requestedDistance) || requestedDistance <= 0 || requestedDistance > maximum) return fail(`${running?'Run':'Walk'} distance must be greater than zero and at most ${maximum} metres.`);
+      if (!mapTarget&&a.angle !== undefined) {
         if (!Number.isFinite(a.angle) || Math.abs(a.angle) > 180) return fail('Movement angle must be between -180 and 180 degrees.');
-        e.yaw=((e.yaw+a.angle)%360+360)%360;
+        yaw=((e.yaw+a.angle)%360+360)%360;
       }
-      const route = this.traceMovement(e, e.yaw, a.distance!);
+      e.yaw=yaw;
+      const route = this.traceMovement(e,yaw,requestedDistance);
       if (!route.destination) {
-        const navigation = this.navigationReport(e, Math.min(8, a.distance!), route.clearance);
+        const navigation = this.navigationReport(e, Math.min(8,requestedDistance), route.clearance);
         if(route.clearance<.15){this.learnMovementIssue(e,route.issue!);return fail(`${route.issue!.message} You cannot move forward. Available responses: ${this.options(e,route.issue).join(', ')}.`,navigation);}
         const safe=this.traceMovement(e,e.yaw,route.clearance).destination;
         if(!safe)return fail(`${route.issue!.message} You cannot find a safe step toward it.`,navigation);
-        e.motion={kind:running?'run':'walk',destination:safe,speed:running?4:e.controller==='wander'?1:2,origin:clone(e.position),stopIssue:route.issue,requestedDistance:a.distance};e.status=running?'running':'walking';
-        return {ok:true,message:`You start ${running?'running':'walking'}, with an obstacle about ${route.clearance.toFixed(1)} metres ahead.`,navigation,feedback:{outcome:'started',from:clone(e.position),destination:clone(safe),expectedStop:route.issue}};
+        e.motion={kind:running?'run':'walk',destination:safe,speed:running?4:e.controller==='wander'?1:2,origin:clone(e.position),stopIssue:route.issue,requestedDistance};e.status=running?'running':'walking';
+        return {ok:true,message:`You start ${running?'running':'walking'}, with an obstacle about ${route.clearance.toFixed(1)} metres ahead.`,navigation,feedback:{outcome:'started',from:clone(e.position),destination:clone(safe),requestedDistance,...(mapTarget?{requestedMapTarget:{x:a.x,y:a.y}}:{}),expectedStop:route.issue}};
       }
-      e.motion = { kind:running?'run':'walk',destination:route.destination,speed:running?4:e.controller==='wander'?1:2,origin:clone(e.position),requestedDistance:a.distance }; e.status = running?'running':'walking';
-      return { ok:true,message:`You start ${running?'running':'walking'} toward a point ${a.distance!.toFixed(1)} metres ahead.`,feedback:{outcome:'started',from:clone(e.position),destination:clone(route.destination),requestedDistance:a.distance} };
+      e.motion = { kind:running?'run':'walk',destination:route.destination,speed:running?4:e.controller==='wander'?1:2,origin:clone(e.position),requestedDistance }; e.status = running?'running':'walking';
+      return { ok:true,message:mapTarget?`You start walking toward map coordinates [${a.x},${a.y}].`:`You start ${running?'running':'walking'} toward a point ${requestedDistance.toFixed(1)} metres ahead.`,feedback:{outcome:'started',from:clone(e.position),destination:clone(route.destination),requestedDistance,...(mapTarget?{requestedMapTarget:{x:a.x,y:a.y}}:{})} };
     }
     if (a.action === 'jump') {
       const jumpDistance=a.distance??2;

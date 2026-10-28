@@ -351,6 +351,17 @@ test('walking and running step down one block without inventing a gap',()=>{
   const engine=fixture(high);engine.entity('t1').position=[.5,3,.5];engine.act('t1',{action:'walk',distance:2});for(let tick=0;tick<40;tick++)engine.step();
   assert.equal(engine.entity('t1').position[1],3);assert.ok(engine.entity('t1').position[2]<1.24,'A two-block drop is still refused.');
 });
+test('walk accepts absolute map x and y while the engine derives bearing, distance and terrain height',()=>{
+  const engine=fixture(),walk=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='walk')!;
+  const result=walk.invoke({x:3.5,y:4.5}) as {ok:boolean;feedback?:Record<string,any>};
+  assert.equal(result.ok,true);assert.deepEqual(result.feedback?.requestedMapTarget,{x:3.5,y:4.5});
+  const destination=engine.entity('t1').motion!.destination;
+  assert.ok(Math.abs(destination[0]-3.5)<1e-9&&destination[1]===1&&Math.abs(destination[2]-4.5)<1e-9);
+  assert.equal(Math.round(engine.entity('t1').yaw),37);
+  assert.equal((walk.invoke({x:3.5}) as {ok:boolean}).ok,false);
+  assert.equal((walk.invoke({x:3.5,y:4.5,distance:2}) as {ok:boolean}).ok,false);
+  const tooFar=fixture();assert.equal(tooFar.act('t1',{action:'walk',x:40,y:40}).ok,false);
+});
 test('navigation separates distant approaches from possible jumps and respects occupied hands',()=>{
   const distant=fixture([[0,1,7,'stone']]);
   const forward=distant.observe('t1').navigation.paths[1];
