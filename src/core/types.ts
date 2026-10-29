@@ -35,12 +35,13 @@ export interface Entity {
   motion?: { kind?: 'walk' | 'run' | 'jump' | 'bounce' | 'scan'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number };
   lastAction?: ActionResult;
 }
-export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; settleAfter?: number; }
+export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; settleAfter?: number; impactTicks?:Record<string,number>; }
 export interface WorldEvent { id: number; tick: number; time: number; day: number; actor: string; type: string; message: string; data?: unknown; }
 export interface EncounterNotice { eventId:number; tick:number; otherId:string; otherName:string; message:string; }
 export interface TerrainNotice { eventId:number; tick:number; target:Vec3; kind:string; message:string; }
+export interface BlockImpactNotice { eventId:number; tick:number; itemId:string; kind:string; message:string; }
 export interface HeardVoice { from: string; word: string; tick: number; speakerId?: string; direction?: string; distance?: number; }
-export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, HeardVoice[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; terrainNotices:Record<string,TerrainNotice[]>; }
+export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, HeardVoice[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; terrainNotices:Record<string,TerrainNotice[]>; impactNotices?:Record<string,BlockImpactNotice[]>; }
 export interface WorldState extends DynamicState { blocks: Block[]; }
 export interface Frame extends DynamicState { changes: [string, string | null][]; events: WorldEvent[]; }
 export interface ModuleManifest {
@@ -72,6 +73,7 @@ export interface Observation {
   beingFollowed?: { id: string; name: string; message: string }[];
   encounters: (EncounterNotice & {canSpeakNow:boolean})[];
   terrainChanges: TerrainNotice[];
+  impacts: BlockImpactNotice[];
   surfaces: { kind: string; count: number; nearest: Vec3 }[];
   navigation: NavigationReport;
   interactions: InteractionTargets;

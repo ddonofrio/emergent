@@ -3,7 +3,7 @@ import { TICKS_PER_SECOND, TURN_TICKS } from './time';
 import { exchangeInventory, normalizeInventory } from './inventory';
 import { knowledgeDescription, observedMaterialKnowledge } from './knowledge';
 import { speechProblem, speechTurn, speechWordCount, speechWordsRemaining } from './speech';
-import { clone, distance, key, type Action, type ActionResult, type Body, type EncounterNotice, type Entity, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
+import { clone, distance, key, type Action, type ActionResult, type BlockImpactNotice, type Body, type EncounterNotice, type Entity, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
 
 const ok = (message: string): ActionResult => ({ ok: true, message });
 const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
@@ -27,6 +27,7 @@ export class Engine {
   private contacts=new Map<string,Set<string>>();
   private encounterNotices=new Map<string,EncounterNotice[]>();
   private terrainNotices=new Map<string,TerrainNotice[]>();
+  private impactNotices=new Map<string,BlockImpactNotice[]>();
   constructor(readonly module: WorldModule, state?: WorldState) {
     const initial = state ?? module.generate();
     this.voxels = new Voxels(module.manifest.materials, initial.blocks);
@@ -39,6 +40,7 @@ export class Engine {
       for(const [id,contacts] of Object.entries(state.contacts??{}))this.contacts.set(id,new Set(contacts));
       for(const [id,notices] of Object.entries(state.encounterNotices??{}))this.encounterNotices.set(id,clone(notices));
       for(const [id,notices] of Object.entries(state.terrainNotices??{}))this.terrainNotices.set(id,clone(notices));
+      for(const [id,notices] of Object.entries(state.impactNotices??{}))this.impactNotices.set(id,clone(notices));
     }
     // Old recordings may contain follow chains. Repair them without creating a new replay event during load.
     for(const entity of [...this.entities].sort((a,b)=>a.id.localeCompare(b.id)))if(entity.following&&this.followersOf(entity).length){
@@ -56,7 +58,7 @@ export class Engine {
     if (this.active(entity) === enabled) return false;
     entity.enabled = enabled; delete entity.motion; delete entity.speech; delete entity.following; delete entity.movementPrompt; delete entity.followInvitation;
     if(!enabled)for(const follower of this.entities)if(follower.following?.entityId===id)this.endFollowing(follower,`${entity.name} is no longer available to follow.`);
-    if(!enabled){this.contacts.delete(id);this.encounterNotices.delete(id);this.terrainNotices.delete(id);for(const contacts of this.contacts.values())contacts.delete(id);for(const [actor,notices] of this.encounterNotices)this.encounterNotices.set(actor,notices.filter(notice=>notice.otherId!==id));}
+    if(!enabled){this.contacts.delete(id);this.encounterNotices.delete(id);this.terrainNotices.delete(id);this.impactNotices.delete(id);for(const contacts of this.contacts.values())contacts.delete(id);for(const [actor,notices] of this.encounterNotices)this.encounterNotices.set(actor,notices.filter(notice=>notice.otherId!==id));}
     entity.status = enabled ? 'idle' : 'disabled';
     this.event('world', 'entity-control', `${entity.name} was ${enabled ? 'enabled' : 'disabled'}.`, { entityId: id, enabled });
     return true;
@@ -73,7 +75,7 @@ export class Engine {
     learned.add(knowledge);this.discoveries.set(actor,learned);this.event(actor,'discovery',message,{knowledge,...(data===undefined?{}:{detail:clone(data)})});return true;
   }
   state(): WorldState { return { ...this.dynamic(), blocks: this.voxels.serialize() }; }
-  dynamic() { return clone({ tick: this.tick, time: this.time, entities: this.entities, bodies: this.bodies, lost: this.lost, inbox: Object.fromEntries(this.inbox), blockDamage: Object.fromEntries(this.blockDamage), discoveries:Object.fromEntries([...this.discoveries].map(([actor,learned])=>[actor,[...learned]])),contacts:Object.fromEntries([...this.contacts].map(([actor,contacts])=>[actor,[...contacts]])),encounterNotices:Object.fromEntries(this.encounterNotices),terrainNotices:Object.fromEntries(this.terrainNotices) }); }
+  dynamic() { return clone({ tick: this.tick, time: this.time, entities: this.entities, bodies: this.bodies, lost: this.lost, inbox: Object.fromEntries(this.inbox), blockDamage: Object.fromEntries(this.blockDamage), discoveries:Object.fromEntries([...this.discoveries].map(([actor,learned])=>[actor,[...learned]])),contacts:Object.fromEntries([...this.contacts].map(([actor,contacts])=>[actor,[...contacts]])),encounterNotices:Object.fromEntries(this.encounterNotices),terrainNotices:Object.fromEntries(this.terrainNotices),impactNotices:Object.fromEntries(this.impactNotices) }); }
   frame(): Frame {
     const frame = { ...this.dynamic(), changes: [...this.voxels.changes], events: this.pendingEvents.splice(0) };
     this.voxels.changes.clear(); return frame;
@@ -101,6 +103,51 @@ export class Engine {
   private cellOccupied(target:Vec3) {
     const point=center(target);
     return this.entities.some(other=>this.active(other)&&Math.abs(other.position[0]-point[0])<.8&&Math.abs(other.position[2]-point[2])<.8&&target[1]<other.position[1]+other.height&&target[1]+1>other.position[1]);
+  }
+  private collidesWithLooseBlock(body:Body,position:Vec3) {
+    if(!rawBlock(body.kind)||body.contents)return false;
+    return this.bodies.some(other=>other.id!==body.id&&rawBlock(other.kind)&&!other.contents
+      &&Math.abs(other.position[0]-position[0])<.56&&Math.abs(other.position[1]-position[1])<.56&&Math.abs(other.position[2]-position[2])<.56);
+  }
+  private restsOnLooseBlock(body:Body) {
+    if(!rawBlock(body.kind)||body.contents)return false;
+    return this.bodies.some(other=>other.id!==body.id&&other.resting&&rawBlock(other.kind)&&!other.contents
+      &&Math.abs(other.position[0]-body.position[0])<.56&&Math.abs(other.position[2]-body.position[2])<.56
+      &&body.position[1]>other.position[1]&&body.position[1]-other.position[1]<.64);
+  }
+  private settlementTarget(body:Body):Vec3|undefined {
+    const target:Vec3=[Math.floor(body.position[0]),Math.floor(body.position[1]),Math.floor(body.position[2])];
+    if(!this.inside(target)||this.cellOccupied(target))return undefined;
+    while(this.voxels.get(target)){
+      target[1]++;
+      if(!this.inside(target)||this.cellOccupied(target))return undefined;
+    }
+    return this.voxels.solid([target[0]+.5,target[1]-.01,target[2]+.5])?target:undefined;
+  }
+  private inhabitantHitBy(body:Body,position:Vec3) {
+    if(!rawBlock(body.kind)||body.contents)return undefined;
+    return this.entities.find(entity=>{
+      if(!this.active(entity))return false;
+      const hitbox=entity.hitbox??{radius:.36,height:entity.height};
+      return Math.hypot(position[0]-entity.position[0],position[2]-entity.position[2])<hitbox.radius+.28
+        &&position[1]+.28>entity.position[1]&&position[1]-.28<entity.position[1]+hitbox.height;
+    });
+  }
+  private reportBlockImpact(body:Body,entity:Entity) {
+    const previous=body.impactTicks?.[entity.id]??-Infinity;
+    if(this.tick-previous<5)return;
+    body.impactTicks={...(body.impactTicks??{}),[entity.id]:this.tick};
+    const message=`A falling ${body.kind} block hits you and bounces away.`;
+    const event=this.event(entity.id,'block-impact',message,{itemId:body.id,kind:body.kind,position:clone(body.position)});
+    const notices=[...(this.impactNotices.get(entity.id)??[]),{eventId:event.id,tick:this.tick,itemId:body.id,kind:body.kind,message}];
+    this.impactNotices.set(entity.id,notices);
+  }
+  private bounceBlockOff(body:Body,entity:Entity) {
+    let dx=body.position[0]-entity.position[0],dz=body.position[2]-entity.position[2],metres=Math.hypot(dx,dz);
+    if(metres<.01){const angle=[...body.id].reduce((sum,character)=>sum+character.charCodeAt(0),0)*137.5*Math.PI/180;dx=Math.sin(angle);dz=Math.cos(angle);metres=1;}
+    const horizontal=Math.max(1.4,Math.min(3,Math.hypot(...body.velocity)*.35));
+    body.velocity=[dx/metres*horizontal,Math.max(1.4,Math.abs(body.velocity[1])*.4),dz/metres*horizontal];
+    body.resting=false;
   }
   private hasSupport(target:Vec3,finished=false) {
     return finished?this.voxels.solid([target[0]+.5,target[1]-.01,target[2]+.5]):faces.some(d=>this.voxels.solid(target.map((v,i)=>v+d[i]) as Vec3));
@@ -162,6 +209,7 @@ export class Engine {
       items, heard: clone((this.inbox.get(id) ?? []).filter(m => this.tick - m.tick < 1200)),
       encounters:clone((this.encounterNotices.get(id)??[]).map(notice=>({...notice,canSpeakNow:this.canSpeakTo(e,this.entity(notice.otherId))}))),
       terrainChanges:clone(this.terrainNotices.get(id)??[]),
+      impacts:clone(this.impactNotices.get(id)??[]),
       navigation,
       interactions,
       ...(following?{following}:{}),
@@ -175,6 +223,10 @@ export class Engine {
   acknowledgeTerrainChanges(id:string,notices:TerrainNotice[]){
     const seen=new Set(notices.map(notice=>notice.eventId));
     if(seen.size)this.terrainNotices.set(id,(this.terrainNotices.get(id)??[]).filter(notice=>!seen.has(notice.eventId)));
+  }
+  acknowledgeBlockImpacts(id:string,notices:BlockImpactNotice[]){
+    const seen=new Set(notices.map(notice=>notice.eventId));
+    if(seen.size)this.impactNotices.set(id,(this.impactNotices.get(id)??[]).filter(notice=>!seen.has(notice.eventId)));
   }
   private canSpeakTo(speaker:Entity,listener:Entity){return speaker.id!==listener.id&&this.active(speaker)&&this.active(listener)&&distance(this.eye(speaker),this.eye(listener))<=this.module.manifest.perception.range&&this.voxels.clearLine(this.eye(speaker),this.eye(listener));}
   canFollow(follower:Entity,target:Entity,viewAngle=0){
@@ -649,7 +701,7 @@ export class Engine {
       e.yaw=((Math.atan2(point[0]-e.position[0],point[2]-e.position[2])*180/Math.PI)%360+360)%360;
       const voxel=key(target),damage=(this.blockDamage.get(voxel)??0)+1;
       if(!usingShovel&&damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return {...ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`),feedback:{target,material:kind,blockOutcome:'cracked',cracks:damage}};}
-      this.blockDamage.delete(voxel);this.voxels.set(target,null);const sawCollapse=this.collapseUnsupportedTree(target,e);this.wakeBodies();if(!usingShovel)this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
+      this.blockDamage.delete(voxel);this.voxels.set(target,null);const treeCollapsed=this.collapseUnsupportedTree(target);this.wakeBodies();if(!usingShovel)this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
       const collected=kind==='plant'?'stick':kind,heldResult=this.canHold(e,collected);
       if(heldResult.ok)this.addInventory(e,collected,undefined,!usingShovel);
       else this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:collected,position:center(target),velocity:[0,0,0],resting:false});
@@ -658,7 +710,7 @@ export class Engine {
         :kind==='plant'
           ?heldResult.ok?'The plant breaks. You pick up a stick.':'The plant breaks, but the stick falls loose because your inventory is full.'
           :heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`;
-      return {...ok(result+(sawCollapse?' The unsupported part of the tree falls into loose blocks.':'')),feedback:{target,material:kind,blockOutcome:heldResult.ok?'collected':'broken',...(heldResult.ok?{collected}: {})}};
+      return {...ok(result+(treeCollapsed?' You break the tree, and its unsupported wood and leaves fall into loose blocks.':'')),feedback:{target,material:kind,blockOutcome:heldResult.ok?'collected':'broken',...(heldResult.ok?{collected}: {}),...(treeCollapsed?{treeCollapsed:true}:{})}};
     }
     if (a.action === 'fill') {
       const held=this.held(e);if(!held||held.kind!=='bucket'||held.contents)return fail('You need to hold an empty bucket.');
@@ -719,9 +771,9 @@ export class Engine {
     if(e.controller!=='agent')return;
     if(issue.kind==='water')this.discover(e.id,'deep-water-limit',knowledgeDescription('deep-water-limit'),{issue});
   }
-  private collapseUnsupportedTree(removed:Vec3,observer:Entity){
+  private collapseUnsupportedTree(removed:Vec3){
     const treeKinds=new Set(['wood','leaves']),visited=new Set<string>();
-    let sawCollapse=false;
+    let collapsed=false;
     for(const offset of faces){
       const seed=removed.map((value,index)=>value+offset[index]) as Vec3,seedKind=this.voxels.get(seed);if(!seedKind||!treeKinds.has(seedKind)||visited.has(key(seed)))continue;
       const component:Vec3[]=[],queue=[seed];visited.add(key(seed));
@@ -729,11 +781,11 @@ export class Engine {
       const componentKeys=new Set(component.map(key));
       const supported=component.some(point=>{const below:[number,number,number]=[point[0],point[1]-1,point[2]];return this.voxels.solid(below)&&!componentKeys.has(key(below));});
       if(supported)continue;
-      if(component.some(point=>this.visible(observer,center(point),true)))sawCollapse=true;
+      collapsed=component.length>0||collapsed;
       for(const point of component){const kind=this.voxels.get(point)!;this.voxels.set(point,null);this.blockDamage.delete(key(point));this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind,position:center(point),velocity:[0,0,0],resting:false});}
       if(component.length)this.event('world','collapse',`An unsupported tree section collapsed into ${component.length} loose blocks.`,{origin:removed,count:component.length});
     }
-    return sawCollapse;
+    return collapsed;
   }
   private endFollowing(e:Entity,message:string){
     delete e.following;delete e.motion;e.status='idle';e.lastAction={ok:false,message,feedback:{outcome:'stopped',to:clone(e.position),facing:e.yaw}};
@@ -849,27 +901,36 @@ export class Engine {
       if (d <= step + .001) { const origin=e.motion.origin??clone(e.position),kind=e.motion.kind??'walk',issue=e.motion.stopIssue;if(issue?.kind==='entity'){this.collide(e,issue);continue;}delete e.motion;e.status='idle';if(issue)this.learnMovementIssue(e,issue);e.lastAction=issue?{ok:false,message:`You stop after travelling ${distance(origin,e.position).toFixed(1)} metres. ${issue.message}`,feedback:{outcome:'blocked',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position),issue,availableResponses:this.options(e,issue)}}:{ok:true,message:`You finish ${kind==='run'?'running':'walking'} after travelling ${distance(origin,e.position).toFixed(1)} metres.`,feedback:{outcome:'arrived',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position)}};if(e.controller==='agent')this.event(e.id,issue?'blocked':'arrived',e.lastAction.message,e.lastAction.feedback); }
     }
     for (const body of this.bodies) {
-      if (body.resting) continue;
+      if(body.resting){
+        const inhabitant=this.inhabitantHitBy(body,body.position);
+        if(!inhabitant)continue;
+        this.reportBlockImpact(body,inhabitant);this.bounceBlockOff(body,inhabitant);
+      }
       // Six conservative substeps keep the fastest allowed throw below one voxel per collision test.
       for (let sub = 0; sub < 6; sub++) {
         const dt = 1 / 120, water = this.module.manifest.waterLevel;
         const floats = this.module.manifest.materials[body.kind]?.floats && !body.water && body.contents!=='water';
         body.velocity[1] -= this.module.manifest.gravity * dt;
         if (body.position[1] < water && floats) { body.velocity[1] += (water - body.position[1]) * 35 * dt; body.velocity = body.velocity.map(v => v * .96) as Vec3; }
+        let hitInhabitant=false;
         for (const axis of [0,1,2]) {
           const next = [...body.position] as Vec3; next[axis] += body.velocity[axis] * dt;
-          const collision = [-.28,.28].some(dx => [-.28,.28].some(dy => [-.28,.28].some(dz => this.voxels.solid([next[0]+dx,next[1]+dy,next[2]+dz]))));
+          const inhabitant=this.inhabitantHitBy(body,next);
+          if(inhabitant){this.reportBlockImpact(body,inhabitant);this.bounceBlockOff(body,inhabitant);hitInhabitant=true;break;}
+          const collision = this.collidesWithLooseBlock(body,next)||[-.28,.28].some(dx => [-.28,.28].some(dy => [-.28,.28].some(dz => this.voxels.solid([next[0]+dx,next[1]+dy,next[2]+dz]))));
           if (collision) { body.velocity[axis] *= -.25; if (axis === 1) { body.velocity[0] *= .8; body.velocity[2] *= .8; } }
           else body.position = next;
         }
-        if (Math.hypot(...body.velocity) < .15 && this.voxels.solid([body.position[0],body.position[1]-.32,body.position[2]])) { body.resting = true; body.velocity = [0,0,0]; break; }
+        if(hitInhabitant)continue;
+        if (Math.hypot(...body.velocity) < .15 && (this.voxels.solid([body.position[0],body.position[1]-.32,body.position[2]])||this.restsOnLooseBlock(body))) { body.resting = true; body.velocity = [0,0,0]; break; }
       }
     }
     const fixed=new Set<string>();
-    for(const body of this.bodies){
+    const settling=[...this.bodies].sort((a,b)=>a.position[1]-b.position[1]||a.id.localeCompare(b.id));
+    for(const body of settling){
       if(!body.resting||!rawBlock(body.kind)||body.contents||this.tick<=(body.settleAfter??-1))continue;
-      const target:[number,number,number]=[Math.floor(body.position[0]),Math.floor(body.position[1]),Math.floor(body.position[2])];
-      if(this.inside(target)&&!this.voxels.get(target)&&!this.cellOccupied(target)){
+      const target=this.settlementTarget(body);
+      if(target){
         this.voxels.set(target,body.kind);fixed.add(body.id);
         const delayed=body.settleAfter!==undefined;
         const event=this.event('world','settled',`A ${body.owner?'thrown':'loose'} ${body.kind} settled into the terrain.`,{itemId:body.id,target,kind:body.kind,delayed});

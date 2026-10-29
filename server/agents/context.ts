@@ -110,6 +110,7 @@ export function compactResult(result:ActionResult,conciseScans=false) {
     ...(typeof feedback.collected==='string'?{collected:feedback.collected}:{}),
     ...(typeof feedback.placed==='string'?{placed:feedback.placed}:{}),
     ...(typeof feedback.shaped==='string'?{shaped:feedback.shaped}:{}),
+    ...(feedback.treeCollapsed===true?{treeCollapsed:true}:{}),
     ...(Array.isArray(feedback.recipientIds)?{heardBy:feedback.recipientIds as string[]}:{}),
     ...(Array.isArray(feedback.inventoryDelta)?{inventoryDelta:feedback.inventoryDelta as {kind:string;contents?:string;change:number}[]}:{}),
   });

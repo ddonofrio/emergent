@@ -16,6 +16,12 @@ import { ExperienceMemory } from './experience';
 import { inventoryAmounts, milestoneEvidence, taskEvidenceView, referencedGoalEvidence } from './milestones';
 import { auditedCompletion, InferenceAuditError } from './audit';
 
+function physicalImpactMessages(observation:Observation) {
+  const items=new Map<string,Set<string>>();
+  for(const notice of observation.impacts){const ids=items.get(notice.kind)??new Set<string>();ids.add(notice.itemId);items.set(notice.kind,ids);}
+  return [...items].map(([kind,ids])=>ids.size===1?`A falling ${kind} block hit you and bounced away.`:`${ids.size} falling ${kind} blocks hit you and bounced away.`);
+}
+
 interface Message { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string; }
 interface Mind extends Memory {
   plan?: AgentPlan;
@@ -282,9 +288,10 @@ export class AgentRuntime {
       };
     };
     const terrainChanges=observation.terrainChanges.length?{terrainChanges:observation.terrainChanges.map(notice=>notice.message)}:{};
+    const physicalImpacts=observation.impacts.length?{physicalImpacts:physicalImpactMessages(observation)}:{};
     const continuation=()=>mind.plan?.intention?{previousIntention:{text:mind.plan.intention,status:lastResult?.ok===false?'The action failed; reconsider this intention.':'Unverified reminder; check current facts before continuing.'}}:{};
-    const normalContext=()=>rounded({plan:planContext(),...continuation(),...(lastResult?{lastResult:{...(lastRecorded?{action:lastRecorded.action,args:lastRecorded.args}:{}),...actionFeedback(compactResult(lastResult,true))}}:{}),inventory:inventoryContext(observation),...heard,...terrainChanges,...decisionView(this.engine.observeAt(id,viewAngle),currentCriterion()),...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),progress:progressContext(recent.filter(entry=>entry.atSecond>(mind.plan?.startedAtSecond??0))),...(learned.length?{learned}:{}),...notes(),...(priorActions.length?{recent:priorActions.map(entry=>({...entry,result:actionFeedback(entry.result)}))}:{})});
-    const initial=following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges}:normalContext();
+    const normalContext=()=>rounded({plan:planContext(),...continuation(),...(lastResult?{lastResult:{...(lastRecorded?{action:lastRecorded.action,args:lastRecorded.args}:{}),...actionFeedback(compactResult(lastResult,true))}}:{}),inventory:inventoryContext(observation),...heard,...terrainChanges,...physicalImpacts,...decisionView(this.engine.observeAt(id,viewAngle),currentCriterion()),...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),progress:progressContext(recent.filter(entry=>entry.atSecond>(mind.plan?.startedAtSecond??0))),...(learned.length?{learned}:{}),...notes(),...(priorActions.length?{recent:priorActions.map(entry=>({...entry,result:actionFeedback(entry.result)}))}:{})});
+    const initial=following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges,...physicalImpacts}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
     let attempts=0,supportingCalls=0,lookCalls=0,correctionRounds=0,invalidCompletions=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null,lastProviderError:string|undefined;
     let tools=makeTools();
@@ -293,7 +300,7 @@ export class AgentRuntime {
     };
     const resetCorrectionContext=(reason:string)=>{
       correctionRounds=0;
-      cycle.splice(0,cycle.length,{role:'user',content:JSON.stringify(following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges}:normalContext())});
+      cycle.splice(0,cycle.length,{role:'user',content:JSON.stringify(following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges,...physicalImpacts}:normalContext())});
       refreshTools();
       report(id,{state:'waiting',attempts,message:`${reason} Retrying with a fresh constrained prompt; world time is held.`});
     };
@@ -451,6 +458,7 @@ export class AgentRuntime {
       }
       this.engine.acknowledgeEncounters(id,observation.encounters??[]);
       this.engine.acknowledgeTerrainChanges(id,observation.terrainChanges??[]);
+      this.engine.acknowledgeBlockImpacts(id,observation.impacts??[]);
       mind.acknowledgedSpeechTick=Math.max(mind.acknowledgedSpeechTick??-1,...observation.heard.map(voice=>voice.tick));
       if (this.mode === 'llm') {
         journalContext(mind);
@@ -486,6 +494,7 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
     learned:relevantKnowledge(engine,observation,true),
     notes:journalContext(mind),
     ...speechContext(observation,mind.acknowledgedSpeechTick),
+    ...(observation.impacts.length?{physicalImpacts:physicalImpactMessages(observation)}:{}),
     recentActions:planningActions(actions.slice(-20)),
     progress:progressContext(actions),
     ...(observation.following?{following:{name:observation.following.name}}:{}),

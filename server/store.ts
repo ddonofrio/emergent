@@ -64,7 +64,7 @@ export class Store {
     for (const row of rows) {
       const frame = unpack<Frame>(row.data);
       for (const [k, kind] of frame.changes) { if (kind) cells.set(k, kind); else cells.delete(k); }
-      state = { tick: frame.tick, time: frame.time, entities: frame.entities, bodies: frame.bodies, lost: frame.lost, inbox: frame.inbox, blockDamage: frame.blockDamage ?? {}, discoveries:frame.discoveries??{},contacts:frame.contacts??{},encounterNotices:frame.encounterNotices??{},terrainNotices:frame.terrainNotices??{}, blocks: [] };
+      state = { tick: frame.tick, time: frame.time, entities: frame.entities, bodies: frame.bodies, lost: frame.lost, inbox: frame.inbox, blockDamage: frame.blockDamage ?? {}, discoveries:frame.discoveries??{},contacts:frame.contacts??{},encounterNotices:frame.encounterNotices??{},terrainNotices:frame.terrainNotices??{},impactNotices:frame.impactNotices??{}, blocks: [] };
     }
     state.blocks = [...cells].map(([k, kind]) => [...unkey(k),kind]); return state;
   }
