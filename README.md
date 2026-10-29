@@ -19,6 +19,10 @@ The Settings screen stores ordered provider/model entries and the selection stra
 
 `npm run build` builds production assets; `npm start` serves them. `npm test` checks the physical invariants, replay and an agent loop against a local mock provider.
 
+OpenAI-compatible entries in the server-only configuration can set `maxOutputTokens` (32..32768) to override the per-request output budget and `enableThinking` to send the local server's `enable_thinking` control. These optional values survive Settings saves. Omit them for servers that do not support this control. Ornith on Unsloth was tested with `maxOutputTokens: 4096` and `enableThinking: false`; its default reasoning could exhaust the executor's 900-token budget before emitting a complete tool call. Configuration-file edits take effect after a server restart.
+
+Token-limit responses and tool calls with malformed JSON arguments are discarded before entering conversation history, then retried through the correction protocol. This prevents llama-server from rejecting every subsequent request with `Failed to parse tool call arguments as JSON`. HTTP failures expose a bounded, credential-redacted provider message. Restarting an already stalled session reconstructs its pending request from the saved world without replaying malformed in-flight history.
+
 ## Shape
 
 - `src/core`: authoritative 20 Hz simulation, sparse 16³ voxel chunks, local perception and validated physical actions.

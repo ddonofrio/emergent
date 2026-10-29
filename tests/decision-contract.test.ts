@@ -36,6 +36,30 @@ const commit=(engine:Engine,store:Store,runtime:AgentRuntime,turn:PreparedTurn)=
   store.record(engine.frame(),engine.state(),runtime.persistence());
 };
 
+test('truncated OpenAI tool calls recover without poisoning history or advancing world time',async t=>{
+  const {engine,store,runtime}=fixture();
+  let attempts=0;
+  t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{
+    const body=JSON.parse(String(init.body));
+    assert.equal(engine.tick,0);
+    for(const message of body.messages)for(const call of message.tool_calls??[])assert.doesNotThrow(()=>JSON.parse(call.function.arguments));
+    attempts++;
+    const message=attempts<3?{content:null,tool_calls:[{id:'broken',type:'function',function:{name:'finish_goal',arguments:'{"outcome":"completed","reason":"cut off'}}]}:{content:null,tool_calls:[{id:'valid',type:'function',function:{name:'wait',arguments:'{}'}}]};
+    return new Response(JSON.stringify({choices:[{finish_reason:attempts===1?'length':'stop',message}]}));
+  });
+  try{
+    const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
+    assert.equal(attempts,3);
+    assert.equal(engine.tick,0);
+    assert.deepEqual(turn.decisions[0].calls.map(call=>call.function.name),['wait']);
+    assert.deepEqual(store.db.prepare('SELECT status FROM inference_audit ORDER BY id').all().map(row=>row.status),['failed','failed','completed']);
+    const first=store.db.prepare('SELECT response FROM inference_audit ORDER BY id LIMIT 1').get()!;
+    assert.match(JSON.parse(inflateSync(first.response as Uint8Array).toString()).message,/token limit/);
+    commit(engine,store,runtime,turn);
+    assert.equal(engine.tick,20);
+  }finally{store.close();}
+});
+
 test('malformed Bedrock tool names never poison correction history or advance world time',async()=>{
   const {engine,store,runtime}=fixture();
   try{

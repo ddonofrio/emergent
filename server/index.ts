@@ -52,7 +52,7 @@ const vite = production ? undefined : await (await import('vite')).createServer(
 const publicLlmConfig = () => ({
   strategy: agents.inference.providers.length < 2 ? 'first-only' : agents.inference.strategy,
   currentStatus:agents.inference.currentStatus,
-  providers: agents.inference.providers.map(({id,type,name,baseUrl,model,region,displayModel,apiKey})=>({id,type:type??'openai-compatible',name,baseUrl,model,region,displayModel,apiKeyConfigured:!!apiKey,health:agents.inference.healthFor(id)})),
+  providers: agents.inference.providers.map(({id,type,name,baseUrl,model,region,displayModel,apiKey,maxOutputTokens,enableThinking})=>({id,type:type??'openai-compatible',name,baseUrl,model,region,displayModel,maxOutputTokens,enableThinking,apiKeyConfigured:!!apiKey,health:agents.inference.healthFor(id)})),
 });
 const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.inference.label, providerStrategy:publicLlmConfig().strategy, llmConfig:publicLlmConfig(), parallelRequests: agents.parallelRequests, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
 function broadcast(event: string, value: unknown) {
@@ -97,9 +97,13 @@ const server = createServer(async (req, res) => {
           if(bedrock&&!region){json(res,{error:`Enter an AWS region for ${name}.`},400);return;}
           if(bedrock&&!/^[a-zA-Z0-9-]{1,64}$/.test(region)){json(res,{error:`Enter a valid AWS region for ${name}.`},400);return;}
           const old=previous.get(id),providedKey=typeof row.apiKey==='string'?row.apiKey.trim():'';
+          const maxOutputTokens=row.maxOutputTokens??old?.maxOutputTokens;
+          const enableThinking=row.enableThinking??old?.enableThinking;
+          if(maxOutputTokens!==undefined&&(!Number.isInteger(maxOutputTokens)||Number(maxOutputTokens)<32||Number(maxOutputTokens)>32768)){json(res,{error:`Output tokens for ${name} must be an integer from 32 to 32768.`},400);return;}
+          if(enableThinking!==undefined&&typeof enableThinking!=='boolean'){json(res,{error:`Thinking for ${name} must be true or false.`},400);return;}
           const apiKey=providedKey||(old?.type===type?old.apiKey:'')||(type==='openai-compatible'?'local-openai-compatible':'');
           if(!apiKey){json(res,{error:`Enter an API key for ${name}.`},400);return;}
-          next.push({id,type:type as ProviderConfig['type'],name,apiKey,baseUrl,model,...(region?{region}:{}),modelDiscovery:old?.modelDiscovery,timeoutMs:old?.timeoutMs,headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined});
+          next.push({id,type:type as ProviderConfig['type'],name,apiKey,baseUrl,model,...(region?{region}:{}),modelDiscovery:old?.modelDiscovery,timeoutMs:old?.timeoutMs,...(maxOutputTokens===undefined?{}:{maxOutputTokens:Number(maxOutputTokens)}),...(enableThinking===undefined?{}:{enableThinking:enableThinking as boolean}),headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined});
         }
         const strategy=data.strategy as ProviderStrategy,tempPath=`${llmConfigPath}.tmp`;
         await writeFile(tempPath,JSON.stringify({strategy,providers:next}),{encoding:'utf8',mode:0o600});await rename(tempPath,llmConfigPath);

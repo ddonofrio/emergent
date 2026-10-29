@@ -61,3 +61,47 @@ test('Bedrock reasoning defaults on with a separate thinking budget',()=>{
   assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'eu.anthropic.claude-haiku-4-5-20251001-v1:0'},planning),{inferenceConfig:{maxTokens:6296},additionalModelRequestFields:{thinking:{type:'enabled',budget_tokens:4096}}});
   assert.equal(bedrockThinkingConfig(sonnet,{...planning,messages:[{role:'assistant',content:'An existing tool conversation.'}]}).additionalModelRequestFields,undefined,'Do not enable thinking midway through a conversation lacking signed reasoning blocks.');
 });
+
+test('malformed JSON tool arguments are rejected before entering conversation history',async()=>{
+  const config=provider('local'),chain=new ProviderChain([config]);
+  let args='';
+  intercept(chain,async()=>({...result(config),calls:[{id:'call',type:'function',function:{name:'wait',arguments:args}}]}));
+  for(args of ['{"reason":"cut off','not json','null','[]','"encoded object"']){
+    await assert.rejects(chain.complete(request,AbortSignal.timeout(1000),()=>{}),error=>error instanceof InvalidCompletionError&&/JSON object/.test(error.message));
+  }
+  args='{}';
+  assert.equal((await chain.complete(request,AbortSignal.timeout(1000),()=>{})).calls[0].function.arguments,'{}');
+});
+
+test('token-limit responses are explicit invalid completions instead of empty successes',async t=>{
+  t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({choices:[{finish_reason:'length',message:{content:'',reasoning_content:'Still thinking.',tool_calls:[]}}]})));
+  const chain=new ProviderChain([provider('local')]);
+  await assert.rejects(chain.complete(request,AbortSignal.timeout(1000),()=>{}),error=>error instanceof InvalidCompletionError&&/token limit/.test(error.message));
+});
+
+test('provider HTTP diagnostics retain the cause and redact its credential',async t=>{
+  const config=provider('local');
+  t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({error:{message:`Failed to parse tool call arguments as JSON. Token ${config.apiKey}`}}),{status:500}));
+  const chain=new ProviderChain([config]);
+  await assert.rejects(chain.complete(request,AbortSignal.timeout(1000),()=>{}),error=>{
+    assert.ok(error instanceof Error);
+    assert.match(error.message,/HTTP 500.*Failed to parse tool call arguments as JSON/);
+    assert.ok(!error.message.includes(config.apiKey));
+    return true;
+  });
+});
+
+test('local reasoning and output budget are opt-in provider settings',async t=>{
+  const bodies:Record<string,unknown>[]=[];
+  t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{
+    bodies.push(JSON.parse(String(init.body)));
+    return new Response(JSON.stringify({choices:[{finish_reason:'stop',message:{content:null,tool_calls:[{id:'wait',type:'function',function:{name:'wait',arguments:'{}'}}]}}]}));
+  });
+  const configured={...provider('local'),enableThinking:false,maxOutputTokens:4096};
+  await new ProviderChain([configured]).complete(request,AbortSignal.timeout(1000),()=>{});
+  await new ProviderChain([provider('default')]).complete(request,AbortSignal.timeout(1000),()=>{});
+  assert.equal(bodies[0].enable_thinking,false);
+  assert.equal(bodies[0].max_tokens,4096);
+  assert.equal(bodies[1].enable_thinking,undefined);
+  assert.equal(bodies[1].max_tokens,request.max_tokens);
+});

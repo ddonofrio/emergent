@@ -14,6 +14,8 @@ export interface ProviderConfig {
   modelDiscovery?: 'lm-studio';
   reasoningOptions?: ReasoningEffort[];
   timeoutMs?: number;
+  maxOutputTokens?: number;
+  enableThinking?: boolean;
   headers?: Record<string, string>;
 }
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high';
@@ -36,6 +38,23 @@ function validateToolCalls(provider:ProviderConfig,calls:unknown):asserts calls 
     ||typeof call.function?.name!=='string'||!/^[a-zA-Z0-9_-]+$/.test(call.function.name)||typeof call.function?.arguments!=='string')) {
     throw new InvalidCompletionError(`${provider.name} returned invalid tool calls; tool names must contain only letters, numbers, underscores or hyphens.`);
   }
+  for(const call of calls){
+    let args:unknown;
+    try{args=JSON.parse(call.function.arguments);}catch{}
+    if(!args||typeof args!=='object'||Array.isArray(args)){
+      throw new InvalidCompletionError(`${provider.name} returned invalid arguments for ${call.function.name}; expected a complete JSON object. The call was discarded before entering conversation history.`);
+    }
+  }
+}
+
+/** Keep provider diagnostics short and credential-free before exposing them to status. */
+async function httpErrorDetail(response:Response,provider:ProviderConfig):Promise<string>{
+  try{
+    const payload=await response.json() as {error?:{message?:unknown};detail?:unknown;message?:unknown};
+    const detail=payload.error?.message??payload.detail??payload.message;
+    if(typeof detail!=='string')return '';
+    return detail.replaceAll(provider.apiKey,'[REDACTED]').replace(/\s+/g,' ').slice(0,600);
+  }catch{return '';}
 }
 
 const positive = (value: string | undefined, fallback: number) => {
@@ -176,7 +195,10 @@ export class ProviderChain {
         method: 'POST',
         headers: { Authorization: `Bearer ${provider.apiKey}`, 'Content-Type': 'application/json', ...provider.headers },
         signal: requestSignal,
-        body: JSON.stringify({ ...completion, model: provider.model, ...(reasoningEffort?{reasoning_effort:reasoningEffort}:{}) }),
+        body: JSON.stringify({ ...completion, model: provider.model,
+          ...(provider.maxOutputTokens?{max_tokens:provider.maxOutputTokens}:{}),
+          ...(provider.enableThinking===undefined?{}:{enable_thinking:provider.enableThinking}),
+          ...(reasoningEffort?{reasoning_effort:reasoningEffort}:{}) }),
       });
     } catch (error) {
       signal.throwIfAborted();
@@ -184,14 +206,15 @@ export class ProviderChain {
       throw new Error(`${provider.name} connection failed.`);
     }
     if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error(`${provider.name} returned HTTP ${response.status}.`);
+      const detail=await httpErrorDetail(response,provider);
+      throw new Error(`${provider.name} returned HTTP ${response.status}.${detail?` ${detail}`:''}`);
     }
-    let payload:{ model?: string; choices?: { message: { content?: string; tool_calls?: ToolCall[] } }[]; usage?: unknown };
+    let payload:{ model?: string; choices?: { finish_reason?:string; message: { content?: string; tool_calls?: ToolCall[] } }[]; usage?: unknown };
     try{payload=await response.json() as typeof payload;}
     catch{throw new InvalidCompletionError(`${provider.name} returned invalid JSON.`);}
     const answer = payload.choices?.[0]?.message;
     if (!answer) throw new InvalidCompletionError(`${provider.name} returned an incomplete response.`);
+    if(payload.choices?.[0]?.finish_reason==='length')throw new InvalidCompletionError(`${provider.name} reached the output token limit (${provider.maxOutputTokens??request.max_tokens}); retry with a larger output budget or less thinking. The truncated response was discarded.`);
     const content = typeof answer.content === 'string' ? answer.content.slice(0, 5000) : null;
     if (content && detectTokenLoop(tokenizeLoopText(content))) throw new InvalidCompletionError(`${provider.name} returned repeating output.`);
     const calls = answer.tool_calls ?? [];

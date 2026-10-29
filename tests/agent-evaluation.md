@@ -1,5 +1,13 @@
 # Decision contract smoke evaluation
 
+## Ornith recovery check (2026-10-29)
+
+The running local Ornith/Unsloth session stalled at tick 20 after a `finish_goal` response exhausted 900 output tokens and ended inside a JSON string. Its truncated arguments were added to correction history; replaying that exact request returned HTTP 500 in 151 ms with `Failed to parse tool call arguments as JSON`. Minimal requests accepted both the abbreviated and full model identifiers, ruling out the model alias as the cause.
+
+The provider now rejects truncated completions and non-object or malformed JSON arguments before history insertion. Optional `maxOutputTokens` and `enableThinking` settings support this local server without changing the defaults for other providers. With thinking disabled, the saved actor-visible request returned complete tool JSON in 4.7 seconds using 358 output tokens. The model still needed semantic correction for its overlong completion reason and missing evidence references.
+
+A real-model check reconstructed the stalled actor from the live database opened read-only, copied its evidence into a fresh in-memory store, and used the production provider/runtime with `maxOutputTokens: 4096` and `enableThinking: false`. It completed three model calls in 7.9 seconds, selected a valid `hit`, and advanced the isolated world from tick 20 to 40. The application server and saved world were not changed by the check. Local inputs, responses and the outcome are in `.tmp/ornith-recovery-probe.json` (untracked). This verifies recovery for the observed failure, not long-term model reliability.
+
 ## Version 4: projects and accumulated experience
 
 On 2026-10-28, offline validation passed 149 tests and the production build. Focused regressions cover actor-local historical evidence, exact strike conditions, recipe availability with another held item, conditional capabilities without world mutation, blocked-task replanning, restart of staged decisions, bounded compaction without silent note loss, visible loose items, and distinct body/view directions.

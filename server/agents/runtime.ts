@@ -310,7 +310,10 @@ export class AgentRuntime {
           if(error instanceof InvalidCompletionError){
             invalidCompletions++;
             if(invalidCompletions%MAX_CORRECTION_ROUNDS===0)resetCorrectionContext(`The model returned ${invalidCompletions} invalid completions. Last error: ${error.message}`);
-            else report(id,{state:'waiting',attempts,message:`Invalid model response ${invalidCompletions}; requesting a corrected action while world time is held.`});
+            else{
+              cycle.push({role:'user',content:JSON.stringify({correction:error.message,instruction:'Return complete JSON arguments in one available tool call. Keep text concise; do not include analysis prose.'})});
+              report(id,{state:'waiting',attempts,message:`Invalid model response ${invalidCompletions}: ${error.message} Requesting a corrected action while world time is held.`});
+            }
             continue;
           }
           lastProviderError=error instanceof Error?error.message:'Inference providers unavailable.';
