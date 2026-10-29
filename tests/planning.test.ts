@@ -23,6 +23,9 @@ test('planning runs initially and after thirty decisions, including legacy plans
   const legacy={...plan,steps:[{task:'Collect all nearby wood.',status:'pending' as const}]};
   assert.equal(needsPlanReview(legacy,2),true);assert.equal(needsPlanReview(legacy,31),true);
   assert.equal(needsPlanReview({...plan,version:undefined},2),true);
+  const current:AgentPlan={version:4,...structuredClone(projectFields),goal:authored.goal,status:'active',steps:[{task:authored.successCondition,status:'pending'}],explanation:authored.explanation,createdTurn:1,reviewedTurn:1,startedAtSecond:0};
+  assert.equal(needsPlanReview(current,2),false);
+  assert.equal(needsPlanReview({...current,suggestedActions:['Inspect the surroundings.']},2),true,'Version 4 plans without the standing journal action are refreshed.');
 });
 
 test('scanning, holding, cracking, and older successes cannot prove collection',()=>{
@@ -93,6 +96,22 @@ test('the planner authors goals outside any catalog and preserves its exact succ
   assert.equal(next.goal,authored.goal);assert.equal(next.steps[0].task,authored.successCondition);
   assert.equal(next.explanation,authored.explanation);
   assert.equal(needsPlanReview(next,32),false,'A free-text goal needs no programmed criterion.');
+});
+
+test('the planner rejects a plan without a standing journal action',async()=>{
+  let calls=0;
+  const next=await planDecision({...base(),async complete(request){
+    if(++calls===1){
+      const schema=(request.tools[0] as any).function.parameters.properties.suggestedActions;
+      assert.match(schema.description,/call journal after a relevant new finding/);
+      return answer('set_plan',{...structuredClone(projectFields),suggestedActions:['Inspect the current surroundings.'],...authored});
+    }
+    const context=JSON.parse((request.messages[1] as any).content);
+    assert.match(context.correction,/call journal after a relevant new finding/);
+    return answer('set_plan',authored);
+  }});
+  assert.equal(calls,2);
+  assert.ok(next.suggestedActions!.some(action=>/\bjournal\b/i.test(action)));
 });
 
 test('planning truncates explanation after three consecutive overlong corrections',async()=>{

@@ -143,9 +143,9 @@ test('project reviews preserve the parent and reject an empty method before cont
   const current=plan(),saved:AgentPlan[]=[];let calls=0;
   const next=await planDecision({name:'Flint',turn:10,time:9,plan:current,context:{},actions:[],signal:AbortSignal.timeout(1000),retryDelayMs:1,waiting(){},save(value){saved.push(value);},complete:async request=>{
     if(calls){const context=JSON.parse((request.messages[1] as any).content);assert.match(context.correction,/suggestedActions must be a flat array/);assert.ok(context.previousAttempt);}
-    return answer('review_plan',{outcome:'continue',project:{...current.project,progress:'The previous method was blocked; I will inspect another approach.'},suggestedActions:++calls===1?[]:['Inspect a currently available interaction.'],explanation:'Change the method while retaining the project.'});
+    return answer('review_plan',{outcome:'continue',project:{...current.project,progress:'The previous method was blocked; I will inspect another approach.'},suggestedActions:++calls===1?[]:['Inspect a currently available interaction.','If it reveals a relevant new finding, call journal before acting again.'],explanation:'Change the method while retaining the project.'});
   }});
   assert.equal(calls,2);assert.equal(saved.length,1);assert.equal(next.direction,current.direction);assert.equal(next.project!.goal,current.project!.goal);
-  assert.equal(next.suggestedActions!.length,1);
+  assert.equal(next.suggestedActions!.length,2);assert.ok(next.suggestedActions!.some(action=>/\bjournal\b/i.test(action)));
   assert.equal(goalEvidence(next,[]).length,0);
 });

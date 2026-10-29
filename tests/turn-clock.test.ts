@@ -723,7 +723,8 @@ test('journal favors durable world knowledge and persists notes for future promp
     assert.doesNotMatch(p.planningRequests[0].body.messages[0].content,/Your mission is to complete/);
     assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='finish_goal').function.description,/completed: observed results/);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/choose_action/);
-    assert.match(p.requests[0].body.messages[0].content,/Use journal/);
+    assert.match(p.requests[0].body.messages[0].content,/Before choosing the physical action.*call journal now/);
+    assert.ok(JSON.parse(p.requests[0].body.messages.at(-1).content).plan.suggestedActions.some((action:string)=>/\bjournal\b/i.test(action)));
     const firstContext=JSON.parse(p.requests[0].body.messages.at(-1).content);
     assert.equal(firstContext.plan.matchingReachableChoices,undefined);
     assert.equal(firstContext.plan.goalAchieved,undefined);
