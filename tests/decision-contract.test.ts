@@ -12,6 +12,7 @@ import { actionFeedback, compactResult, decisionCycle, decisionView, recentActio
 import { needsPlanReview } from '../server/agents/planning';
 import type { CompletionRequest, CompletionResult } from '../server/agents/providers';
 import { InferenceAuditError, PROMPT_VERSION } from '../server/agents/audit';
+import { worldTools } from '../server/agents/tools';
 
 function fixture() {
   const blocks:Block[]=[];
@@ -119,7 +120,7 @@ test('speech and intention stay staged until commit and survive a ready-decision
     runtime.inference.complete=async(request)=>{
       assert.equal(context(request).newSpeech.length,1);
       assert.equal(context(request).pastSpeech,undefined);
-      return answer('choose_action',{option:'hold_wood',intention:'Inspect the held wood before choosing how to use it.'});
+      return answer('hold',{stack:0,intention:'Inspect the held wood before choosing how to use it.'});
     };
     const prepared=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
     assert.equal(runtime.minds.get('t1')!.plan!.intention,undefined);
@@ -168,7 +169,8 @@ test('decision views keep reachable targets once and historical speech has no us
   try{
     engine.act('t2',{action:'say',word:'Follow me'});
     const observation=engine.observe('t1'),view=decisionView(observation,{kind:'collect',subject:'wood'});
-    assert.ok(view.choices.some(choice=>choice.action.action==='hit'&&choice.action.target?.join(',')==='0,1,2'));
+    const hit=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='hit')!;
+    assert.ok((hit.parameters.properties!.target.examples as number[][]).some(target=>target.join(',')==='0,1,2'));
     assert.ok(!view.surfaces.some(surface=>surface.target.join(',')==='0,1,2'));
     assert.doesNotMatch(view.perception,/hit|dig|follow|collect/i);
     const speech=speechContext(observation,observation.tick);
@@ -202,10 +204,10 @@ test('oversized intentions are corrected before commit and failed actions invali
   const {engine,store,runtime}=fixture();let calls=0;
   try{
     runtime.inference.complete=async(request)=>{
-      if(++calls===1)return answer('choose_action',{option:'hit_1',intention:'x'.repeat(201)});
+      if(++calls===1)return answer('hit',{target:[0,1,2],intention:'x'.repeat(201)});
       assert.match((request.messages.at(-1) as {content:string}).content,/1\.\.200/);
       assert.equal(engine.tick,0);
-      return answer('choose_action',{option:'hit_1',intention:'Continue observing this wood block.'});
+      return answer('hit',{target:[0,1,2],intention:'Continue observing this wood block.'});
     };
     const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
     engine.voxels.set([0,1,2],null);commit(engine,store,runtime,turn);
@@ -252,7 +254,7 @@ test('a reached social goal can stop following and close before selecting the ne
   try{
     engine.voxels.set([0,1,2],null);
     runtime.minds.get('t1')!.plan={...plan,goal:'Approach Moss.',steps:[{task:'Get within two metres of Moss.',criterion:{kind:'approach',entityId:'t2'},status:'pending'}]};
-    runtime.inference.complete=async()=>answer('choose_action',{option:'follow_t2'});
+    runtime.inference.complete=async()=>answer('follow',{entityId:'t2'});
     commit(engine,store,runtime,await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{}));
     runtime.inference.complete=async()=>answer('follow',{});
     for(let i=0;i<2&&!milestoneEvidence(runtime.minds.get('t1')!.plan!,recentActions(store.actionEventsAt(engine.tick,'t1')),engine.observe('t1')).length;i++)

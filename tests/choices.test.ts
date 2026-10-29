@@ -3,9 +3,8 @@ import assert from 'node:assert/strict';
 import {Engine} from '../src/core/engine';
 import {island} from '../src/modules/island';
 import type {Block,Entity} from '../src/core/types';
-import {compactView,goalAffordances,progressContext,recentActions} from '../server/agents/context';
+import {compactView,progressContext,recentActions} from '../server/agents/context';
 import {worldTools} from '../server/agents/tools';
-import {actionChoices} from '../server/agents/choices';
 
 function fixture(extra:Block[]=[]) {
   const blocks:Block[]=[];
@@ -14,32 +13,24 @@ function fixture(extra:Block[]=[]) {
   return new Engine({...island,generate:()=>({blocks:[...blocks,...extra],entities:[entity]})});
 }
 
-test('goal affordances distinguish the required material and never expose an occluded target',()=>{
+test('direct target tools expose reachable coordinates and never expose an occluded target',()=>{
   const wall:Block[]=[];
   for(let x=-2;x<=2;x++)for(let y=1;y<=4;y++)wall.push([x,y,1,'sand']);
   const engine=fixture([...wall,[0,1,2,'wood']]);
-  const view=engine.observe('t1'),choices=compactView(view).choices;
-  assert.deepEqual(goalAffordances(view,{kind:'collect',subject:'wood'}).matchingReachableChoices,[]);
-  const sand=goalAffordances(view,{kind:'collect',subject:'sand'}).matchingReachableChoices!;
-  assert.ok(sand.length);
-  for(const id of sand){
-    const action=choices.find(choice=>choice.id===id)!.action;
-    assert.equal(action.action,'hit');assert.ok('target' in action&&action.target&&engine.voxels.get(action.target)==='sand');
-  }
-  const scan=goalAffordances(view,{kind:'locate',subject:'sand'});
-  assert.deepEqual(scan.matchingReachableChoices,['scan_for_sand']);
-  assert.match(scan.interactionStatus!,/360-degree material scan/);
-  assert.deepEqual(actionChoices(view,{kind:'locate',subject:'sand'})[0],{id:'scan_for_sand',label:'Scan 360 degrees to locate sand.',action:{action:'find_material'}});
+  const hit=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='hit')!;
+  const schema=(hit.parameters.properties!.target as any),targets=schema.examples as number[][];
+  assert.ok(targets.length);assert.match(schema.description,/sand at/);
+  for(const target of targets)assert.equal(engine.voxels.get(target as [number,number,number]),'sand');
+  assert.doesNotMatch(schema.description,/wood/);
 });
 
-test('a cramped local view makes a checked escape prominent and its choice lands safely',()=>{
+test('a cramped local view reports a checked jump that the direct jump tool can execute',()=>{
   const engine=fixture([[-1,1,1,'leaves'],[0,1,1,'leaves'],[1,1,1,'leaves']]);
   const view=compactView(engine.observe('t1'));
   assert.match(view.navigationSummary!,/Walking is blocked.*checked jump/);
-  const jump=view.choices.find(choice=>choice.action.action==='jump')!;assert.ok(jump);
-  const tool=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='choose_action')!;
-  assert.deepEqual(tool.resolveAction!({option:jump.id}),jump.action);
-  assert.equal((tool.invoke({option:jump.id}) as {ok:boolean}).ok,true);
+  const jump=view.paths.find(path=>path.jump)?.jump;assert.ok(jump);
+  const tool=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='jump')!;
+  assert.equal((tool.invoke(jump) as {ok:boolean}).ok,true);
   for(let tick=0;tick<20;tick++)engine.step();
   assert.ok(engine.recentEvents.some(event=>event.type==='arrived'));
   assert.equal(engine.entity('t1').motion,undefined);
@@ -72,26 +63,22 @@ test('low canopy blocks headroom rather than offering a jump, and clearing it op
   assert.ok(high.observe('t1').navigation.paths[1].clearance>=2,'A canopy above the body leaves enough walking headroom.');
 });
 
-test('looking sideways keeps choices body-relative and names inventory by kind and contents',()=>{
+test('direct inventory tools name available stacks by kind and contents',()=>{
   const engine=fixture();engine.entity('t1').inventory={stacks:[{kind:'leaves',count:3},{kind:'bucket',contents:'water',count:1}],selected:null,capacity:640};
-  const view=compactView(engine.observeAt('t1',90));
-  const right=view.choices.find(choice=>choice.action.action==='walk'&&choice.action.angle===90)!;
-  assert.match(right.label,/right/);assert.equal(engine.entity('t1').yaw,0);
-  const held=view.choices.find(choice=>choice.id==='hold_bucket_water')!;
-  assert.match(held.label,/bucket containing water/);
-  assert.deepEqual(held.action,{action:'hold',stack:1});
+  const hold=worldTools(engine,'t1',{notes:[]},{viewAngle:90}).find(tool=>tool.name==='hold')!;
+  const stack=hold.parameters.properties!.stack;
+  assert.match(stack.description!,/1: bucket containing water/);assert.deepEqual(stack.enum,[0,1]);
+  assert.equal(engine.entity('t1').yaw,0);
 });
 
-test('selected targets are frozen and revalidated rather than reassigned when the world changes',()=>{
+test('direct target coordinates are revalidated rather than reassigned when the world changes',()=>{
   const engine=fixture([[0,1,1,'wood']]);
-  const view=compactView(engine.observe('t1'));
-  const strike=view.choices.find(choice=>choice.action.action==='hit'&&choice.action.target?.join(',')==='0,1,1')!;
-  const tool=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='choose_action')!;
-  const action=tool.resolveAction!({option:strike.id});
+  const tool=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='hit')!;
+  const target=(tool.parameters.properties!.target.examples as number[][]).find(value=>value.join(',')==='0,1,1')!;
   engine.voxels.set([0,1,1],null);engine.voxels.set([1,1,1],'wood');
-  assert.deepEqual(action.target,[0,1,1]);assert.equal(engine.act('t1',action).ok,false);
+  assert.deepEqual(target,[0,1,1]);assert.equal((tool.invoke({target}) as {ok:boolean}).ok,false);
   assert.equal(engine.blockDamage.size,0);
-  assert.equal((tool.invoke({option:'invented'}) as {ok:boolean}).ok,false);
+  assert.equal((tool.invoke({target:[99,99,99]}) as {ok:boolean}).ok,false);
 });
 
 test('progress reports actual inventory changes and flags repeated blocked moves without claiming collection',()=>{

@@ -6,7 +6,6 @@ import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { compactView, decisionView } from './context';
 import { impactPoints } from '../../src/core/impact-points';
 import { validCompactedNotes } from './journal-compaction';
-import { actionChoices } from './choices';
 export { impactPoints } from '../../src/core/impact-points';
 
 export interface Memory { notes: string[]; }
@@ -14,7 +13,6 @@ export interface WorldTool {
   name: string; description: string; parameters: JsonSchemaNode;
   physical: boolean;
   validate?(args: unknown): string | undefined;
-  resolveAction?(args: unknown): Action;
   output: { schema: JsonSchemaNode; render(args: unknown, value: unknown): { type: 'text'; text: string }[] };
   execute(args: unknown, exec?: { signal?: AbortSignal }): Promise<unknown>;
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
@@ -34,8 +32,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   };
   const action = (name:string,description:string,parameters:JsonSchemaNode,actionName:Action['action']) => tool(name,description,parameters,true,(args:Action)=>engine.act(id,{...args,action:actionName}));
   const object=(properties:Record<string,JsonSchemaNode>={},required:string[]=[]):JsonSchemaNode=>({type:'object',properties,required,additionalProperties:false});
-  const noArgs=object(),vector:JsonSchemaNode={type:'array',items:{type:'integer'},description:'Block coordinates [x,y,z].'};
-  const target=object({target:vector},['target']);
+  const noArgs=object();
   const availableOnly=options.availableOnly!==false;
   const choice=(values:(string|number)[],type:'string'|'integer'='string'):JsonSchemaNode=>({type,...(availableOnly?{enum:values}:{})});
   const remember=async(note:string,replace?:number)=>{
@@ -67,6 +64,9 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   ];
   const view=availableOnly?engine.observeAt(id,options.viewAngle??0):undefined;
   const targets=view?.interactions;
+  const target=(values:readonly number[][]=[],details:readonly string[]=[])=>object({target:{type:'array',items:{type:'integer'},description:values.length?`Use one currently reachable [x,y,z] target: ${details.length?details.join('; '):values.map(value=>`[${value.join(',')}]`).join('; ')}.`:'Block coordinates [x,y,z].',...(values.length?{examples:values.map(value=>[...value])}:{})}},['target']);
+  const hitTargets=targets?.hit.map(block=>block.target)??[];
+  const hitDetails=targets?.hit.map(block=>`${block.kind} at [${block.target.join(',')}]${block.cracks?` (${block.cracks} cracks)`:''}`)??[];
   if(options.speechMenu)return [
     action('say','Communicate one selected idea to everyone within clear hearing range (10 metres).',object({word:{type:'string',enum:engine.module.manifest.vocabulary}},['word']),'say'),
     tool('do_not_reply','Choose not to reply. Close the communication menu without speaking or spending world time.',noArgs,false,()=>({ok:true,message:'You chose not to reply. Choose another action.'})),
@@ -80,16 +80,6 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
     action('walk','Walk using either relative distance and angle or absolute map coordinates x and y, optionally with z. The engine ignores z, derives walking height from terrain, and calculates the current bearing, distance and safe route; movement stops before obstacles or unsafe terrain.',walkMovement,'walk'),
     action('turn','Turn your body and forward view.',object({angle:{type:'number',description:'Degrees (-360..360); negative left, positive right.'}},['angle']),'turn'),
   ];
-  if(view){
-    const choices=actionChoices(view,options.goalCriterion);
-    const resolveAction=(args:unknown)=>{
-      const choice=choices.find(choice=>choice.id===(args as {option:string}).option);
-      if(!choice)throw new Error('Choose an option from the current observation.');
-      return structuredClone(choice.action);
-    };
-    const choose=tool('choose_action','Prefer this for checked movement, reachable interactions, and named inventory items. Select one current choices ID; it performs exactly one physical action. Look refreshes the choices.',object({option:{type:'string',enum:choices.map(choice=>choice.id)}},['option']),true,args=>engine.act(id,resolveAction(args)));
-    choose.resolveAction=resolveAction;tools.unshift(choose);
-  }
   if(options.onFinishGoal)tools.push(tool('finish_goal','Return this task to your planner. completed: observed results satisfy its condition; cite availableEvidence. blocked: the required test or action is unavailable, or your method needs reconsideration. abandoned: you no longer want this task. A task ending does not complete its parent project. Call alone before acting.',object({outcome:{type:'string',enum:['completed','abandoned','blocked']},reason:{type:'string',description:'Brief reason, 1..300 characters.'},evidenceEventIds:{type:'array',items:{type:'integer'},description:'For completed, cite 1..10 recorded event IDs from plan.availableEvidence.'}},['outcome','reason']),false,({outcome,reason,evidenceEventIds})=>{
     if(!reason.trim()||reason.length>300)return {ok:false,message:'Give a reason of 1..300 characters.'};
     return options.onFinishGoal!(outcome,reason.trim(),evidenceEventIds);
@@ -99,17 +89,21 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   else tools.push(action('run','Run across clear terrain at twice the speed of walking.',movement(24),'run'));
   tools.push(action('jump','Jump up one block or across a gap; unsafe landings are refused.',object({distance:{type:'number',description:'Metres from here: 0.75..2.5, default 2; use the checked jump when given.'},angle:{type:'number',description:'Body-relative degrees (-90..90).'}}),'jump'));
   if(!held){
-    if(!availableOnly||targets!.hit.length)tools.push(action('hit','Strike a reachable block at target coordinates.',target,'hit'));
-    if(!availableOnly||targets!.pickup.length)tools.push(action('pickup','Take a reachable loose item.',object({itemId:choice(targets?.pickup.map(item=>item.itemId)??[])},['itemId']),'pickup'));
+    if(!availableOnly||targets!.hit.length)tools.push(action('hit','Strike one currently reachable block using its exact target coordinates.',target(hitTargets,hitDetails),'hit'));
+    if(!availableOnly||targets!.pickup.length){
+      const items=targets?.pickup??[];
+      const details=items.map(item=>{const body=view?.items.find(candidate=>candidate.id===item.itemId);return `${item.itemId}: ${item.kind}${body?` at [${body.position.map(value=>Math.round(value*100)/100).join(',')}]`:''}, ${item.metres} m away`;});
+      tools.push(action('pickup','Take one currently reachable loose item using its exact ID.',object({itemId:{...choice(items.map(item=>item.itemId)),description:details.length?`Current reachable items: ${details.join('; ')}.`:'Loose item ID.'}},['itemId']),'pickup'));
+    }
   }else{
     const heldLabel=`${held.kind}${held.contents?` containing ${held.contents}`:''}`;
     const hitMessage=held.kind==='shovel'
       ?'Hit is unavailable while you hold the shovel. Use dig for reachable sand, dirt, or grass; store the shovel before striking other blocks.'
       :`Hit is unavailable while you hold ${heldLabel}. Store, place, or throw it before striking a world block.`;
-    tools.push(tool('hit',`Disabled while you hold ${heldLabel}. ${hitMessage}`,target,false,()=>({ok:false,message:hitMessage})));
+    tools.push(tool('hit',`Disabled while you hold ${heldLabel}. ${hitMessage}`,target(hitTargets,hitDetails),false,()=>({ok:false,message:hitMessage})));
     const pickupMessage=`Pickup is unavailable while you hold ${heldLabel}. Store, place, or throw it to free your hands first.`;
     tools.push(tool('pickup',`Disabled while you hold ${heldLabel}. ${pickupMessage}`,object({itemId:{type:'string',description:'Loose item ID; unavailable until your hands are free.'}},['itemId']),false,()=>({ok:false,message:pickupMessage})));
-    if(!availableOnly||targets!.place.length)tools.push(action('place','Set one held item at an empty supported cell.',target,'place'));
+    if(!availableOnly||targets!.place.length)tools.push(action('place','Set one held item at one currently reachable empty supported cell.',target(targets?.place),'place'));
     tools.push(action('throw','Throw one held item forward.',object({force:{type:'number',description:'Strength 1..12, default 7.'}}),'throw'));
     if(held.kind==='wood'){
       const strike=tool('strike_held','Strike a surface point on the wood in your hands.',object({point:{type:'string',enum:Object.keys(impactPoints)},orientation:{type:'string',enum:['up','down'],description:'Required for front_edge; otherwise unused.'}},['point']),true,({point,orientation}:{point:string;orientation?:'up'|'down'})=>engine.act(id,{action:'strike_held',impact:impactPoints[point],...(orientation?{orientation}:{})}));
@@ -117,17 +111,23 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
       tools.push(strike);
     }
     if(held.kind==='bucket'){
-      if(held.contents){if(!availableOnly||targets!.empty.length)tools.push(action('empty','Empty one held bucket at target coordinates; hold the empty bucket. Matching contents stack together.',target,'empty'));}
-      else if(!availableOnly||targets!.fill.length)tools.push(action('fill','Fill one held bucket from reachable water, dirt, or sand; hold the filled bucket. Matching contents stack together.',target,'fill'));
+      if(held.contents){if(!availableOnly||targets!.empty.length)tools.push(action('empty','Empty one held bucket at one currently reachable target; hold the empty bucket. Matching contents stack together.',target(targets?.empty),'empty'));}
+      else if(!availableOnly||targets!.fill.length)tools.push(action('fill','Fill one held bucket from one currently reachable water, dirt, or sand target; hold the filled bucket. Matching contents stack together.',target(targets?.fill),'fill'));
     }
     tools.push(action('store','Free your hands. Item quantities stay unchanged; this does not collect anything.',noArgs,'store'));
   }
-  if(held?.kind==='shovel'&&(!availableOnly||targets!.hit.length))tools.push(action('dig','Remove reachable sand, dirt, or grass with one shovel strike; keep holding the shovel.',target,'dig'));
+  if(held?.kind==='shovel'&&(!availableOnly||targets!.hit.length))tools.push(action('dig','Remove reachable sand, dirt, or grass with one shovel strike; keep holding the shovel.',target(hitTargets,hitDetails),'dig'));
   if(entity.inventory?.stacks.some(stack=>stack.kind==='door_half_up'&&stack.count>0)&&entity.inventory.stacks.some(stack=>stack.kind==='door_half_down'&&stack.count>0))
     tools.push(action('join','Join one upper and one lower wooden half into a rustic door.',noArgs,'join'));
   const stacks=entity.inventory?.stacks.flatMap((_,index)=>index!==entity.inventory!.selected?[index]:[])??[];
-  if(stacks.length||(!availableOnly&&entity.inventory?.stacks.length))tools.push(action('hold','Take an already owned inventory stack into your hands. This does not collect anything.',object({stack:choice(stacks,'integer')},['stack']),'hold'));
-  if(!availableOnly||targets!.follow.length)tools.push(tool('follow','Start following a visible creature within 20 metres and stay one metre away. Later turns offer only follow and stop_follow until you stop.',object({entityId:choice(targets?.follow.map(other=>other.id)??[])},['entityId']),true,({entityId}:{entityId:string})=>engine.act(id,{action:'follow',entityId,angle:options.viewAngle??0})));
+  if(stacks.length||(!availableOnly&&entity.inventory?.stacks.length)){
+    const details=stacks.map(index=>{const stack=entity.inventory!.stacks[index];return `${index}: ${stack.kind}${stack.contents?` containing ${stack.contents}`:''} (${stack.count})`;});
+    tools.push(action('hold','Take one already owned inventory stack into your hands. This does not collect anything.',object({stack:{...choice(stacks,'integer'),description:details.length?`Available inventory stacks: ${details.join('; ')}.`:'Inventory stack index.'}},['stack']),'hold'));
+  }
+  if(!availableOnly||targets!.follow.length){
+    const followers=targets?.follow??[],details=followers.map(other=>`${other.id}: ${other.name}, ${other.metres} m away`);
+    tools.push(tool('follow','Start following one currently visible creature within 20 metres and stay one metre away. Later turns offer only follow and stop_follow until you stop.',object({entityId:{...choice(followers.map(other=>other.id)),description:details.length?`Current visible creatures: ${details.join('; ')}.`:'Creature ID.'}},['entityId']),true,({entityId}:{entityId:string})=>engine.act(id,{action:'follow',entityId,angle:options.viewAngle??0})));
+  }
   if(!availableOnly||targets!.speak.length)tools.push(tool('say','Open your available communication ideas. This takes no world time.',noArgs,false,()=>({ok:true,message:'Choose one idea to communicate, or use do_not_reply if you do not want to answer.',options:engine.module.manifest.vocabulary})));
   tools.push(action('wait','Wait and watch.',noArgs,'wait'));
   tools.push(tool('journal',`Preserve an important insight, uncertainty, commitment, useful location or unfinished work for your future self. Your actions and discoveries are recorded automatically; your personal interpretation is not. Include the conditions of a memorable fact learned about the world. Label hypotheses and never generalize one unsuccessful test to every possible method. Append new information; use replace only to correct that specific old claim, not to keep the journal artificially short. ${PRIVATE_NOTE_LIMIT} notes; faithful compaction when full; no world time.`,object({note:{type:'string',description:'1..300 characters. State what was observed, under which conditions, and what remains uncertain.'},...(memory.notes.length?{replace:{type:'integer' as const,description:'Optional zero-based index of the specific claim corrected by this note. Omit to append.',enum:memory.notes.map((_,index)=>index)}}:{})},['note']),false,({note,replace}:{note:string;replace?:number})=>remember(note,replace)));
@@ -148,7 +148,5 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
       return undefined;
     };
   }
-  // These enum-only actions are fully represented by current choices. Coordinate and movement
-  // tools remain available for actions beyond the small checked menu.
-  return options.concise&&view?tools.filter(tool=>!['hold','store','follow','pickup'].includes(tool.name)||!tool.physical):tools;
+  return tools;
 }

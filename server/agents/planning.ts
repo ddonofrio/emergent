@@ -7,6 +7,7 @@ import { inventoryAmounts, milestoneEvidence, goalEvidence, referencedGoalEviden
 import { decisionCycle, type recentActions } from './context';
 import { InferenceAuditError } from './audit';
 
+const MAX_EXPLANATION_CORRECTIONS=3;
 const text=(value:unknown,maximum:number):value is string=>typeof value==='string'&&value.trim().length>0&&value.length<=maximum;
 const shortList=(value:unknown,maximum:number,minimum=0):value is string[]=>Array.isArray(value)&&value.length>=minimum&&value.length<=maximum&&value.every(item=>text(item,300));
 const projectSchema:JsonSchemaNode={type:'object',properties:{goal:{type:'string',description:'Your sustained project, 1..300 characters. Preserve it across tasks while it still matters.'},successCondition:{type:'string',description:'What you would observe if this project succeeded, 1..300 characters.'},progress:{type:'string',description:'What has actually happened, what remains, and why. Up to 1200 characters. Separate hypotheses from observed facts.'},openQuestions:{type:'array',items:{type:'string'},description:'Up to four untested questions or assumptions, each at most 300 characters.'}},required:['goal','successCondition','progress','openQuestions'],additionalProperties:false};
@@ -52,7 +53,7 @@ export async function planDecision(options:{
   complete(request:CompletionRequest,signal:AbortSignal):Promise<CompletionResult>;
   waiting(message:string):void;save(plan:AgentPlan):void;
 }):Promise<AgentPlan> {
-  let previous=options.plan,correction='',previousAttempt:unknown;
+  let previous=options.plan,correction='',previousAttempt:unknown,overlongExplanationAttempts=0;
   while(true){
     options.signal.throwIfAborted();
     const reviewing=!options.upgrade&&previous?.status==='active'&&previous.steps.some(step=>step.status==='pending');
@@ -80,6 +81,10 @@ export async function planDecision(options:{
       options.signal.throwIfAborted();
       let args:any;
       if(answer.calls.length===1&&answer.calls[0].function.name===name){try{args=JSON.parse(answer.calls[0].function.arguments);}catch{}}
+      if(typeof args?.explanation==='string'&&args.explanation.length>300){
+        overlongExplanationAttempts++;
+        if(overlongExplanationAttempts>MAX_EXPLANATION_CORRECTIONS)args.explanation=args.explanation.slice(0,300);
+      }else overlongExplanationAttempts=0;
       const problems=args?argumentProblems(parameters,args,strategic,reviewing):[`Call ${name} exactly once with valid JSON arguments.`];
       let next:AgentPlan|undefined;
       if(args&&!problems.length){

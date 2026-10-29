@@ -49,12 +49,7 @@ async function provider(manualPlanning=false) {
 }
 function respond(request: Request, action: Action) {
   const {action:name,...argumentsValue}=action;
-  if(request.body.tools.length&&!request.body.tools.some((tool:any)=>tool.function.name===name)){
-    const contexts=request.body.messages.filter((message:any)=>message.role==='user'||message.role==='tool').map((message:any)=>{try{return JSON.parse(message.content);}catch{return {};}});
-    const choices=contexts.findLast((context:any)=>context.choices)?.choices??[];
-    const choice=choices.find((choice:any)=>choice.action.action===name&&Object.entries(argumentsValue).every(([key,value])=>JSON.stringify(choice.action[key])===JSON.stringify(value)));
-    assert.ok(choice,`No available option for ${name}`);return respondTool(request,'choose_action',{option:choice.id});
-  }
+  if(request.body.tools.length)assert.ok(request.body.tools.some((tool:any)=>tool.function.name===name),`No available tool for ${name}`);
   if(name==='strike_held')return respondTool(request,name,{point:Object.entries(impactPoints).find(([,point])=>JSON.stringify(point)===JSON.stringify(action.impact))?.[0]});
   respondTool(request,name,argumentsValue);
 }
@@ -186,19 +181,19 @@ test('early goal acknowledgment requires evidence, survives restart and resets t
   }finally{r.clock.close();resumed?.clock.close();store.close();p.close();}
 });
 
-test('selected action references persist as physical arguments and revalidate at the shared commit',async()=>{
+test('direct target arguments persist and revalidate at the shared commit',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   let resumed:ReturnType<typeof run>|undefined;
   try{
     engine.setEntityEnabled('t2',false);engine.setEntityEnabled('duck',false);
     engine.entity('t1').inventory={stacks:[{kind:'leaves',count:2}],selected:0,capacity:640};
     store.record(engine.frame(),engine.state(),r.runtime.persistence());r.clock.pump();await until(()=>p.requests.length===1);
-    const prompt=JSON.parse(p.requests[0].body.messages.at(-1).content),choice=prompt.choices.find((item:any)=>item.action.action==='place');assert.ok(choice);
-    respondTool(p.requests[0],'choose_action',{option:choice.id});await until(()=>r.clock.status().phase==='advancing');
+    const place=p.requests[0].body.tools.find((tool:any)=>tool.function.name==='place'),target=place.function.parameters.properties.target.examples[0];assert.ok(target);
+    respondTool(p.requests[0],'place',{target});await until(()=>r.clock.status().phase==='advancing');
     const pending=store.loadPending<any>(0,'t1',r.runtime.inference.cacheKey);
-    assert.equal(pending.calls[0].function.name,'place');assert.deepEqual(JSON.parse(pending.calls[0].function.arguments).target,choice.action.target);
+    assert.equal(pending.calls[0].function.name,'place');assert.deepEqual(JSON.parse(pending.calls[0].function.arguments).target,target);
     r.clock.close();const restored=new Engine(engine.module,store.stateAt(0));restored.nextEvent=store.maxEventId()+1;
-    restored.voxels.set(choice.action.target,'stone');
+    restored.voxels.set(target,'stone');
     resumed=run(restored,store,p.url,null);resumed.clock.pump();await until(()=>resumed!.clock.status().phase==='advancing');resumed.advance(1000);
     assert.equal(p.requests.length,1,'Ready physical decisions must survive restart without inference.');
     assert.equal(restored.entity('t1').inventory!.stacks[0].count,2);
@@ -285,7 +280,7 @@ test('looking sideways makes follow available for the newly seen entity without 
     engine.setEntityEnabled('t2',false);delete engine.entity('duck').motion;
     r.clock.pump();await until(()=>p.requests.length===1);assert.equal(p.requests[0].body.tools.some((tool:any)=>tool.function.name==='follow'),false);
     respondTool(p.requests[0],'look',{angle:90});await until(()=>p.requests.length===2);
-    assert.equal(engine.tick,0);assert.equal(engine.entity('t1').yaw,0);assert.ok(p.requests[1].body.tools.find((tool:any)=>tool.function.name==='choose_action').function.parameters.properties.option.enum.includes('follow_duck'));
+    assert.equal(engine.tick,0);assert.equal(engine.entity('t1').yaw,0);assert.ok(p.requests[1].body.tools.find((tool:any)=>tool.function.name==='follow').function.parameters.properties.entityId.enum.includes('duck'));
     assert.ok(JSON.parse(p.requests[1].body.messages.at(-1).content).interactions.follow.some((target:any)=>target.id==='duck'));
     respond(p.requests[1],{action:'follow',entityId:'duck'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.equal(engine.entity('t1').following?.entityId,'duck');assert.ok(engine.entity('t1').position[0]>1);assert.equal(engine.time,1);
@@ -372,16 +367,14 @@ test('execution foregrounds the assigned result and current matching targets wit
     assert.match(first.body.messages[0].content,/^CURRENT GOAL: Collect one wood/);
     assert.equal(Object.keys(prompt)[0],'plan');
     assert.deepEqual(prompt.plan.criterion,{kind:'collect',subject:'wood'});
-    assert.ok(prompt.plan.matchingReachableChoices.length);
-    for(const id of prompt.plan.matchingReachableChoices){
-      const choice=prompt.choices.find((item:any)=>item.id===id);
-      assert.equal(choice.action.action,'hit');assert.deepEqual(choice.action.target,[0,1,2]);
-    }
+    assert.equal(prompt.plan.matchingReachableChoices,undefined);
+    const hit=first.body.tools.find((tool:any)=>tool.function.name==='hit');
+    assert.ok(hit.function.parameters.properties.target.examples.some((target:number[])=>target.join(',')==='0,1,2'));
     assert.equal(prompt.reminder,undefined);assert.equal(prompt.hints,undefined);
     assert.equal(prompt.plan.goalAchieved,false);
     respondTool(first,'look',{angle:180});await until(()=>p.requests.length===2);
     assert.match(p.requests[1].body.messages[0].content,/^CURRENT GOAL: Collect one wood/);
-    assert.deepEqual(JSON.parse(p.requests[1].body.messages.at(-1).content).plan.matchingReachableChoices,[]);
+    assert.equal(JSON.parse(p.requests[1].body.messages.at(-1).content).plan.matchingReachableChoices,undefined);
     respondTool(p.requests[1],'finish_goal',{outcome:'abandoned',reason:'Choose a different activity.'});await until(()=>p.requests.length===3);
     const changed=p.requests[2];
     assert.match(changed.body.messages[0].content,/^CURRENT GOAL: Inspect the surroundings/);
@@ -637,12 +630,12 @@ test('exhausted supporting tools are removed while the frozen decision keeps ret
   }finally{r.clock.close();store.close();p.close();}
 });
 
-test('repeated invalid physical choices restart a fresh prompt without an error phase',async()=>{
+test('repeated invalid physical calls restart a fresh prompt without an error phase',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
     for(let index=0;index<4;index++){
-      respondTool(p.requests[index],'choose_action',{option:'not_a_current_choice'});
+      respondTool(p.requests[index],'walk',{distance:0});
       await until(()=>p.requests.length===index+2);
     }
     assert.equal(engine.tick,0);assert.equal(p.requests.length,5);assert.equal(r.clock.status().phase,'thinking');
@@ -662,8 +655,9 @@ test('goal leads crack attention and the last result, and attention disappears a
       const request=p.requests[index],context=JSON.parse(request.body.messages.at(-1).content);
       assert.deepEqual(Object.keys(context).slice(0,3),['plan','lastResult','inventory']);
       assert.match(context.attention,/Cracks.*observed changes/);
-      assert.ok(context.choices.some((choice:any)=>choice.action.target?.join(',')==='0,1,1'&&/cracks/.test(choice.label)));
-      assert.equal(request.body.tools[0].function.name,'choose_action');
+      const hit=request.body.tools.find((tool:any)=>tool.function.name==='hit');
+      assert.ok(hit.function.parameters.properties.target.examples.some((target:number[])=>target.join(',')==='0,1,1'));
+      assert.match(hit.function.parameters.properties.target.description,/cracks/);
       respond(request,{action:'hit',target:[0,1,1]});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     }
     assert.ok(store.eventsAt(engine.tick,'t1').some(event=>event.type==='observation'&&(event.data as any).attention?.includes('same block')));
@@ -728,7 +722,7 @@ test('journal favors durable world knowledge and persists notes for future promp
     assert.match(p.planningRequests[0].body.messages[0].content,/Decide for yourself what you want to do/);
     assert.doesNotMatch(p.planningRequests[0].body.messages[0].content,/Your mission is to complete/);
     assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='finish_goal').function.description,/completed: observed results/);
-    assert.match(p.requests[0].body.messages[0].content,/Prefer choose_action for checked options/);
+    assert.doesNotMatch(p.requests[0].body.messages[0].content,/choose_action/);
     assert.match(p.requests[0].body.messages[0].content,/Use journal/);
     const firstContext=JSON.parse(p.requests[0].body.messages.at(-1).content);
     assert.equal(firstContext.plan.matchingReachableChoices,undefined);
@@ -775,17 +769,19 @@ test('replacing an obsolete journal goal stays staged, needs no compaction and s
   }finally{r.clock.close();resumed?.clock.close();store.close();p.close();}
 });
 
-test('invalid item IDs are repaired before committing and valid choices are rechecked against the shared world',async()=>{
+test('invalid item IDs are repaired before committing and valid direct targets are rechecked against the shared world',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);
     engine.bodies.push({id:'near-arrow',kind:'arrow',position:[-.5,1.3,1.5],velocity:[0,0,0],resting:true});
     r.clock.pump();await until(()=>p.requests.length===1);
-    assert.ok(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='choose_action').function.parameters.properties.option.enum.includes('pickup_near-arrow'));
-    respondTool(p.requests[0],'choose_action',{option:'pickup_arrow'});await until(()=>p.requests.length===2);
+    const pickup=p.requests[0].body.tools.find((tool:any)=>tool.function.name==='pickup');
+    assert.ok(pickup.function.parameters.properties.itemId.enum.includes('near-arrow'));
+    assert.match(pickup.function.parameters.properties.itemId.description,/near-arrow.*\[/);
+    respondTool(p.requests[0],'pickup',{itemId:'pickup_arrow'});await until(()=>p.requests.length===2);
     assert.equal(engine.tick,0);assert.equal(engine.entity('t1').inventory,null);
     assert.equal(JSON.parse(p.requests[1].body.messages.at(-1).content).ok,false);
-    respondTool(p.requests[1],'choose_action',{option:'pickup_near-arrow'});await until(()=>r.clock.status().phase==='advancing');
+    respondTool(p.requests[1],'pickup',{itemId:'near-arrow'});await until(()=>r.clock.status().phase==='advancing');
     engine.bodies=engine.bodies.filter(body=>body.id!=='near-arrow');r.advance(1000);
     assert.equal(engine.entity('t1').lastAction!.ok,false);assert.match(engine.entity('t1').lastAction!.message,/no longer loose/);
     assert.equal(engine.entity('t1').inventory,null);assert.equal(r.runtime.minds.get('t1')!.turns,1);

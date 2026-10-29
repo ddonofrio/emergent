@@ -231,7 +231,7 @@ test('visible cracks take priority over fresh wood and lose attention when unrea
   assert.deepEqual(observation.interactions.hit[0].target,[1,1,0]);
   assert.match(view.attention!,/plant block at \[1,1,0\].*visible cracks.*same block/);
   const tools=worldTools(engine,'t1',memory).map(tool=>tool.name);
-  assert.equal(tools[0],'choose_action');assert.deepEqual([...tools].sort(),[...before].sort(),'Attention does not remove other choices.');
+  assert.ok(tools.includes('hit'));assert.deepEqual([...tools].sort(),[...before].sort(),'Attention does not remove tools.');
   engine.entity('t1').position=[6.5,1,-6.5];assert.equal(compactView(engine.observe('t1')).attention,undefined);
   engine.entity('t1').position=[.5,1,.5];engine.act('t1',{action:'hit',target:[1,1,0]});
   assert.match(compactView(engine.observe('t1')).attention!,/deep cracks.*close to breaking/);
@@ -904,7 +904,7 @@ test('running is disabled only while a raw block is in hand, not while stored',(
 });
 test('the Harness schema guard validates contextual embodied tools', async () => {
   const engine = fixture([[1,1,0,'wood']],[entity(),entity('t2',.5,-3.5)]), memory = {notes:[] as string[]}, tools=worldTools(engine,'t1',memory);
-  assert.deepEqual(tools.map(t=>t.name),['choose_action','look','find_material','find_entity','walk','turn','run','jump','hit','wait','journal']);
+  assert.deepEqual(tools.map(t=>t.name),['look','find_material','find_entity','walk','turn','run','jump','hit','wait','journal']);
   const scan=tools.find(tool=>tool.name==='find_material')!.invoke({}) as any;
   assert.equal(scan.ok,true);assert.ok(scan.feedback.materials.some((item:any)=>item.material==='wood'&&Number.isFinite(item.bodyRelativeDegrees)&&Number.isFinite(item.directionXZ.x)&&Number.isFinite(item.directionXZ.z)));
   assert.equal(engine.entity('t1').motion?.kind,'scan');for(let tick=0;tick<20;tick++)engine.step();assert.equal(engine.entity('t1').motion,undefined);

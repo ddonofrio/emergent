@@ -95,6 +95,12 @@ test('the planner authors goals outside any catalog and preserves its exact succ
   assert.equal(needsPlanReview(next,32),false,'A free-text goal needs no programmed criterion.');
 });
 
+test('planning truncates explanation after three consecutive overlong corrections',async()=>{
+  let calls=0;const explanation='x'.repeat(302);
+  const next=await planDecision({...base(),async complete(){calls++;return answer('set_plan',{...authored,explanation});}});
+  assert.equal(calls,4);assert.equal(next.explanation,'x'.repeat(300));
+});
+
 test('identical surroundings allow different model-authored goals without substitution',async()=>{
   const other={goal:'Stay beside Moss while listening to the duck.',successCondition:'I have heard the duck while standing beside Moss.',explanation:'I want to share this sound.'};
   const first=await planDecision({...base(),async complete(){return answer('set_plan',authored);}});

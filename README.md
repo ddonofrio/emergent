@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open http://127.0.0.1:3000. Without a configured provider the app runs a clearly labelled **scripted demo**, not an LLM experiment. Copy `.env.example` to `.env` and configure OpenRouter and/or a local OpenAI-compatible server. Providers are attempted in declaration order; exhaustion pauses world time and retries indefinitely. Keys remain server-side. Agent decisions are unlimited unless an optional positive `AGENT_MAX_TURNS` is explicitly configured. Context keeps ten private notes, four recent actions, and a factual progress summary. Agents can select labeled, checked actions and inspect visible local geometry.
+Open http://127.0.0.1:3000. Without a configured provider the app runs a clearly labelled **scripted demo**, not an LLM experiment. Copy `.env.example` to `.env` and configure OpenRouter and/or a local OpenAI-compatible server. Providers are attempted in declaration order; exhaustion pauses world time and retries indefinitely. Keys remain server-side. Agent decisions are unlimited unless an optional positive `AGENT_MAX_TURNS` is explicitly configured. Context keeps ten private notes, four recent actions, and a factual progress summary. Direct interaction tools identify their current local targets while the agent chooses its own movement and actions.
 
 ## Inference settings
 

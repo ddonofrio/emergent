@@ -5,7 +5,7 @@ import { impactPointName } from '../../src/core/impact-points';
 import { INVENTORY_STACKS, STACK_SIZE } from '../../src/core/inventory';
 import { RECENT_ACTION_LIMIT } from '../../src/core/memory';
 import { TICKS_PER_SECOND } from '../../src/core/time';
-import { actionChoices, directionLabel, localGeometry, type LocalView } from './choices';
+import { directionLabel, localGeometry, type LocalView } from './choices';
 
 // These projections are only for inference. Recorded world state retains full precision.
 export function rounded<T>(value:T):T {
@@ -16,23 +16,6 @@ export function bodyContext(view:{self:Observation['self'];viewAngle?:number}) {
   return rounded({position:view.self.position,yaw:view.self.yaw,forwardXZ:direction(view.self.yaw),viewForwardXZ:direction(view.self.yaw+(view.viewAngle??0)),
     coordinateFrame:'Coordinates are [x,y,z]; y is height. Yaw 0 faces +Z; yaw 90 faces +X. Movement angles are relative to your body, not your viewing direction. Looking does not turn your body.'});
 }
-// Match only currently observed affordances; this neither finds hidden targets nor plans a route.
-export function goalAffordances(view:LocalView,criterion:MilestoneCriterion|undefined) {
-  if(!criterion)return {matchingReachableChoices:[] as string[]};
-  const subject=criterion.subject,choices=actionChoices(view,criterion);
-  const matching=choices.filter(({action})=>{
-    if(criterion.kind==='approach'&&action.action==='follow')return action.entityId===criterion.entityId;
-    if(['scan','locate'].includes(criterion.kind)&&action.action==='find_material')return true;
-    if(criterion.kind==='collect'&&action.action==='pickup')return view.interactions.pickup.some(item=>item.itemId===action.itemId&&item.kind===subject);
-    const target='target' in action?action.target:undefined;
-    if(['collect','strike'].includes(criterion.kind)&&['hit','dig'].includes(action.action)&&target)
-      return view.interactions.hit.some(block=>block.kind===subject&&block.target.every((value,index)=>value===target[index]));
-    return false;
-  });
-  return {matchingReachableChoices:matching.map(choice=>choice.id),
-    ...(matching.length?{interactionStatus:criterion.kind==='scan'?'A 360-degree material scan directly performs the required inspection.':criterion.kind==='locate'?`A 360-degree material scan directly performs the required search for ${subject}.`:`${subject} is within reach. These choices act on the required material here.`}:{}),
-  };
-}
 export function compactView(view:LocalView,criterion?:MilestoneCriterion) {
   const inventory=view.self?.inventory,held=inventory&&inventory.selected!==null?inventory.stacks[inventory.selected]:undefined;
   const blockAction=held?.kind==='shovel'?'dig':'hit';
@@ -40,8 +23,8 @@ export function compactView(view:LocalView,criterion?:MilestoneCriterion) {
   const attention=cracked?blockAction==='dig'?`The cracked ${cracked.kind} at [${cracked.target.join(',')}] is within reach of your shovel. Use dig only if clearing it advances your current goal.`:`The ${cracked.kind} block at [${cracked.target.join(',')}] ${cracked.cracks>=2?'has deep cracks and looks close to breaking':'has visible cracks; its surface is changing'}. Further hits on the same block can continue this interaction if it advances your current goal.`:undefined;
   const blocked=view.navigation.paths.every(path=>path.clearance<.5);
   const jumps=view.navigation.paths.filter(path=>path.jump);
-  const navigationSummary=blocked?`Walking is blocked in the three checked directions.${jumps.length?` A checked jump is available ${jumps.map(path=>directionLabel(path.turn)).join(' or ')}. Choose its option to cross the obstacle.`:' Look or turn to inspect another direction, or clear a reachable obstruction.'}`:undefined;
-  return rounded({...(navigationSummary?{navigationSummary}:{}),...(attention?{attention}:{}),choices:actionChoices(view,criterion),geometry:localGeometry(view),perception:view.description,...(view.viewAngle===undefined?{}:{viewAngle:view.viewAngle}),
+  const navigationSummary=blocked?`Walking is blocked in the three checked directions.${jumps.length?` A checked jump is available ${jumps.map(path=>directionLabel(path.turn)).join(' or ')}.`:' Look or turn to inspect another direction, or clear a reachable obstruction.'}`:undefined;
+  return rounded({...(navigationSummary?{navigationSummary}:{}),...(attention?{attention}:{}),geometry:localGeometry(view),perception:view.description,...(view.viewAngle===undefined?{}:{viewAngle:view.viewAngle}),
     paths:view.navigation.paths.map(path=>({angle:path.turn,clearMetres:path.clearance,...(path.issue?{obstacle:path.issue.message,...(path.issue.target?{target:path.issue.target}:{})}:{}),...(path.approach?{walk:path.approach}:{}),...(path.jump?{jump:path.jump}:{})})),
     interactions:Object.fromEntries(Object.entries(view.interactions).filter(([,targets])=>targets.length).map(([name,targets])=>[name==='hit'?blockAction:name,targets])),
   });
@@ -50,9 +33,12 @@ export function compactView(view:LocalView,criterion?:MilestoneCriterion) {
 // One representation per reachable object; prose describes state, never proposes a task.
 export function decisionView(view:Observation,criterion?:MilestoneCriterion) {
   const compact=compactView(view,criterion);
-  const matching=new Set(goalAffordances(view,criterion).matchingReachableChoices);
-  compact.choices.sort((a,b)=>Number(matching.has(b.id))-Number(matching.has(a.id)));
-  const targets=new Set(compact.choices.flatMap(choice=>'target' in choice.action&&choice.action.target?[choice.action.target.join(',')]:[]));
+  const targets=new Set([
+    ...view.interactions.hit.map(block=>block.target.join(',')),
+    ...view.interactions.place.map(target=>target.join(',')),
+    ...view.interactions.fill.map(target=>target.join(',')),
+    ...view.interactions.empty.map(target=>target.join(',')),
+  ]);
   const surfaces=(compact.geometry?.visibleSurfaces??[]).filter(surface=>!targets.has(surface.target.join(',')));
   for(const surface of surfaces)targets.add(surface.target.join(','));
   const distant=view.surfaces.filter(surface=>!targets.has(surface.nearest.join(',')))
@@ -62,7 +48,7 @@ export function decisionView(view:Observation,criterion?:MilestoneCriterion) {
     body:bodyContext(view),
     ...(compact.navigationSummary?{navigationSummary:compact.navigationSummary}:{}),
     ...(view.interactions.hit.some(block=>block.cracks>0)?{attention:'Cracks below are observed changes on those specific blocks.'}:{}),
-    choices:compact.choices,perception:held==='empty'?'Your hands are empty.':`You hold ${held}.`,
+    perception:held==='empty'?'Your hands are empty.':`You hold ${held}.`,
     ...(compact.viewAngle===undefined?{}:{viewAngle:compact.viewAngle}),paths:compact.paths,
     surfaces:[...surfaces,...distant],
     creatures:view.entities.map(entity=>({id:entity.id,name:entity.name,position:entity.position})),

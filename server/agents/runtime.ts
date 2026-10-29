@@ -8,7 +8,7 @@ import { isObservedMaterialKnowledge } from '../../src/core/knowledge';
 import type { Store } from '../store';
 import { DEFAULT_REASONING, InvalidCompletionError, ProviderChain, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
-import { actionFeedback, bodyContext, compactResult, compactView, decisionView, goalAffordances, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
+import { actionFeedback, bodyContext, compactResult, compactView, decisionView, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
 import { compactJournal } from './journal-compaction';
 import { experienceReviewReason, needsPlanReview, planDecision } from './planning';
 import { ExperienceMemory } from './experience';
@@ -256,7 +256,7 @@ export class AgentRuntime {
     const system = ()=>[
       `CURRENT GOAL: ${mind.plan!.goal}\nSUCCESS CONDITION: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??mind.plan!.goal}\n${(mind.plan!.version??0)>=3?'This is your intended task, not proof that its assumptions are true.':milestoneEvidence(mind.plan!,actions,observation).length?`STATUS: Achieved. ${following?'Use stop_follow, then ':''}Call finish_goal with completed now.`:'STATUS: Not yet achieved.'}`,
       this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),
-      'End this decision with exactly one physical action; never batch two physical tools. You may use supporting tools first. Follow the suggested method only while current facts support it. If the task cannot be tested with available tools, call finish_goal alone with blocked and explain why; this asks your planner to reconsider without completing the project. Prefer choose_action for checked options. Optional intention: a next-step reminder of 1..200 characters, never automatically executed. Past speech is historical, not current navigation.',
+      'End this decision with exactly one physical action; never batch two physical tools. You may use supporting tools first. Follow the suggested method only while current facts support it. If the task cannot be tested with available tools, call finish_goal alone with blocked and explain why; this asks your planner to reconsider without completing the project. Optional intention: a next-step reminder of 1..200 characters, never automatically executed. Past speech is historical, not current navigation.',
       'Use journal for important insights, uncertainties, commitments and unfinished work your future self needs. Actions and discoveries are recorded automatically; your interpretations are not. Keep exact experimental conditions and uncertainty. Do not turn an untested idea or a single failure into a universal fact. Append useful new notes. When a discovery contradicts an old note, correct that specific claim instead of carrying its false conclusion forward.',
       lookCalls>=2?'The look limit is exhausted for this decision. Choose from the current observation and available tools.':undefined,
       supportingCalls>=MAX_SUPPORTING_CALLS?'The supporting-tool limit is exhausted for this decision. Choose one available physical action.':undefined,
@@ -273,7 +273,7 @@ export class AgentRuntime {
       const step=plan.steps.find(step=>step.status==='pending');
       const amounts=inventoryAmounts(observation.self.inventory);
       const inventoryChange=[...new Set([...Object.keys(amounts),...Object.keys(plan.inventoryBaseline??{})])].map(key=>({kind:JSON.parse(key)[0],contents:JSON.parse(key)[1],change:(amounts[key]??0)-(plan.inventoryBaseline?.[key]??0)})).filter(item=>item.change!==0);
-      return {goal:plan.goal,successCondition:step?.task,...(plan.project?{project:plan.project.goal,why:plan.explanation,suggestedActions:plan.suggestedActions,openQuestions:plan.project.openQuestions}:{}),...((plan.version??0)>=3?{assessment:'Completion is your assessment. Cite relevant availableEvidence in finish_goal; an accepted action alone does not establish success. A blocked test is not a negative experimental result.',availableEvidence:taskEvidenceView(plan,actions),inventoryChangeSinceGoal:inventoryChange}:{criterion:step?.criterion,goalAchieved:!!reached.length,...(step?.criterion?.kind==='collect'?{inventoryChangeSinceGoal:inventoryChange}:{}),...(!following&&!reached.length?goalAffordances(this.engine.observeAt(id,viewAngle),step?.criterion):{})}),elapsedTaskDecisions:Math.max(0,mind.turns-plan.createdTurn),
+      return {goal:plan.goal,successCondition:step?.task,...(plan.project?{project:plan.project.goal,why:plan.explanation,suggestedActions:plan.suggestedActions,openQuestions:plan.project.openQuestions}:{}),...((plan.version??0)>=3?{assessment:'Completion is your assessment. Cite relevant availableEvidence in finish_goal; an accepted action alone does not establish success. A blocked test is not a negative experimental result.',availableEvidence:taskEvidenceView(plan,actions),inventoryChangeSinceGoal:inventoryChange}:{criterion:step?.criterion,goalAchieved:!!reached.length,...(step?.criterion?.kind==='collect'?{inventoryChangeSinceGoal:inventoryChange}:{})}),elapsedTaskDecisions:Math.max(0,mind.turns-plan.createdTurn),
         ...((plan.version??0)<3&&(plan.steps.length!==1||!plan.steps[0].criterion)?{legacyPlan:'This older plan has no verifiable completion criterion. Use finish_goal with abandoned to write your own new goal. Do not continue work whose prerequisite was abandoned.'}:{}),
         ...(reached.length?{milestoneReached:reached,instruction:following?'This milestone is achieved. Use stop_follow, then finish_goal with completed.':'This milestone is achieved. Call finish_goal with completed now.'}:{}),
         ...(elapsed>0&&elapsed%PLAN_REMINDER_INTERVAL===0?{reviewReminder:'Check your goal against recorded progress. Use finish_goal if achieved or no longer useful; otherwise continue. This reminder does not call the planner.'}:{}),
@@ -335,10 +335,7 @@ export class AgentRuntime {
           if(!errors.length){
             const {intention,...parameters}=JSON.parse(call.function.arguments);
             if(intention)intentions.set(call.id,intention.trim());
-            if(tool.resolveAction){
-              const {action,...args}=tool.resolveAction(parameters);
-              physical.push({...call,function:{name:action,arguments:JSON.stringify(args)}});
-            }else physical.push({...call,function:{name:call.function.name,arguments:JSON.stringify(parameters)}});
+            physical.push({...call,function:{name:call.function.name,arguments:JSON.stringify(parameters)}});
             continue;
           }
           invalidPhysical=true;
