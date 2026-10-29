@@ -115,9 +115,9 @@ test('the planner rejects a plan without a standing journal action',async()=>{
 });
 
 test('planning truncates explanation after three consecutive overlong corrections',async()=>{
-  let calls=0;const explanation='x'.repeat(302);
+  let calls=0;const explanation='x'.repeat(502);
   const next=await planDecision({...base(),async complete(){calls++;return answer('set_plan',{...authored,explanation});}});
-  assert.equal(calls,4);assert.equal(next.explanation,'x'.repeat(300));
+  assert.equal(calls,4);assert.equal(next.explanation,'x'.repeat(500));
 });
 
 test('identical surroundings allow different model-authored goals without substitution',async()=>{

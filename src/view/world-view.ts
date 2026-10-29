@@ -20,6 +20,7 @@ export class WorldView {
   private effects: { mesh: THREE.Mesh; until: number; start: number }[] = [];
   private sea: THREE.Mesh;
   private seabed: THREE.Mesh;
+  private labels = new Map<string, HTMLButtonElement>();
   private cube = new THREE.BoxGeometry(1,1,1);
   private blockMaterial = new THREE.MeshStandardMaterial({ roughness: .94, metalness: 0 });
   private manifest?: ModuleManifest;
@@ -242,6 +243,7 @@ export class WorldView {
         this.triangle(group,[[.05,.34,-.202],[0,.285,-.202],[-.05,.34,-.202]],spotColor);
       }
       this.creatures.set(entity.id,group); this.scene.add(group);
+      const label=document.createElement('button');label.className='entity-label';label.textContent=entity.name;label.addEventListener('click',()=>this.onSelect(entity.id));this.container.append(label);this.labels.set(entity.id,label);
     }
   }
   select(id: string) { this.selected = id; }
@@ -276,6 +278,10 @@ export class WorldView {
         const leftArm=group.getObjectByName('arm-left'),rightArm=group.getObjectByName('arm-right'),punch=this.punches.get(e.id);
         if(leftArm)leftArm.rotation.x=walking?-gait*.3:0;
         if(rightArm){if(punch&&visualTime<=punch.until){const phase=Math.max(0,Math.min(1,(visualTime-punch.start)/(punch.until-punch.start)));rightArm.rotation.x=-Math.sin(Math.PI*phase)*1.8;}else{rightArm.rotation.x=walking?gait*.3:0;if(punch)this.punches.delete(e.id);}}
+        const label=this.labels.get(e.id)!;const projected=group.position.clone().add(new THREE.Vector3(0,e.height+.7,0)).project(this.camera);
+        label.style.display=Math.abs(projected.x)>1||Math.abs(projected.y)>1||projected.z>1?'none':'block';
+        label.style.left=`${(projected.x*.5+.5)*this.container.clientWidth}px`;label.style.top=`${(-projected.y*.5+.5)*this.container.clientHeight}px`;
+        label.classList.toggle('selected',e.id===this.selected);label.classList.toggle('disabled',!enabled);label.textContent=e.name;
         if (e.id === this.selected && enabled && this.following) { const next = group.position.clone().add(new THREE.Vector3(0,1,0)); const delta = next.clone().sub(this.controls.target); this.camera.position.add(delta); this.controls.target.copy(next); }
       }
       const ids = new Set(this.current.bodies.map(b => b.id));
@@ -302,6 +308,6 @@ export class WorldView {
     }
     this.controls.update(); this.renderer.render(this.scene,this.camera);
   };
-  dispose() { cancelAnimationFrame(this.frameId); this.observer.disconnect(); this.controls.dispose(); this.renderer.dispose(); }
+  dispose() { cancelAnimationFrame(this.frameId); this.observer.disconnect(); this.controls.dispose();for(const label of this.labels.values())label.remove();this.labels.clear();this.renderer.dispose(); }
 }
 const distanceSquared = (a: Vec3,b: Vec3) => a.reduce((sum,v,i) => sum+(v-b[i])**2,0);

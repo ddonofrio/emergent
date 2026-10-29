@@ -6,10 +6,11 @@ import { PLAN_REMINDER_INTERVAL, PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from
 import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import { isObservedMaterialKnowledge } from '../../src/core/knowledge';
 import type { Store } from '../store';
-import { DEFAULT_REASONING, InvalidCompletionError, ProviderChain, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ToolCall } from './providers';
+import { DEFAULT_REASONING, DEFAULT_REASONING_TOKENS, InvalidCompletionError, ProviderChain, retryTokenLimitedCompletion, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
 import { actionFeedback, bodyContext, compactResult, compactView, decisionView, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
 import { compactJournal } from './journal-compaction';
+import { journalEntries as journalContext } from './journal';
 import { experienceReviewReason, needsPlanReview, planDecision } from './planning';
 import { ExperienceMemory } from './experience';
 import { inventoryAmounts, milestoneEvidence, taskEvidenceView, referencedGoalEvidence } from './milestones';
@@ -52,7 +53,7 @@ export interface PreparedMovementPrompt {
 type Report = (id: string, status: DecisionStatus) => void;
 const MAX_SUPPORTING_CALLS = 4;
 const MAX_CORRECTION_ROUNDS = 4;
-const REQUIRED_SUPPORT_TOOLS = new Set(['finish_goal','stop_follow','do_not_reply']);
+const REQUIRED_SUPPORT_TOOLS = new Set(['finish_goal','stop_follow']);
 
 export class AgentRuntime {
   readonly minds = new Map<string, Mind>();
@@ -80,8 +81,9 @@ export class AgentRuntime {
   persistence(): [string, unknown][] { return [...this.minds]; }
   get mode(): 'llm' | 'demo' { return this.inference.enabled ? 'llm' : 'demo'; }
   private infer(id:string,phase:string,request:CompletionRequest,signal:AbortSignal,onAttempt:(provider:ProviderConfig,index:number)=>void) {
-    request={reasoning:DEFAULT_REASONING,...request};
-    return auditedCompletion(this.store,this.engine.tick,id,phase,request,signal,()=>this.inference.complete(request,signal,onAttempt));
+    request={reasoning:DEFAULT_REASONING,reasoning_tokens:DEFAULT_REASONING_TOKENS,...request};
+    return retryTokenLimitedCompletion(request,signal,candidate=>
+      auditedCompletion(this.store,this.engine.tick,id,phase,candidate,signal,()=>this.inference.complete(candidate,signal,onAttempt)));
   }
   setParallelRequests(enabled:boolean) { this.store.saveParallelRequests(enabled);this.parallelRequests=enabled; }
   setInferenceConfig(providers:ProviderConfig[],strategy:ProviderStrategy){
@@ -220,7 +222,7 @@ export class AgentRuntime {
     return staged.events;
   }
   private async request(id: string, mind: Mind, observation: Observation, signal: AbortSignal, report: Report): Promise<PreparedDecision> {
-    let following=!!observation.self.following,stopFollowing=false,viewAngle=0,speechMenu=false;
+    let following=!!observation.self.following,stopFollowing=false,viewAngle=0;
     const started = Date.now();
     const planEvents=await this.preparePlan(id,mind,observation,signal,report);
     const actions=this.actionHistory(id,observation.tick,mind.plan);
@@ -251,7 +253,7 @@ export class AgentRuntime {
     const currentCriterion=()=>mind.plan?.steps.find(step=>step.status==='pending')?.criterion;
     const makeTools=()=>{
       const staged=this.store.loadPending<{acknowledged?:boolean}>(observation.tick,`plan:${id}`,this.inference.cacheKey);
-      return worldTools(this.engine,id,mind,{following,viewAngle,speechMenu,concise:true,goalCriterion:currentCriterion(),...journalOptions,...(staged?.acknowledged?{onFinishGoal:undefined}:{})}).map(tool=>tool.physical?{...tool,parameters:{...tool.parameters,properties:{...tool.parameters.properties,intention:{type:'string' as const}}}}:tool);
+      return worldTools(this.engine,id,mind,{following,viewAngle,concise:true,goalCriterion:currentCriterion(),...journalOptions,...(staged?.acknowledged?{onFinishGoal:undefined}:{})}).map(tool=>tool.physical?{...tool,parameters:{...tool.parameters,properties:{...tool.parameters.properties,intention:{type:'string' as const}}}}:tool);
     };
     const system = ()=>[
       `CURRENT GOAL: ${mind.plan!.goal}\nSUCCESS CONDITION: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??mind.plan!.goal}\n${(mind.plan!.version??0)>=3?'This is your intended task, not proof that its assumptions are true.':milestoneEvidence(mind.plan!,actions,observation).length?`STATUS: Achieved. ${following?'Use stop_follow, then ':''}Call finish_goal with completed now.`:'STATUS: Not yet achieved.'}`,
@@ -262,7 +264,7 @@ export class AgentRuntime {
       supportingCalls>=MAX_SUPPORTING_CALLS?'The supporting-tool limit is exhausted for this decision. Choose one available physical action.':undefined,
       !following&&mind.notes.length?'Notes are your past interpretations, oldest first. Check them against observed results; an old note or plan cannot override contradictory evidence.':undefined,
     ].filter(Boolean).join('\n');
-    const notes=()=>mind.notes.length?{notes:mind.notes}:{};
+    const notes=()=>mind.notes.length?{notes:journalContext(mind)}:{};
     const recent=historicalActions(actions),learned=relevantKnowledge(this.engine,observation,true);
     const lastResult=(observation.self.lastAction??mind.lastResult) as ActionResult|undefined;
     const latest=recent.at(-1),lastRecorded=latest&&latest.result.message===lastResult?.message?latest:undefined;
@@ -281,7 +283,7 @@ export class AgentRuntime {
     };
     const terrainChanges=observation.terrainChanges.length?{terrainChanges:observation.terrainChanges.map(notice=>notice.message)}:{};
     const continuation=()=>mind.plan?.intention?{previousIntention:{text:mind.plan.intention,status:lastResult?.ok===false?'The action failed; reconsider this intention.':'Unverified reminder; check current facts before continuing.'}}:{};
-    const normalContext=()=>rounded({plan:planContext(),...continuation(),...(lastResult?{lastResult:{...(lastRecorded?{action:lastRecorded.action,args:lastRecorded.args}:{}),...actionFeedback(compactResult(lastResult))}}:{}),inventory:inventoryContext(observation),...heard,...terrainChanges,...decisionView(this.engine.observeAt(id,viewAngle),currentCriterion()),...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),progress:progressContext(recent.filter(entry=>entry.atSecond>(mind.plan?.startedAtSecond??0))),...(learned.length?{learned}:{}),...notes(),...(priorActions.length?{recent:priorActions.map(entry=>({...entry,result:actionFeedback(entry.result)}))}:{})});
+    const normalContext=()=>rounded({plan:planContext(),...continuation(),...(lastResult?{lastResult:{...(lastRecorded?{action:lastRecorded.action,args:lastRecorded.args}:{}),...actionFeedback(compactResult(lastResult,true))}}:{}),inventory:inventoryContext(observation),...heard,...terrainChanges,...decisionView(this.engine.observeAt(id,viewAngle),currentCriterion()),...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),progress:progressContext(recent.filter(entry=>entry.atSecond>(mind.plan?.startedAtSecond??0))),...(learned.length?{learned}:{}),...notes(),...(priorActions.length?{recent:priorActions.map(entry=>({...entry,result:actionFeedback(entry.result)}))}:{})});
     const initial=following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges}:normalContext();
     const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
     let attempts=0,supportingCalls=0,lookCalls=0,correctionRounds=0,invalidCompletions=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null,lastProviderError:string|undefined;
@@ -373,14 +375,6 @@ export class AgentRuntime {
           viewAngle=(result as {viewAngle:number}).viewAngle;
           tools=makeTools();
         }
-        if(call.function.name==='say'&&!tool?.physical&&(result as {ok?:boolean})?.ok){
-          speechMenu=true;
-          tools=makeTools();
-        }
-        if(call.function.name==='do_not_reply'&&(result as {ok?:boolean})?.ok){
-          speechMenu=false;
-          tools=makeTools();
-        }
         if(call.function.name==='stop_follow'&&(result as {ok?:boolean})?.ok){
           following=false;stopFollowing=true;delete mind.journalOffer;
           refreshTools();
@@ -397,7 +391,7 @@ export class AgentRuntime {
       const correction=invalidPhysical?'The model chose an invalid physical action.':physical.length>1?'The model chose more than one physical action.':rejectedCall||(!answer.calls.length?'The model returned no tool call.':'');
       if(correction&&++correctionRounds>=MAX_CORRECTION_ROUNDS){resetCorrectionContext(`${correction} The correction cycle reached ${MAX_CORRECTION_ROUNDS} responses.`);continue;}
       if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(normalContext())});
-      else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose exactly one: follow or stop_follow.':'Choose exactly one available physical action.'});
+      else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose follow, say (one to three words), or stop_follow to choose another action.':'Choose exactly one available physical action.'});
     }
   }
   commit(turn: PreparedTurn) {
@@ -423,12 +417,15 @@ export class AgentRuntime {
       }
       if(decision.stopFollowing)this.engine.act(id,{action:'stop_follow'});
       const tools=worldTools(this.engine,id,mind,{viewAngle:decision.viewAngle,availableOnly:false});
-      const speechTools=worldTools(this.engine,id,mind,{viewAngle:decision.viewAngle,availableOnly:false,speechMenu:true});
       for (const call of calls) {
         let result: unknown;
         try {
-          const tool = (call.function.name==='say'?speechTools:tools).find(t => t.name === call.function.name && t.physical);
+          const tool = tools.find(t => t.name === call.function.name && t.physical);
           const args=JSON.parse(call.function.arguments);
+          // Ready decisions from the old map convention retain their original horizontal destination.
+          if(call.function.name==='walk'&&!args.target&&Number.isFinite(args.x)&&Number.isFinite(args.y)){
+            args.target=[args.x,observation.self.position[1],args.y];delete args.x;delete args.y;delete args.z;
+          }
           // Ready decisions from older recordings may still contain physical impact coordinates.
           result=call.function.name==='strike_held'&&args.impact&&!args.point
             ?this.engine.act(id,{action:'strike_held',impact:args.impact,orientation:args.orientation})
@@ -456,7 +453,8 @@ export class AgentRuntime {
       this.engine.acknowledgeTerrainChanges(id,observation.terrainChanges??[]);
       mind.acknowledgedSpeechTick=Math.max(mind.acknowledgedSpeechTick??-1,...observation.heard.map(voice=>voice.tick));
       if (this.mode === 'llm') {
-        for(const note of decision.journalEntries??mind.notes.filter(note=>!previousMind.notes.includes(note)))this.engine.event(id,'memory',note,{notes:mind.notes});
+        journalContext(mind);
+        for(const note of decision.journalEntries??mind.notes.filter(note=>!previousMind.notes.includes(note)))this.engine.event(id,'memory',note,{notes:mind.notes,noteIds:mind.noteIds});
       }
       this.minds.set(id, mind);
     }
@@ -486,7 +484,7 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
     capabilities,
     inventory:inventoryContext(observation),
     learned:relevantKnowledge(engine,observation,true),
-    notes:mind.notes,
+    notes:journalContext(mind),
     ...speechContext(observation,mind.acknowledgedSpeechTick),
     recentActions:planningActions(actions.slice(-20)),
     progress:progressContext(actions),
@@ -505,7 +503,7 @@ function demoAction(o: Observation, turn: number, id: string): Action {
   if (held) return phase % 2 ? { action: 'throw', force: 7 } : { action: 'place', target: [Math.floor(o.self.position[0] + Math.sin(o.self.yaw * Math.PI / 180) * 2), Math.floor(o.self.position[1]), Math.floor(o.self.position[2] + Math.cos(o.self.yaw * Math.PI / 180) * 2)] };
   const wood = nearby.find(b => b[3] === 'wood');
   if (wood) return { action: 'hit', target: wood.slice(0,3) as [number,number,number] };
-  if (phase === 0 || phase === 8) return { action: 'say', word: phase ? 'Look at this' : "Let's explore together" };
+  if (phase === 0 || phase === 8) return { action: 'say', word: phase ? 'Look at this' : 'Explore with me' };
   if (phase === 2 && o.items.length) return { action: 'pickup', itemId: o.items[0].id };
   if (phase === 6 && nearby.length) { const block = nearby.find(b => b[3] !== 'grass') ?? nearby[0]; return { action: 'hit', target: block.slice(0,3) as [number,number,number] }; }
   if (phase % 3 === 0) return { action: 'turn', angle: id === 't1' ? 57 : -73 };

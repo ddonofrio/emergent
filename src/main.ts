@@ -6,11 +6,12 @@ import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type Worl
 import { knowledgeDescription } from './core/knowledge';
 import { PLAN_REVIEW_INTERVAL } from './core/memory';
 
-interface ProviderHealth {state:'unknown'|'ok'|'bad';detail:string;}
+interface ProviderHealth {state:'unknown'|'ok'|'bad';detail:string;inFlight?:boolean;}
 interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; providerStrategy:string; llmConfig?:LlmConfig; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
-interface LlmProvider {id:string;type:string;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKey?:string;health?:ProviderHealth;}
+interface LlmProvider {id:string;type:string;enabled:boolean;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKeyRemoved?:boolean;tokenless?:boolean;apiKeySource?:'own'|'provider';apiKeySavedType?:string;apiKeyCleared?:boolean;apiKey?:string;health?:ProviderHealth;}
 interface LlmConfig {strategy:string;currentStatus?:string;providers:LlmProvider[];}
+interface ProviderModelOption {id:string;label:string;}
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <main id="main">
@@ -47,7 +48,7 @@ app.innerHTML = `
       <section class="settings-section"><h2>Request settings</h2><label class="request-setting" title="Changes apply from the next turn."><input id="parallel-requests" type="checkbox" checked disabled>Parallel requests</label></section>
       <form id="llm-settings-form">
         <section class="settings-section"><div class="settings-section-heading"><div><h2>LLM configuration</h2><p>Choose one or more providers and models for agent requests.</p></div><button id="add-model" class="secondary-button" type="button">Add model</button></div><div id="model-list" class="model-list"></div><p class="settings-note">Amazon Bedrock uses an API key and AWS region. Anthropic's native adapter is not connected yet.</p></section>
-        <section class="settings-section algorithm-section"><label for="settings-strategy"><h2>Selection algorithm</h2></label><select id="settings-strategy"><option value="first-only">First model only</option><option value="round-robin">Round robin</option><option value="fallback">Fallback</option><option value="master-slaves">Master / slaves</option></select><p id="strategy-description" class="settings-note">Use only the first model in the list.</p></section>
+        <section class="settings-section algorithm-section"><label for="settings-strategy"><h2>Selection algorithm</h2></label><select id="settings-strategy"><option value="first-only">Single model</option><option value="round-robin">Round robin</option><option value="fallback">Fallback</option><option value="master-slaves">Master / slaves</option></select><p id="strategy-description" class="settings-note">Use only the first active model in the list.</p></section>
         <div class="settings-actions"><span id="settings-status" role="status"></span><button class="save-button" type="submit">Save configuration</button></div>
       </form>
     </div>
@@ -69,6 +70,7 @@ let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[]}|undefin
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
 let llmConfig:LlmConfig={strategy:'first-only',providers:[]};
+const modelOptionsCache=new Map<string,ProviderModelOption[]>();
 function settingField(parent:HTMLElement,title:string,field:string,value:string,type='text',placeholder=''){
   const label=document.createElement('label');label.className='model-field';label.textContent=title;
   const input=document.createElement('input');input.type=type;input.dataset.field=field;input.value=value;input.placeholder=placeholder;input.autocomplete=type==='password'?'new-password':'off';label.append(input);parent.append(label);return input;
@@ -76,8 +78,12 @@ function settingField(parent:HTMLElement,title:string,field:string,value:string,
 function readModelRows():LlmProvider[]{
   return Array.from($('model-list').children).map(card=>{
     const field=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement|HTMLSelectElement).value;
+    const enabled=(card.querySelector('[data-field="enabled"]') as HTMLInputElement).checked;
     const apiKey=card.querySelector('[data-field="apiKey"]') as HTMLInputElement;
-    return{id:(card as HTMLElement).dataset.id!,type:field('type'),name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),apiKey:apiKey.value,apiKeyConfigured:apiKey.placeholder.startsWith('Saved on server')};
+    const tokenless=(card.querySelector('[data-field="tokenless"]') as HTMLInputElement).checked;
+    const apiKeySource=apiKey.dataset.keySource as LlmProvider['apiKeySource'];
+    const apiKeySavedType=apiKey.dataset.savedType||undefined,apiKeyCleared=apiKey.dataset.clear==='true',apiKeyRemoved=apiKey.dataset.removed==='true';
+    return{id:(card as HTMLElement).dataset.id!,type:field('type'),enabled,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),apiKey:apiKey.value,apiKeyConfigured:!!apiKeySavedType||!!apiKeySource,apiKeyRemoved,tokenless,...(apiKeySource?{apiKeySource}:{}),...(apiKeySavedType?{apiKeySavedType}:{}),...(apiKeyCleared?{apiKeyCleared:true}:{})};
   });
 }
 function renderModelRows(providers:LlmProvider[]){
@@ -85,34 +91,91 @@ function renderModelRows(providers:LlmProvider[]){
   for(const provider of providers){
     const card=document.createElement('fieldset');card.className='model-card';card.dataset.id=provider.id;
     const heading=document.createElement('div');heading.className='model-card-heading';
-    const title=document.createElement('strong');title.textContent=provider.name||'Model';heading.append(title);
+    const expand=document.createElement('button');expand.type='button';expand.className='model-expand';expand.textContent='+';expand.title='Expand model settings';expand.setAttribute('aria-label',`Expand ${provider.name} settings`);expand.setAttribute('aria-expanded','false');heading.append(expand);
+    const enabledLabel=document.createElement('label');enabledLabel.className='model-enabled';enabledLabel.title='Include this model in the selection strategy.';
+    const enabledInput=document.createElement('input');enabledInput.type='checkbox';enabledInput.dataset.field='enabled';enabledInput.checked=provider.enabled!==false;
+    const enabledText=document.createElement('span');enabledText.textContent='Active';enabledLabel.append(enabledInput,enabledText);
+    const titleBlock=document.createElement('span');titleBlock.className='model-title';
+    const title=document.createElement('strong');title.textContent=provider.name||'Model';
+    const summary=document.createElement('small');summary.textContent=provider.model||provider.type;titleBlock.append(title,summary);heading.append(titleBlock);
     const order=document.createElement('div');order.className='model-order-controls';
     const move=(delta:number)=>{const rows=readModelRows(),from=rows.findIndex(row=>row.id===provider.id),to=from+delta;if(to<0||to>=rows.length)return;[rows[from],rows[to]]=[rows[to],rows[from]];renderModelRows(rows);};
     const up=document.createElement('button');up.type='button';up.className='model-order-button';up.textContent='↑';up.title='Move model up';up.setAttribute('aria-label',`Move ${provider.name} up`);up.disabled=providers.indexOf(provider)===0;up.onclick=()=>move(-1);
     const down=document.createElement('button');down.type='button';down.className='model-order-button';down.textContent='↓';down.title='Move model down';down.setAttribute('aria-label',`Move ${provider.name} down`);down.disabled=providers.indexOf(provider)===providers.length-1;down.onclick=()=>move(1);
     order.append(up,down);heading.append(order);
+    heading.append(enabledLabel);
     const remove=document.createElement('button');remove.type='button';remove.className='remove-model';remove.textContent='Remove';remove.onclick=()=>{card.remove();updateStrategyControl();};heading.append(remove);card.append(heading);
     const grid=document.createElement('div');grid.className='model-fields';
+    grid.hidden=true;
     const typeLabel=document.createElement('label');typeLabel.className='model-field';typeLabel.textContent='Provider';
     const type=document.createElement('select');type.dataset.field='type';
     for(const [value,labelText,disabled] of [['openai-compatible','OpenAI Compatible',false],['openai','OpenAI',false],['openrouter','OpenRouter',false],['amazon-bedrock','Amazon Bedrock',false],['anthropic','Anthropic (adapter pending)',true]] as [string,string,boolean][]){const option=new Option(labelText,value);option.disabled=disabled;type.add(option);}
     type.value=provider.type;typeLabel.append(type);grid.append(typeLabel);
     const nameInput=settingField(grid,'Name','name',provider.name);
     const endpoint=settingField(grid,'Base URL','baseUrl',provider.baseUrl,'url','https://...');
-    settingField(grid,'Model identifier','model',provider.model,'text','e.g. gpt-4o-mini');
-    const apiKey=settingField(grid,'API key','apiKey',provider.apiKey??'', 'password',provider.apiKeyConfigured?'Saved on server; blank keeps it':provider.type==='openai-compatible'?'Enter API key (optional for local models)':'Enter API key');
+    const modelField=document.createElement('div');modelField.className='model-field';
+    const modelLabel=document.createElement('label');modelLabel.textContent='Model';modelLabel.htmlFor=`model-picker-${provider.id}`;
+    const modelControl=document.createElement('div');modelControl.className='model-picker-control';
+    const modelSelect=document.createElement('select');modelSelect.id=modelLabel.htmlFor;modelSelect.dataset.field='model';
+    if(provider.model)modelSelect.add(new Option(provider.model,provider.model));else modelSelect.add(new Option('Refresh to detect models',''));
+    const refreshModelsButton=document.createElement('button');refreshModelsButton.type='button';refreshModelsButton.className='model-refresh';refreshModelsButton.textContent='Refresh';refreshModelsButton.title='Refresh available models';
+    const modelStatus=document.createElement('small');modelStatus.className='model-discovery-status';modelControl.append(modelSelect,refreshModelsButton);modelField.append(modelLabel,modelControl,modelStatus);grid.append(modelField);
+    const apiKey=settingField(grid,'API key','apiKey',provider.apiKey??'', 'password');
     const region=settingField(grid,'AWS region','region',provider.region??'','text','e.g. eu-west-1');
+    const tokenlessField=document.createElement('label');tokenlessField.className='request-setting tokenless-setting';tokenlessField.title='Never send an Authorization header to this OpenAI-compatible server.';
+    const tokenlessInput=document.createElement('input');tokenlessInput.type='checkbox';tokenlessInput.dataset.field='tokenless';tokenlessInput.checked=provider.tokenless===true;
+    const tokenlessText=document.createElement('span');tokenlessText.textContent='Tokenless server';tokenlessField.append(tokenlessInput,tokenlessText);grid.append(tokenlessField);
     const endpointField=endpoint.closest('.model-field')!,apiKeyField=apiKey.closest('.model-field')!,regionField=region.closest('.model-field')!;
+    const savedKeyType=provider.apiKeySavedType??(provider.apiKeyConfigured&&provider.apiKeySource!=='provider'?provider.type:'');apiKey.dataset.savedType=savedKeyType;apiKey.dataset.clear=String(provider.apiKeyCleared===true);apiKey.dataset.removed=String(provider.apiKeyRemoved===true);
+    const clearKeyButton=document.createElement('button');clearKeyButton.type='button';clearKeyButton.className='api-key-clear';
+    const apiKeyStatus=document.createElement('small');apiKeyStatus.className='api-key-status';apiKeyField.append(clearKeyButton,apiKeyStatus);
     const updateProviderFields=()=>{
-      const bedrock=type.value==='amazon-bedrock';endpointField.classList.toggle('hidden',bedrock);apiKeyField.classList.toggle('hidden',false);regionField.classList.toggle('hidden',!bedrock);
+      const bedrock=type.value==='amazon-bedrock',openaiCompatible=type.value==='openai-compatible';if(!openaiCompatible)tokenlessInput.checked=false;endpointField.classList.toggle('hidden',bedrock);apiKeyField.classList.toggle('hidden',openaiCompatible&&tokenlessInput.checked);regionField.classList.toggle('hidden',!bedrock);tokenlessField.classList.toggle('hidden',!openaiCompatible);
+      const clearing=apiKey.dataset.clear==='true',removed=apiKey.dataset.removed==='true'&&type.value===provider.type,ownKey=!clearing&&!removed&&apiKey.dataset.savedType===type.value;
+      const providerKey=!clearing&&!removed&&!ownKey&&llmConfig.providers.some(candidate=>candidate.type===type.value&&candidate.apiKeyConfigured);
+      apiKey.dataset.keySource=ownKey?'own':providerKey?'provider':'';
+      apiKey.placeholder=clearing?'Token will be removed when saved':removed?'No token saved for this model':ownKey?'Saved on server; blank keeps it':providerKey?'Saved provider key; blank reuses it':type.value==='openai-compatible'?'Enter API key (optional for local models)':'Enter API key';
+      clearKeyButton.hidden=apiKey.dataset.savedType!==type.value&&!clearing;clearKeyButton.textContent=clearing?'Undo token removal':'Remove saved token';apiKeyStatus.textContent=clearing?'The model is inactive until a token is configured.':'';
     };
+    tokenlessInput.onchange=updateProviderFields;
     type.onchange=()=>{
       if(type.value==='openai')endpoint.value='https://api.openai.com/v1';else if(type.value==='openrouter')endpoint.value='https://openrouter.ai/api/v1';else if(!endpoint.value||endpoint.value.includes('api.openai.com')||endpoint.value.includes('openrouter.ai'))endpoint.value='';
-      apiKey.placeholder=type.value===provider.type&&provider.apiKeyConfigured?'Saved on server; blank keeps it':type.value==='openai-compatible'?'Enter API key (optional for local models)':'Enter API key';
-      updateProviderFields();
+      modelSelect.replaceChildren(new Option('Loading models…',''));modelStatus.textContent='';updateProviderFields();summary.textContent=type.options[type.selectedIndex]?.text||type.value;void refreshModels(true);
     };
     updateProviderFields();
-    nameInput.oninput=()=>{title.textContent=nameInput.value||'Model';};
+    const updateActive=()=>{card.classList.toggle('disabled-model',!enabledInput.checked);updateStrategyControl();};
+    enabledInput.onchange=updateActive;updateActive();
+    const restoreAfterTokenRemoval=()=>{apiKey.dataset.clear='false';apiKey.dataset.removed='false';if(apiKey.dataset.wasEnabled==='true')enabledInput.checked=true;updateActive();updateProviderFields();};
+    clearKeyButton.onclick=event=>{event.preventDefault();event.stopPropagation();if(apiKey.dataset.clear==='true'){restoreAfterTokenRemoval();return;}apiKey.dataset.wasEnabled=String(enabledInput.checked);apiKey.dataset.clear='true';apiKey.value='';enabledInput.checked=false;updateActive();updateProviderFields();};
+    apiKey.oninput=()=>{if(apiKey.value.trim()&&apiKey.dataset.clear==='true')restoreAfterTokenRemoval();};
+    nameInput.oninput=()=>{title.textContent=nameInput.value||'Model';expand.setAttribute('aria-label',`Expand ${title.textContent} settings`);};
+    modelSelect.onchange=()=>{summary.textContent=modelSelect.value||type.options[type.selectedIndex]?.text||type.value;};
+    let discoveryRequest=0;
+    const applyModels=(models:ProviderModelOption[],selectFirst:boolean)=>{
+      const current=modelSelect.value,keepCurrent=!selectFirst&&models.some(model=>model.id===current);
+      modelSelect.replaceChildren(...models.map(model=>new Option(model.label===model.id?model.id:`${model.label} (${model.id})`,model.id)));
+      if(keepCurrent)modelSelect.value=current;else if(models[0])modelSelect.value=models[0].id;
+      summary.textContent=modelSelect.value||type.options[type.selectedIndex]?.text||type.value;
+    };
+    const refreshModels=async(automatic=false)=>{
+      const bedrock=type.value==='amazon-bedrock';
+      if((bedrock&&!region.value.trim())||(!bedrock&&!endpoint.value.trim())){if(!automatic)modelStatus.textContent=bedrock?'Enter an AWS region first.':'Enter a base URL first.';return;}
+      const cacheKey=JSON.stringify([provider.id,type.value,endpoint.value.trim(),region.value.trim()]),cached=modelOptionsCache.get(cacheKey);
+      if(automatic&&cached){applyModels(cached,!modelSelect.value||modelSelect.value==='auto-detect loaded model');modelStatus.textContent=`${cached.length} models available.`;return;}
+      const request=++discoveryRequest;refreshModelsButton.disabled=true;modelStatus.textContent='Loading models…';
+      try{
+        const apiKeyValue=apiKey.value.trim(),body={id:provider.id,type:type.value,baseUrl:endpoint.value,region:region.value,clearApiKey:apiKey.dataset.clear==='true',tokenless:tokenlessInput.checked,...(apiKeyValue?{apiKey:apiKeyValue}:{})};
+        const response=await fetch('/api/llm-models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        const data=await response.json() as {models?:ProviderModelOption[];error?:string};
+        if(!response.ok)throw new Error(data.error??'Could not load models.');
+        const models=(data.models??[]).filter(model=>model&&typeof model.id==='string'&&typeof model.label==='string');if(!models.length)throw new Error('The provider returned no models.');
+        if(request!==discoveryRequest)return;modelOptionsCache.set(cacheKey,models);applyModels(models,!modelSelect.value||modelSelect.value==='auto-detect loaded model');modelStatus.textContent=`${models.length} models available.`;
+      }catch(error){if(request===discoveryRequest)modelStatus.textContent=error instanceof Error?error.message:'Could not load models.';}
+      finally{if(request===discoveryRequest)refreshModelsButton.disabled=false;}
+    };
+    refreshModelsButton.onclick=()=>void refreshModels();
+    queueMicrotask(()=>void refreshModels(true));
+    expand.onclick=()=>{const open=grid.hidden;grid.hidden=!open;card.classList.toggle('expanded',open);expand.textContent=open?'−':'+';expand.title=`${open?'Collapse':'Expand'} model settings`;expand.setAttribute('aria-label',`${open?'Collapse':'Expand'} ${title.textContent} settings`);expand.setAttribute('aria-expanded',String(open));};
     card.append(grid);list.append(card);
   }
   updateStrategyControl();
@@ -126,10 +189,11 @@ function troglodytePortrait(id:string){
   return `<svg class="troglodyte-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><path d="M5 52 7 39q1-6 9-9l5-2h7l5 2q8 3 9 9l2 13Z" fill="${colors.fur}"/><path d="m9 39 5 2 4-2 5 3 5-3 5 3 5-3 5 2-1 11H7Z" fill="${colors.trim}"/><path d="m16 30 8 6 8-6 3 3-8 9h-6l-8-9Z" fill="${colors.fur}"/><path d="M18 25h12v8q-6 5-12 0Z" fill="${colors.skin}"/><ellipse cx="14" cy="17" rx="3" ry="4" fill="${colors.skin}"/><ellipse cx="34" cy="17" rx="3" ry="4" fill="${colors.skin}"/><path d="M15 12q0-8 9-9 10 1 10 10v7q-2 7-10 9-8-2-9-9Z" fill="${colors.skin}"/><path d="M14 14Q13 4 24 3q11 1 11 11l-3-3-2-4q-5 4-14 3l-1 5Z" fill="${colors.hair}"/><path d="M16 18q2 1 4 0m8 0q2 1 4 0" fill="none" stroke="#382f25" stroke-width="1.5" stroke-linecap="round"/><path d="M24 18v4l-2 1" fill="none" stroke="#a67f60" stroke-width="1.2" stroke-linecap="round"/><path d="M17 21q2-2 5 0h4q3-2 5 0l-1 6-3 4-3 2-3-2-3-4Z" fill="${colors.beard}"/><path d="m18 22 4 1 2-1 2 1 4-1" fill="none" stroke="${colors.beard}" stroke-width="2" stroke-linecap="round"/><path d="m16 30 8 6 8-6 2 3-6 6h-8l-6-6Z" fill="${colors.trim}"/><path d="m21 37 3 3 3-3" fill="none" stroke="${colors.fur}" stroke-width="2" stroke-linecap="round"/></svg>`;
 }
 function updateStrategyControl(){
-  const control=$<HTMLSelectElement>('settings-strategy'),count=$('model-list').children.length,description=$('strategy-description');
-  control.disabled=count===0;
-  if(count===0){control.value='first-only';description.textContent='No models are configured yet.';return;}
-  const messages:Record<string,string>={'first-only':'Use only the first model in the list; keep the remaining models configured but inactive.','round-robin':'Rotate to the next model for each request; try others if one fails.','fallback':'Keep using the last successful model; move to the next when it fails.','master-slaves':'Contact the primary model every time; try the remaining models only if it fails.'};
+  const control=$<HTMLSelectElement>('settings-strategy'),count=Array.from($('model-list').querySelectorAll<HTMLInputElement>('[data-field="enabled"]')).filter(input=>input.checked).length,description=$('strategy-description');
+  control.disabled=count<2;
+  if(count===0){control.value='first-only';description.textContent='No active models are configured.';return;}
+  if(count===1){control.value='first-only';description.textContent='Only one model is active.';return;}
+  const messages:Record<string,string>={'first-only':'Use only the first active model in the list.','round-robin':'Rotate to the next model for each request; try others if one fails.','fallback':'Keep using the last successful model; move to the next when it fails.','master-slaves':'Contact the primary model every time; try the remaining models only if it fails.'};
   description.textContent=messages[control.value]??messages.fallback;
 }
 async function loadProviderStatus(){
@@ -168,14 +232,14 @@ function showSettings(open:boolean){
 }
 function dayOf(tick: number) { return worldTime(tick).day; }
 function renderProviderStatus(config:LlmConfig|undefined=meta?.llmConfig??llmConfig){
-  const providers=config?.providers??[],list=$('provider-status-list');list.replaceChildren();
+  const providers=(config?.providers??[]).filter(provider=>provider.enabled!==false),list=$('provider-status-list');list.replaceChildren();
   for(const provider of providers){
     const row=document.createElement('li');row.className='provider-status-row';
-    const state=provider.health?.state??'unknown',detail=provider.health?.detail??'No inference result recorded yet.',tooltip=`${state.toUpperCase()}: ${detail}`,dot=document.createElement('span');dot.className=`provider-status-dot ${state}`;dot.setAttribute('aria-label',`${state}: ${detail}`);dot.title=tooltip;
+    const state=provider.health?.state??'unknown',detail=provider.health?.detail??'No inference result recorded yet.',inFlight=provider.health?.inFlight===true,tooltip=`${state.toUpperCase()}${inFlight?' · REQUEST IN PROGRESS':''}: ${detail}`,dot=document.createElement('span');dot.className=`provider-status-dot ${state}${inFlight?' in-flight':''}`;dot.setAttribute('aria-label',`${state}${inFlight?', request in progress':''}: ${detail}`);dot.title=tooltip;
     const name=document.createElement('span');name.className='provider-status-name';name.textContent=provider.name;
     row.title=tooltip;name.title=tooltip;row.append(dot,name);list.append(row);
   }
-  const names:Record<string,string>={'first-only':'First model only','round-robin':'Round robin','fallback':'Fallback','master-slaves':'Master / slaves'};
+  const names:Record<string,string>={'first-only':'Single model','round-robin':'Round robin','fallback':'Fallback','master-slaves':'Master / slaves'};
   $('provider-algorithm').textContent=providers.length?(names[config?.strategy??'']??config?.strategy??''):'';
   const current=$('provider-current-status');
   const waiting=Object.entries(meta?.runtime.agents??{}).find(([,status])=>status.state==='waiting'&&status.message);
@@ -449,14 +513,17 @@ $('focus-toggle').onclick=()=>{
 };
 $('add-model').onclick=()=>{
   const number=$('model-list').children.length+1;
-  renderModelRows([...readModelRows(),{id:`model-${Date.now()}-${number}`,type:'openai-compatible',name:`Model ${number}`,baseUrl:'',model:'',apiKeyConfigured:false}]);
+  renderModelRows([...readModelRows(),{id:`model-${Date.now()}-${number}`,type:'openai-compatible',enabled:true,name:`Model ${number}`,baseUrl:'',model:'',apiKeyConfigured:false}]);
 };
 $<HTMLSelectElement>('settings-strategy').onchange=updateStrategyControl;
 $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
   event.preventDefault();const status=$('settings-status');status.textContent='Saving configuration…';
   const providers=Array.from($('model-list').children).map(card=>{
     const field=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement|HTMLSelectElement).value;
-    return{id:(card as HTMLElement).dataset.id,type:field('type'),name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),apiKey:field('apiKey')};
+    const enabled=(card.querySelector('[data-field="enabled"]') as HTMLInputElement).checked;
+    const tokenless=(card.querySelector('[data-field="tokenless"]') as HTMLInputElement).checked;
+    const apiKeyInput=card.querySelector('[data-field="apiKey"]') as HTMLInputElement,apiKey=apiKeyInput.value.trim();
+    return{id:(card as HTMLElement).dataset.id,type:field('type'),enabled,tokenless,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),clearApiKey:apiKeyInput.dataset.clear==='true',...(apiKey?{apiKey}:{})};
   });
   const requestedStrategy=$<HTMLSelectElement>('settings-strategy').value;
   try{

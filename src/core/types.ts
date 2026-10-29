@@ -27,6 +27,7 @@ export interface Entity {
   enabled?: boolean;
   height: number; hitbox?: { radius: number; height: number }; color: string; inventory: Inventory | null;
   status: string; speech?: { word: string; until: number };
+  speechBudget?: { turn: number; words: number };
   plan?: AgentPlan;
   movementPrompt?: { messages:{speakerId:string;speakerName:string;word:string;tick:number;direction:string;distance:number}[] };
   followInvitation?: { speakerId:string; speakerName:string; tick:number; untilTick:number };
@@ -85,7 +86,7 @@ export interface WorldModule {
   describeObstacle?(issue: MovementIssue): string | undefined;
   encounterMessage?(observer:Entity,other:Entity,metres:number):string|undefined;
   relevantKnowledge?(observation:Observation,knowledge:string):boolean;
-  respondToSpeech?(listener:Entity,speaker:Entity,word:string):string|undefined;
+  respondToSpeech?(listener:Entity,speaker:Entity,word:string):string|{word:string;faceSpeaker?:boolean}|undefined;
 }
 export const key = (p: Vec3) => p.join(',');
 export const unkey = (value: string): Vec3 => value.split(',').map(Number) as Vec3;

@@ -72,10 +72,13 @@ export function actionFeedback<T extends {ok:boolean;outcome:string;inventoryDel
   return {actionAccepted:ok,actionStatus:outcome,...effects,inventoryDelta:result.inventoryDelta??[],collected:result.collected??null};
 }
 
-export function decisionCycle(actions:{eventId:number;action:string;args:Record<string,unknown>;result:{message:string}}[]) {
+export function decisionCycle(actions:{eventId:number;action:string;args:Record<string,unknown>;result:{message:string;previousScanEventId?:unknown}}[]) {
   const window=actions.slice(-6);
   if(window.length<6)return undefined;
-  const signature=(entry:typeof window[number])=>JSON.stringify({action:entry.action,args:entry.args,result:entry.result});
+  const signature=(entry:typeof window[number])=>{
+    const {previousScanEventId,...result}=entry.result;
+    return JSON.stringify({action:entry.action,args:entry.args,result});
+  };
   // Equal outcomes as well as equal calls: three strikes with growing cracks are progress.
   if(!window.every((entry,index)=>index<2||signature(entry)===signature(window[index%2])))return undefined;
   return {eventIds:window.map(entry=>entry.eventId),message:`The same action/result cycle occurred three times: ${window.slice(0,2).map(entry=>`${entry.action}: ${entry.result.message}`).join(' Then ')} Reconsider your method or goal using current facts.`};
@@ -88,7 +91,7 @@ export function inventoryContext(observation:Observation) {
 export function relevantKnowledge(engine:Engine,observation:Observation,allLearned=false) {
   return [...(engine.discoveries.get(observation.self.id)??[])].filter(fact=>allLearned||(engine.module.relevantKnowledge?.(observation,fact)??true)).map(knowledgeDescription);
 }
-export function compactResult(result:ActionResult) {
+export function compactResult(result:ActionResult,conciseScans=false) {
   const feedback=result.feedback??{};
   const from=feedback.from as Vec3|undefined,to=feedback.to as Vec3|undefined;
   let outcome=String(feedback.outcome??(result.ok?'completed':'rejected'));
@@ -96,8 +99,9 @@ export function compactResult(result:ActionResult) {
   if(outcome==='blocked'&&from&&to&&distance(from,to)>.001)outcome='partial';
   return rounded({ok:result.ok,outcome,message:result.message,...(from?{from}:{}),...(to?{to}:{}),
     ...(outcome==='started'&&feedback.destination?{destination:feedback.destination}:{}),
-    ...(Array.isArray(feedback.materials)?{materials:feedback.materials.map(({material,target,distance,bodyRelativeDegrees})=>({material,...(target?{target}:{}),distance,bodyRelativeDegrees}))}:{}),
-    ...(Array.isArray(feedback.entities)?{entities:feedback.entities.map(({entityId,name,kind,distance,bodyRelativeDegrees})=>({...(entityId?{entityId}:{}),name,kind,distance,bodyRelativeDegrees}))}:{}),
+    ...(feedback.unchanged===true?{unchanged:true,previousScanEventId:feedback.previousScanEventId}:{}),
+    ...(!(conciseScans&&feedback.unchanged)&&Array.isArray(feedback.materials)?{materials:feedback.materials.map(({material,target,distance,bodyRelativeDegrees})=>({material,...(target?{target}:{}),distance,bodyRelativeDegrees}))}:{}),
+    ...(!(conciseScans&&feedback.unchanged)&&Array.isArray(feedback.entities)?{entities:feedback.entities.map(({entityId,name,kind,distance,bodyRelativeDegrees})=>({...(entityId?{entityId}:{}),name,kind,distance,bodyRelativeDegrees}))}:{}),
     ...(typeof feedback.facing==='number'?{facing:feedback.facing}:{}),
     ...(Array.isArray(feedback.target)?{target:feedback.target}:{}),
     ...(typeof feedback.material==='string'?{material:feedback.material}:{}),
@@ -173,8 +177,8 @@ export function historicalActions(actions:ReturnType<typeof recentActions>) {
   return actions.map(entry=>{
     const {facing,materials,entities,...result}=entry.result;
     return {...entry,result:{...result,
-      ...(materials?{materials:materials.map(({material,target}: {material:string;target?:Vec3})=>({material,...(target?{target}:{})}))}:{}),
-      ...(entities?{entities:entities.map(({entityId,name,kind}: {entityId?:string;name:string;kind:string})=>({...(entityId?{entityId}:{}),name,kind}))}:{}),
+      ...(!result.unchanged&&materials?{materials:materials.map(({material,target}: {material:string;target?:Vec3})=>({material,...(target?{target}:{})}))}:{}),
+      ...(!result.unchanged&&entities?{entities:entities.map(({entityId,name,kind}: {entityId?:string;name:string;kind:string})=>({...(entityId?{entityId}:{}),name,kind}))}:{}),
     }};
   });
 }
@@ -184,6 +188,7 @@ export function planningActions(actions:ReturnType<typeof recentActions>) {
     eventId,atSecond,action,args,
     ...(['target','itemId','entityId','point','stack'].some(key=>args[key]!==undefined)?{object:Object.fromEntries(['target','itemId','entityId','point','stack'].filter(key=>args[key]!==undefined).map(key=>[key,args[key]]))}:{}),
     result:{actionAccepted:result.ok,actionStatus:result.outcome,message:result.message,
+      ...(result.unchanged?{unchanged:true,previousScanEventId:result.previousScanEventId}:{}),
       ...(result.material?{material:result.material}:{}),...(result.blockOutcome?{blockOutcome:result.blockOutcome}:{}),
       ...(result.materials?{materials:result.materials}:{}),...(result.entities?{entities:result.entities}:{}),
       ...(result.shaped?{shaped:result.shaped}:{}),...(result.inventoryDelta?{inventoryDelta:result.inventoryDelta}:{}),

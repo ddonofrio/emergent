@@ -2,34 +2,12 @@ import type { Block, Entity, Vec3, WorldModule } from '../core/types';
 import { WORLD_DAY_SECONDS } from '../core/time';
 
 const waterLevel = 0;
-export const speechIdeas = [
-  'Follow me',
-  'Do what I do',
-  'Come here',
-  'Wait here',
-  'Help me with this',
-  'Take this',
-  'Put it here',
-  'Look at this',
-  'Stay away',
-  "Let's explore together",
-  "Let's try something new",
-  'What could we do with this?',
-  'Try using that here',
-  "Let's gather different things",
-  'Keep that for later',
-  "Let's make a way across",
-  "Let's make a place to stay",
-  "Let's build something together",
-  'I like you',
-  'I enjoy your company',
-] as const;
 export const island: WorldModule = {
   manifest: {
     id: 'first-shore', version: 1, name: 'First Shore', seed: 731,
     description: 'Two curious minds. One finite island. No assigned objective.',
     bounds: { min: [-64, -32, -64], max: [64, 64, 64] }, waterLevel, gravity: 9.81,
-    daySeconds: WORLD_DAY_SECONDS, vocabulary: [...speechIdeas],
+    daySeconds: WORLD_DAY_SECONDS, vocabulary: [],
     perception: { range: 18, fieldOfView: 120, maxBlocks: 96 },
     materials: {
       grass: { color: '#74955a', solid: true, floats: false },
@@ -113,7 +91,7 @@ export const island: WorldModule = {
     return false;
   },
   respondToSpeech(listener){
-    if(listener.kind==='duck')return 'quack';
+    if(listener.kind==='duck')return {word:'quack',faceSpeaker:true};
   },
   canEnter(entity, feet) {
     return waterLevel - feet[1] > entity.height / 2

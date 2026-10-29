@@ -2,9 +2,44 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { compactJournal } from '../server/agents/journal-compaction';
 import type { CompletionResult } from '../server/agents/providers';
+import { Engine } from '../src/core/engine';
+import { island } from '../src/modules/island';
+import { worldTools, type Memory } from '../server/agents/tools';
+import { journalEntries, setJournalNotes } from '../server/agents/journal';
+import { assertSupportedJsonSchema, validateJsonSchemaValue } from '../vendor/deepseek-harness/json-schema';
 
 const notes=Array.from({length:10},(_,i)=>`Goal ${i}: return to the shore.`);
 const response=(notes:unknown):CompletionResult=>({provider:'stub',providerName:'Stub',model:'stub',content:null,calls:[{id:'compact',type:'function',function:{name:'submit_journal',arguments:JSON.stringify({notes})}}]});
+
+test('stable note IDs correct multiple claims without renumbering unrelated memories or reusing retired IDs',async()=>{
+  const engine=new Engine(island),memory:Memory={notes:['Height uses z.','Moss is at [14,7,9].','The shore is useful.']};
+  assert.deepEqual(journalEntries(memory).map(entry=>entry.id),['note-1','note-2','note-3']);
+  const journal=worldTools(engine,'t1',memory).find(tool=>tool.name==='journal')!;
+  const first=await journal.invoke({note:'Y is height.',replaceNoteIds:['note-1']}) as {ok:boolean};assert.equal(first.ok,true);
+  assert.deepEqual(memory.noteIds,['note-2','note-3','note-4']);
+  const second=await journal.invoke({note:'Moss is elsewhere; y is height.',replaceNoteIds:['note-2','note-4']}) as {ok:boolean};assert.equal(second.ok,true);
+  assert.deepEqual(memory.noteIds,['note-3','note-5']);assert.equal(memory.notes[0],'The shore is useful.');
+  const restored=structuredClone(memory),before=structuredClone(memory);
+  assert.equal((await journal.invoke({note:'Wrong reference.',replaceNoteIds:['note-1']}) as {ok:boolean}).ok,false);
+  assert.deepEqual(memory,before);
+  setJournalNotes(restored,['The shore is useful.','Combined finding.']);
+  assert.deepEqual(restored.noteIds,['note-3','note-6']);
+});
+
+test('journal and goal reasons accept 500 characters and reject excess with precise feedback',async()=>{
+  const engine=new Engine(island),memory:Memory={notes:[]};let closed=false;
+  const tools=worldTools(engine,'t1',memory,{onFinishGoal:()=>{closed=true;return {ok:true};}});
+  const journal=tools.find(tool=>tool.name==='journal')!,finish=tools.find(tool=>tool.name==='finish_goal')!;
+  assert.equal((await journal.invoke({note:'a'.repeat(500)}) as {ok:boolean}).ok,true);
+  const rejected=await journal.invoke({note:'b'.repeat(501)}) as {ok:boolean;message:string};
+  assert.equal(rejected.ok,false);assert.match(rejected.message,/501 characters; maximum 500/);assert.equal(memory.notes.length,1);
+  assert.equal((finish.invoke({outcome:'blocked',reason:'c'.repeat(501)}) as {ok:boolean}).ok,false);assert.equal(closed,false);
+  assert.equal((finish.invoke({outcome:'blocked',reason:'c'.repeat(500)}) as {ok:boolean}).ok,true);assert.equal(closed,true);
+  assert.throws(()=>assertSupportedJsonSchema({type:'number',maxLength:500}));
+  assert.throws(()=>assertSupportedJsonSchema({type:'string',minLength:2,maxLength:1}));
+  assert.throws(()=>assertSupportedJsonSchema({type:'string',maxLength:-1}));
+  assert.deepEqual(validateJsonSchemaValue({type:'string',maxLength:1},'\u{10400}'),[]);
+});
 
 test('compaction retries outages and invalid output without changing source notes',async()=>{
   const source=[...notes],controller=new AbortController();let calls=0;

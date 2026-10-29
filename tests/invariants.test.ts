@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from '../src/core/engine';
-import { island, speechIdeas } from '../src/modules/island';
+import { island } from '../src/modules/island';
 import type { Block, Entity, WorldModule } from '../src/core/types';
 import { Store } from '../server/store';
 import { worldTools } from '../server/agents/tools';
@@ -22,12 +22,12 @@ function fixture(blocks: Block[] = [], entities = [entity()]): Engine {
   return new Engine(module);
 }
 
-test('follow is offered only for visible active entities within twenty metres, including animals',()=>{
-  const engine=fixture([],[entity(),entity('t2',.5,20.5)]),memory={notes:[]};
+test('follow stays offered with only observed target IDs and validates its twenty-metre reach',()=>{
+  const engine=fixture([],[entity(),entity('t2',.5,18.5)]),memory={notes:[]};
   assert.ok(engine.observe('t1').interactions.follow.some(other=>other.id==='t2'));
   assert.ok(worldTools(engine,'t1',memory).some(tool=>tool.name==='follow'));
   engine.entity('t2').position[2]=20.51;
-  assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,false);assert.equal(worldTools(engine,'t1',memory).some(tool=>tool.name==='follow'),false);
+  assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,false);assert.match(worldTools(engine,'t1',memory).find(tool=>tool.name==='follow')!.description,/No eligible creature/);
   engine.entity('t2').position[2]=4.5;engine.entity('t1').yaw=180;
   assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,false);
   engine.entity('t1').yaw=0;engine.voxels.set([0,2,2],'stone');
@@ -36,7 +36,7 @@ test('follow is offered only for visible active entities within twenty metres, i
   assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,false);
   engine.setEntityEnabled('t2',true);engine.entity('t2').kind='duck';engine.entity('t2').controller='wander';engine.entity('t2').height=.65;
   assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,true);
-  assert.deepEqual(worldTools(engine,'t1',memory).map(tool=>tool.name),['follow','stop_follow']);
+  assert.deepEqual(worldTools(engine,'t1',memory).map(tool=>tool.name),['follow','stop_follow','say']);
   assert.equal(engine.act('t1',{action:'walk',distance:1}).ok,false);
 });
 
@@ -117,7 +117,7 @@ test('following stops at unsafe terrain and loses contact without exposing a hid
 
 test('voices broadcast to bystanders and animals with recorded direction and distance; ducks reply without recursion',()=>{
   const duck:Entity={...entity('duck',2.5,2.5),name:'Pebble',kind:'duck',controller:'wander',height:.65};
-  const listener=entity('t2',.5,5.5),outside=entity('outside',.5,11),blocked=entity('blocked',-4.5,.5);
+  const listener=entity('t2',.5,5.5),outside=entity('outside',.5,19),blocked=entity('blocked',-4.5,.5);
   const engine=fixture([[-2,2,0,'stone']],[entity(),listener,duck,outside,blocked]),store=new Store(':memory:',island.manifest);
   try{
     assert.equal(engine.act('t1',{action:'say',word:'Follow me'}).ok,true);
@@ -127,6 +127,9 @@ test('voices broadcast to bystanders and animals with recorded direction and dis
     assert.equal(engine.observe('t1').heard.at(-1)!.word,'quack');assert.equal(engine.observe('duck').heard[0].word,'Follow me');
     assert.equal(engine.observe('outside').heard.some(voice=>voice.from==='t1'),false);assert.equal(engine.observe('blocked').heard.some(voice=>voice.from==='t1'),false);
     assert.equal(engine.entity('duck').speech?.word,'quack');assert.equal(engine.recentEvents.filter(event=>event.type==='speech').length,2);
+    assert.equal(engine.entity('duck').yaw,225,'The duck faces the speaker before replying.');
+    const reply=engine.recentEvents.find(event=>event.actor==='duck'&&event.type==='speech')!;
+    assert.equal((reply.data as {facing:number}).facing,225);
     store.record(engine.frame(),engine.state());const restored=new Engine(engine.module,store.stateAt(0));assert.deepEqual(restored.observe('t2').heard,heard);
   }finally{store.close();}
 });
@@ -146,6 +149,7 @@ test('any audible message interrupts walking for an explicit continue or stop de
   assert.equal(engine.entity('t2').motion,motion);
   assert.equal(engine.entity('t2').movementPrompt,undefined);
 
+  for(let tick=0;tick<21;tick++)engine.step();
   assert.equal(engine.act('t1',{action:'say',word:'Come here'}).ok,true);
   engine.wakeMovingListenersFromSpeech();
   assert.equal(engine.resolveMovementPrompt('t2','stop_moving').ok,true);
@@ -180,14 +184,17 @@ test('a visible trunk face can be struck even when its centre is hidden by the u
   assert.match(hidden.act('t1',{action:'hit',target:[0,0,7]}).message,/farther than 3 metres/);
 });
 
-test('full inventories omit pickup, storing only frees hands, and arguments select real local items and stacks',()=>{
+test('full inventories keep pickup visible but reject collection; storing only frees hands',()=>{
   const engine=fixture(),actor=engine.entity('t1'),memory={notes:[]};
   engine.bodies.push({id:'near-arrow',kind:'arrow',position:[.5,1.2,1.5],velocity:[0,0,0],resting:true});
   actor.inventory={stacks:['wood','sand','stone','grass','dirt','leaves','stick','plank','knife','spear'].map(kind=>({kind,count:64})),selected:0,capacity:640};
   assert.equal((worldTools(engine,'t1',memory).find(tool=>tool.name==='store')!.invoke({}) as any).ok,true);
   const inventory=inventoryContext(engine.observe('t1'));
   assert.equal(inventory.stackSlots,10);assert.equal(inventory.freeStackSlots,0);assert.equal(inventory.maxPerStack,64);assert.equal(inventory.hand,null);
-  assert.equal(worldTools(engine,'t1',memory).some(tool=>tool.name==='pickup'),false);
+  const fullPickup=worldTools(engine,'t1',memory).find(tool=>tool.name==='pickup')!;
+  assert.match(fullPickup.description,/inventory space/);
+  assert.equal((fullPickup.invoke({itemId:'near-arrow'}) as {ok:boolean}).ok,false);
+  assert.equal(engine.bodies.length,1);
   const hold=worldTools(engine,'t1',memory).find(tool=>tool.name==='hold')!;
   assert.equal((hold.invoke({stack:99}) as any).ok,false);assert.equal((hold.invoke({stack:1}) as any).ok,true);
   assert.deepEqual(worldTools(engine,'t1',memory).find(tool=>tool.name==='hold')!.parameters.properties!.stack.enum,[0,2,3,4,5,6,7,8,9]);
@@ -202,7 +209,8 @@ test('offered place and bucket targets are executable and shaping points do not 
     const engine=fixture([[0,1,2,'sand']]);engine.entity('t1').inventory={stacks:[stack],selected:0,capacity:64};
     const targets=engine.observe('t1').interactions;
     for(const action of ['place','fill','empty'] as const){
-      assert.equal(worldTools(engine,'t1',{notes:[]}).some(tool=>tool.name===action),targets[action].length>0);
+      const applicable=action==='place'||stack.kind==='bucket'&&(action==='fill'?!stack.contents:!!stack.contents);
+      assert.equal(worldTools(engine,'t1',{notes:[]}).some(tool=>tool.name===action),applicable);
       for(const target of targets[action]){const copy=new Engine(engine.module,engine.state());assert.equal(copy.act('t1',{action,target}).ok,true,`${action} at ${target}`);}
     }
   }
@@ -351,16 +359,17 @@ test('walking and running step down one block without inventing a gap',()=>{
   const engine=fixture(high);engine.entity('t1').position=[.5,3,.5];engine.act('t1',{action:'walk',distance:2});for(let tick=0;tick<40;tick++)engine.step();
   assert.equal(engine.entity('t1').position[1],3);assert.ok(engine.entity('t1').position[2]<1.24,'A two-block drop is still refused.');
 });
-test('walk accepts absolute map x and y while the engine derives bearing, distance and terrain height',()=>{
+test('walk targets share observation axes and derive actual height from terrain',()=>{
   const engine=fixture(),walk=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='walk')!;
-  const result=walk.invoke({x:3.5,y:4.5,z:99}) as {ok:boolean;feedback?:Record<string,any>};
-  assert.equal(result.ok,true);assert.deepEqual(result.feedback?.requestedMapTarget,{x:3.5,y:4.5});
+  const result=walk.invoke({target:[3.5,99,4.5]}) as {ok:boolean;feedback?:Record<string,any>};
+  assert.equal(result.ok,true);assert.deepEqual(result.feedback?.requestedTarget,[3.5,99,4.5]);
   const destination=engine.entity('t1').motion!.destination;
   assert.ok(Math.abs(destination[0]-3.5)<1e-9&&destination[1]===1&&Math.abs(destination[2]-4.5)<1e-9);
   assert.equal(Math.round(engine.entity('t1').yaw),37);
   assert.equal((walk.invoke({x:3.5}) as {ok:boolean}).ok,false);
-  assert.equal((walk.invoke({x:3.5,y:4.5,distance:2}) as {ok:boolean}).ok,false);
-  const tooFar=fixture();assert.equal(tooFar.act('t1',{action:'walk',x:40,y:40}).ok,false);
+  assert.equal((walk.invoke({target:[3.5,99,4.5],distance:2}) as {ok:boolean}).ok,false);
+  assert.equal((walk.invoke({target:[3.5,4.5]}) as {ok:boolean}).ok,false);
+  const tooFar=fixture();assert.equal(tooFar.act('t1',{action:'walk',target:[40,1,40]}).ok,false);
 });
 test('navigation separates distant approaches from possible jumps and respects occupied hands',()=>{
   const distant=fixture([[0,1,7,'stone']]);
@@ -580,7 +589,7 @@ test('wood shaping makes five thin planks and a shovel with its one-strike tool 
   assert.equal(shovel.act('t1',{action:'strike_held',impact:[0,1,1]}).ok,true);
   assert.equal(shovel.held(shovel.entity('t1'))?.kind,'shovel');
   const dig=worldTools(shovel,'t1',{notes:[]}).find(tool=>tool.name==='dig')!;
-  assert.match(dig.description,/sand, dirt, or grass with one shovel strike/);
+  assert.match(dig.description,/reachable block with the shovel/);assert.doesNotMatch(dig.description,/sand|dirt|grass/);
   const disabledHit=worldTools(shovel,'t1',{notes:[]}).find(tool=>tool.name==='hit')!;
   assert.equal(disabledHit.physical,false);assert.match(disabledHit.description,/Use dig.*sand, dirt, or grass/i);
   assert.equal((dig.invoke({target:[0,1,1]}) as {ok:boolean}).ok,true);
@@ -755,30 +764,38 @@ test('supporting blocks reject damage with a clear creature-specific error',()=>
   const engine=fixture([], [entity(),entity('t2',1.5,.5)]);
   const result=engine.act('t1',{action:'hit',target:[1,0,0]});assert.equal(result.ok,false);assert.match(result.message,/t2 is standing on it/);assert.equal(engine.blockDamage.size,0);
 });
-test('speech requires vocabulary, clear line of sight and ten-metre range; inbox survives resume', () => {
+test('free speech requires clear hearing and eighteen-metre range; inbox survives resume', () => {
   const engine = fixture([], [entity(),entity('t2',.5,5.5)]);
-  assert.equal(engine.act('t1',{action:'say',word:'hello'}).ok,false);
-  assert.equal(engine.act('t1',{action:'say',word:'Follow me'}).ok,true);
+  assert.equal(engine.act('t1',{action:'say',word:'Hello new friend'}).ok,true);
   assert.equal(engine.observe('t2').heard.length,1);
+  for(let tick=0;tick<21;tick++)engine.step();
   engine.voxels.set([0,2,3],'stone');
-  engine.act('t1',{action:'say',word:'Look at this'});
+  const blocked=engine.act('t1',{action:'say',word:'Look at this'});assert.equal(blocked.ok,true);assert.match(blocked.message,/Nobody/);
   assert.equal(engine.observe('t2').heard.length,1);
-  engine.voxels.set([0,2,3],null); engine.entity('t2').position[2]=11;
-  engine.act('t1',{action:'say',word:'Come here'});
-  assert.equal(engine.observe('t2').heard.length,1);
+  for(let tick=0;tick<20;tick++)engine.step();
+  engine.voxels.set([0,2,3],null); engine.entity('t2').position[2]=18.5;
+  assert.equal(engine.act('t1',{action:'say',word:'Can you hear?'}).ok,true);
+  assert.equal(engine.observe('t2').heard.length,2);
+  for(let tick=0;tick<20;tick++)engine.step();
+  engine.entity('t2').position[2]=18.51;
+  const far=engine.act('t1',{action:'say',word:'Come here'});assert.equal(far.ok,true);assert.match(far.message,/Nobody/);
+  assert.equal(engine.observe('t2').heard.length,2);
   const resumed = new Engine(engine.module,engine.state());
   assert.deepEqual(resumed.observe('t2').heard,engine.observe('t2').heard);
 });
-test('communication ideas stay hidden until the agent opens say',async()=>{
-  const engine=fixture([],[entity(),entity('t2',.5,5.5)]);
-  const closed=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='say')!;
-  assert.equal(closed.physical,false);assert.deepEqual(closed.parameters.properties,{});
-  const serialized=JSON.stringify(closed);for(const idea of speechIdeas)assert.equal(serialized.includes(idea),false);
-  const menu=await closed.invoke({}) as {ok:boolean;options:string[]};
-  assert.equal(menu.ok,true);assert.deepEqual(menu.options,[...speechIdeas]);
-  const opened=worldTools(engine,'t1',{notes:[]},{speechMenu:true}).find(tool=>tool.name==='say')!;
-  assert.equal(opened.physical,true);assert.deepEqual(opened.parameters.properties!.word.enum,[...speechIdeas]);
-  assert.deepEqual(worldTools(engine,'t1',{notes:[]},{speechMenu:true}).map(tool=>tool.name),['say','do_not_reply']);
+test('speech is always available and enforces three words across calls and restarts',()=>{
+  const engine=fixture();
+  const say=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='say')!;
+  assert.equal(say.physical,true);assert.equal(say.parameters.properties!.word.enum,undefined);
+  assert.equal((say.invoke({word:'Hello, brand new world'}) as {ok:boolean}).ok,false);
+  const result=say.invoke({word:'Hello, new friend!'}) as {ok:boolean;message:string};
+  assert.equal(result.ok,true);assert.match(result.message,/Nobody/);
+  const resumed=new Engine(engine.module,engine.state());
+  assert.equal(resumed.act('t1',{action:'say',word:'Again'}).ok,false);
+  for(let tick=0;tick<21;tick++)resumed.step();
+  assert.equal(resumed.act('t1',{action:'say',word:'Hello'}).ok,true);
+  assert.equal(resumed.act('t1',{action:'say',word:'New friend'}).ok,true);
+  assert.equal(resumed.act('t1',{action:'say',word:'Again'}).ok,false);
 });
 test('encounters support multiple Troglodytes and animals, persist and emit once until they separate',()=>{
   const second=entity('t2',.5,4.5);second.yaw=180;
@@ -801,10 +818,10 @@ test('encounters respect sight, occlusion, speech range and disabled characters'
   const engine=fixture([],[entity(),entity('t2',.5,4.5)]);
   engine.entity('t1').yaw=180;engine.step();assert.equal(engine.observe('t1').encounters.length,0);
   engine.entity('t1').yaw=0;engine.voxels.set([0,2,2],'stone');engine.step();assert.equal(engine.observe('t1').encounters.length,0);
-  engine.voxels.set([0,2,2],null);engine.entity('t2').position[2]=11;engine.step();assert.equal(engine.observe('t1').encounters.length,0);
+  engine.voxels.set([0,2,2],null);engine.entity('t2').position[2]=19;engine.step();assert.equal(engine.observe('t1').encounters.length,0);
   engine.entity('t2').position[2]=4.5;engine.setEntityEnabled('t2',false);engine.step();assert.equal(engine.observe('t1').encounters.length,0);
   engine.setEntityEnabled('t2',true);engine.step();assert.equal(engine.observe('t1').encounters.length,1);
-  engine.entity('t2').position[2]=11;engine.step();assert.equal(engine.observe('t1').encounters[0].canSpeakNow,false,'A past encounter must not imply the character is still within range.');
+  engine.entity('t2').position[2]=19;engine.step();assert.equal(engine.observe('t1').encounters[0].canSpeakNow,false,'A past encounter must not imply the character is still within range.');
   engine.setEntityEnabled('t2',false);assert.equal(engine.observe('t1').encounters.length,0);
 });
 test('observations do not reveal creatures behind solid walls or behind the observer', () => {
@@ -904,7 +921,7 @@ test('running is disabled only while a raw block is in hand, not while stored',(
 });
 test('the Harness schema guard validates contextual embodied tools', async () => {
   const engine = fixture([[1,1,0,'wood']],[entity(),entity('t2',.5,-3.5)]), memory = {notes:[] as string[]}, tools=worldTools(engine,'t1',memory);
-  assert.deepEqual(tools.map(t=>t.name),['look','find_material','find_entity','walk','turn','run','jump','hit','wait','journal']);
+  assert.deepEqual(tools.map(t=>t.name),['look','find_material','find_entity','walk','turn','run','jump','hit','pickup','follow','say','wait','journal']);
   const scan=tools.find(tool=>tool.name==='find_material')!.invoke({}) as any;
   assert.equal(scan.ok,true);assert.ok(scan.feedback.materials.some((item:any)=>item.material==='wood'&&Number.isFinite(item.bodyRelativeDegrees)&&Number.isFinite(item.directionXZ.x)&&Number.isFinite(item.directionXZ.z)));
   assert.equal(engine.entity('t1').motion?.kind,'scan');for(let tick=0;tick<20;tick++)engine.step();assert.equal(engine.entity('t1').motion,undefined);

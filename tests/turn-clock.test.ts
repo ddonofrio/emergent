@@ -8,7 +8,7 @@ import { island } from '../src/modules/island';
 import type { Action, Block, Entity, Frame } from '../src/core/types';
 import { Store } from '../server/store';
 import { AgentRuntime } from '../server/agents/runtime';
-import { ProviderChain, providersFromEnv, type ProviderConfig } from '../server/agents/providers';
+import { DEFAULT_REASONING_TOKENS, ProviderChain, providersFromEnv, type ProviderConfig } from '../server/agents/providers';
 import { TurnClock } from '../server/turn-clock';
 import { advancePlayback, fastScrubSpeed } from '../src/view/playback-clock';
 import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS } from '../src/core/time';
@@ -69,17 +69,6 @@ function respondActions(request:Request,actions:Action[]){
   });
   request.response.setHeader('Content-Type','application/json');
   request.response.end(JSON.stringify({choices:[{message:{content:null,tool_calls}}],usage:{total_tokens:42}}));
-}
-async function respondWithCommunicationMenu(p:Awaited<ReturnType<typeof provider>>,request:Request,action:Action){
-  if(action.action!=='say'){respond(request,action);return;}
-  const closed=request.body.tools.find((tool:any)=>tool.function.name==='say');
-  assert.deepEqual(closed.function.parameters.properties,{});
-  const before=p.requests.length;respondTool(request,'say',{});await until(()=>p.requests.length===before+1);
-  const choice=p.requests[before];assert.equal(choice.id,request.id);
-  assert.deepEqual(choice.body.tools.map((tool:any)=>tool.function.name),['say','do_not_reply']);
-  const opened=choice.body.tools.find((tool:any)=>tool.function.name==='say');
-  assert.ok(opened.function.parameters.properties.word.enum.includes(action.word));
-  respond(choice,action);
 }
 async function until(predicate:()=>boolean) {
   const deadline=Date.now()+3000;
@@ -228,7 +217,7 @@ test('multiple physical actions are rejected before one corrected action consume
   try{
     engine.setEntityEnabled('t2',false);engine.setEntityEnabled('duck',false);
     r.clock.pump();await until(()=>p.requests.length===1);
-    assert.equal(p.requests[0].body.max_tokens,900);assert.match(p.requests[0].body.messages[0].content,/End this decision with exactly one physical action/i);
+    assert.equal(p.requests[0].body.max_tokens,900+DEFAULT_REASONING_TOKENS);assert.equal(p.requests[0].body.max_completion_tokens,900+DEFAULT_REASONING_TOKENS);assert.match(p.requests[0].body.messages[0].content,/End this decision with exactly one physical action/i);
     respondActions(p.requests[0],[{action:'turn',angle:90},{action:'wait'}]);
     await until(()=>p.requests.length===2);
     assert.equal(engine.tick,0);assert.equal(engine.entity('t1').yaw,0);
@@ -247,11 +236,11 @@ test('speech wakes a moving agent with only continue or stop while world time re
     r.clock.pump();await until(()=>p.requests.length===2);
     const moss=p.requests.find(request=>request.id==='t1')!,flint=p.requests.find(request=>request.id==='t2')!;
     respond(flint,{action:'walk',distance:8});
-    await respondWithCommunicationMenu(p,moss,{action:'say',word:'I like you'});
+    respond(moss,{action:'say',word:'I like you'});
     await until(()=>r.clock.status().phase==='advancing');
 
-    r.advance(50);await until(()=>p.requests.length===4);
-    const interruption=p.requests[3];
+    r.advance(50);await until(()=>p.requests.length===3);
+    const interruption=p.requests[2];
     assert.equal(interruption.id,'t2');
     assert.deepEqual(interruption.body.tools.map((tool:any)=>tool.function.name),['continue_moving','stop_moving']);
     const prompt=JSON.parse(interruption.body.messages.at(-1).content);
@@ -266,11 +255,11 @@ test('speech wakes a moving agent with only continue or stop while world time re
     respondTool(interruption,'stop_moving',{});
     await until(()=>r.clock.status().phase==='advancing');
     assert.equal(engine.entity('t2').motion,undefined);
-    assert.equal(p.requests.length,4,'Stopping does not grant an immediate replacement action.');
+    assert.equal(p.requests.length,3,'Stopping does not grant an immediate replacement action.');
     r.advance(950);assert.equal(engine.tick,20);assert.equal(r.clock.status().phase,'idle');
-    assert.equal(p.requests.length,4);
-    r.clock.pump();await until(()=>p.requests.length===6);
-    const resumedFlint=p.requests.slice(4).find(request=>request.id==='t2');assert.ok(resumedFlint,'The agent acts again on the next shared turn.');
+    assert.equal(p.requests.length,3);
+    r.clock.pump();await until(()=>p.requests.length===5);
+    const resumedFlint=p.requests.slice(3).find(request=>request.id==='t2');assert.ok(resumedFlint,'The agent acts again on the next shared turn.');
   }finally{r.clock.close();store.close();p.close();}
 });
 
@@ -278,7 +267,7 @@ test('looking sideways makes follow available for the newly seen entity without 
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);delete engine.entity('duck').motion;
-    r.clock.pump();await until(()=>p.requests.length===1);assert.equal(p.requests[0].body.tools.some((tool:any)=>tool.function.name==='follow'),false);
+    r.clock.pump();await until(()=>p.requests.length===1);assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='follow').function.description,/No eligible creature/);
     respondTool(p.requests[0],'look',{angle:90});await until(()=>p.requests.length===2);
     assert.equal(engine.tick,0);assert.equal(engine.entity('t1').yaw,0);assert.ok(p.requests[1].body.tools.find((tool:any)=>tool.function.name==='follow').function.parameters.properties.entityId.enum.includes('duck'));
     assert.ok(JSON.parse(p.requests[1].body.messages.at(-1).content).interactions.follow.some((target:any)=>target.id==='duck'));
@@ -314,7 +303,7 @@ test('following asks every world second; stopping stages a free normal action th
     respond(p.requests[0],{action:'follow',entityId:'duck'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.equal(engine.tick,20);assert.ok(engine.entity('t1').motion);
     r.clock.pump();await until(()=>p.requests.length===2);
-    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow']);
+    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say']);
     const prompt=JSON.parse(p.requests[1].body.messages.at(-1).content);assert.equal(prompt.following.entityId,'duck');assert.ok(Math.abs(prompt.following.metres-3)<.01);
     assert.equal(prompt.inventory,undefined);assert.equal(prompt.notes,undefined);assert.equal(prompt.hints,undefined);assert.equal(prompt.recent,undefined);
     const frozen=engine.state();r.advance(90000);assert.deepEqual(engine.state(),frozen);
@@ -342,7 +331,7 @@ test('a legacy goal-learning journal offer cannot interrupt execution after foll
     engine.act('t1',{action:'follow',entityId:'duck'});
     Object.assign(r.runtime.minds.get('t1')!,{journalOffer:'You completed a goal. What memorable fact did you learn about the world?'});
     r.clock.pump();await until(()=>p.requests.length===1);
-    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow']);
+    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say']);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/memorable fact/);
     respondTool(p.requests[0],'stop_follow',{});await until(()=>p.requests.length===2);
     assert.doesNotMatch(p.requests[1].body.messages[0].content,/memorable fact/);
@@ -403,21 +392,20 @@ test('wood possession supplies observed inventory without injecting a shaping go
   }finally{r.clock.close();store.close();p.close();}
 });
 
-test('opening communication forces a phrase or an explicit free cancellation',async()=>{
+test('free speech is validated before commit and needs no communication menu',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
-    engine.setEntityEnabled('t2',false);const duck=engine.entity('duck');delete duck.motion;duck.position=[-.5,1,4.5];
+    engine.setEntityEnabled('t2',false);engine.setEntityEnabled('duck',false);
     r.clock.pump();await until(()=>p.requests.length===1);
     assert.ok(p.requests[0].body.tools.some((tool:any)=>tool.function.name==='say'));
-    respondTool(p.requests[0],'say',{});await until(()=>p.requests.length===2);
-    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['say','do_not_reply']);
+    respondTool(p.requests[0],'say',{word:'This has four words'});await until(()=>p.requests.length===2);
+    assert.match(JSON.parse(p.requests[1].body.messages.at(-1).content).message,/contains 4/);
+    assert.ok(p.requests[1].body.tools.some((tool:any)=>tool.function.name==='walk'));
     assert.equal(engine.tick,0);
-    respondTool(p.requests[1],'do_not_reply',{});await until(()=>p.requests.length===3);
-    assert.ok(p.requests[2].body.tools.some((tool:any)=>tool.function.name==='walk'));
-    assert.ok(p.requests[2].body.tools.some((tool:any)=>tool.function.name==='say'));
-    assert.equal(engine.tick,0);
-    respond(p.requests[2],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
+    respond(p.requests[1],{action:'say',word:'Hello empty island'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.equal(engine.time,1);
+    assert.match(engine.entity('t1').lastAction!.message,/Nobody/);
+    assert.equal(store.eventsAt(engine.tick,'t1').filter(event=>event.type==='action').length,1);
   }finally{r.clock.close();store.close();p.close();}
 });
 
@@ -683,7 +671,7 @@ test('full journal compaction is staged, persists with ready decisions, and only
     const frozen=engine.state();r.advance(30000);assert.deepEqual(engine.state(),frozen);
     respondTool(p.requests[1],'submit_journal',{notes:compacted});await until(()=>p.requests.length===3);
     const next=[...compacted,'New goal: build a shelter.'];
-    assert.deepEqual(JSON.parse(p.requests[2].body.messages.at(-1).content).notes,next);
+    assert.deepEqual(JSON.parse(p.requests[2].body.messages.at(-1).content).notes.map((entry:{text:string})=>entry.text),next);
     assert.deepEqual(r.runtime.minds.get('t1')!.notes,old,'Changes wait for the shared commit.');
     respond(p.requests[2],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.clock.close();
     const restored=new Engine(engine.module,store.stateAt(0));restored.nextEvent=store.maxEventId()+1;
@@ -703,7 +691,7 @@ test('full journal compaction is staged, persists with ready decisions, and only
     assert.equal(current.length,10);
     respondTool(p.requests[7],'submit_journal',{notes:[current[0]+' '+current[1],...current.slice(2)]});await until(()=>p.requests.length===9);
     const finalNotes=[current[0]+' '+current[1],...current.slice(2),'Shelter goal completed.'];
-    assert.deepEqual(JSON.parse(p.requests[8].body.messages.at(-1).content).notes,finalNotes);
+    assert.deepEqual(JSON.parse(p.requests[8].body.messages.at(-1).content).notes.map((entry:{text:string})=>entry.text),finalNotes);
     respond(p.requests[8],{action:'wait'});await until(()=>resumed!.clock.status().phase==='advancing');resumed.advance(1000);
     assert.deepEqual(store.memoryAt(restored.tick,'t1'),finalNotes);
     assert.equal(store.eventsAt(restored.tick,'t1').filter(event=>event.type==='journal-compaction').length,2);
@@ -736,7 +724,7 @@ test('journal favors durable world knowledge and persists notes for future promp
     }
     respond(p.requests[3],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.deepEqual(store.memoryAt(engine.tick,'t1'),Array.from({length:3},(_,index)=>`I want to explore area ${index}.`));
-    r.clock.pump();await until(()=>p.requests.length===5);assert.ok(JSON.parse(p.requests[4].body.messages.at(-1).content).notes.includes('I want to explore area 2.'));
+    r.clock.pump();await until(()=>p.requests.length===5);assert.ok(JSON.parse(p.requests[4].body.messages.at(-1).content).notes.some((entry:{id:string;text:string})=>entry.id==='note-3'&&entry.text==='I want to explore area 2.'));
     respond(p.requests[4],{action:'wait'});
   }finally{r.clock.close();store.close();p.close();}
 });
@@ -750,14 +738,15 @@ test('replacing an obsolete journal goal stays staged, needs no compaction and s
     r.runtime.minds.get('t1')!.notes=[...old];store.record(engine.frame(),engine.state(),r.runtime.persistence());
     r.clock.pump();await until(()=>p.requests.length===1);
     const journal=p.requests[0].body.tools.find((tool:any)=>tool.function.name==='journal');
-    assert.deepEqual(journal.function.parameters.properties.replace.enum,[0,1,2,3,4,5,6,7,8,9]);
+    assert.ok(journal.function.parameters.properties.replaceNoteIds);
+    assert.deepEqual(JSON.parse(p.requests[0].body.messages.at(-1).content).notes.map((entry:{id:string})=>entry.id),old.map((_,index)=>`note-${index+1}`));
     assert.match(p.requests[0].body.messages[0].content,/past interpretations.*oldest first/);
     const note='Coastal path at [4,1,8]: rise crossed; next gather sand to extend the path.';
-    respondTool(p.requests[0],'journal',{replace:99,note});await until(()=>p.requests.length===2);
+    respondTool(p.requests[0],'journal',{replaceNoteIds:['note-99'],note});await until(()=>p.requests.length===2);
     assert.equal(JSON.parse(p.requests[1].body.messages.at(-1).content).ok,false);
-    respondTool(p.requests[1],'journal',{replace:0,note});await until(()=>p.requests.length===3);
+    respondTool(p.requests[1],'journal',{replaceNoteIds:['note-1'],note});await until(()=>p.requests.length===3);
     const next=[...old.slice(1),note];
-    assert.deepEqual(JSON.parse(p.requests[2].body.messages.at(-1).content).notes,next);
+    assert.deepEqual(JSON.parse(p.requests[2].body.messages.at(-1).content).notes,next.map((text,index)=>({id:`note-${index+2}`,text})));
     assert.ok(p.requests[2].body.tools.some((tool:any)=>tool.function.name==='walk'));
     assert.deepEqual(r.runtime.minds.get('t1')!.notes,old);
     respond(p.requests[2],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.clock.close();
@@ -766,6 +755,7 @@ test('replacing an obsolete journal goal stays staged, needs no compaction and s
     assert.equal(p.requests.length,3,'A ready journal edit is not inferred again on restart.');
     resumed.advance(1000);
     assert.deepEqual(store.memoryAt(restored.tick,'t1'),next);assert.deepEqual(resumed.runtime.minds.get('t1')!.notes,next);
+    assert.deepEqual(resumed.runtime.minds.get('t1')!.noteIds,next.map((_,index)=>`note-${index+2}`));
     assert.equal(store.eventsAt(restored.tick).some(event=>event.type==='journal-compaction'),false);
   }finally{r.clock.close();resumed?.clock.close();store.close();p.close();}
 });

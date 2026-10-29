@@ -7,7 +7,7 @@ import { Engine } from '../src/core/engine';
 import { loadModule } from '../src/modules';
 import { Store } from './store';
 import { AgentRuntime } from './agents/runtime';
-import { ProviderChain, providersFromEnv, type ProviderConfig, type ProviderStrategy } from './agents/providers';
+import { discoverProviderModels, enabledProviders, normalizeSavedProvider, ProviderChain, providersFromEnv, resolveProviderApiKey, type ProviderConfig, type ProviderStrategy } from './agents/providers';
 import { TurnClock } from './turn-clock';
 import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
 
@@ -28,17 +28,17 @@ let providers = providersFromEnv(),providerStrategy:ProviderStrategy='fallback';
 try{
   const saved=JSON.parse(await readFile(llmConfigPath,'utf8')) as {providers?:ProviderConfig[];strategy?:ProviderStrategy|'single-model'};
   if(Array.isArray(saved.providers)&&saved.providers.every(provider=>provider&&typeof provider.id==='string'&&typeof provider.name==='string'&&typeof provider.apiKey==='string'&&typeof provider.baseUrl==='string'&&typeof provider.model==='string')){
-    const savedIds=new Set(saved.providers.map(provider=>provider.id));
-    providers=[...saved.providers,...providers.filter(provider=>!savedIds.has(provider.id))];
+    const normalized=saved.providers.map(normalizeSavedProvider),savedIds=new Set(normalized.map(provider=>provider.id));
+    providers=[...normalized,...providers.filter(provider=>!savedIds.has(provider.id))];
     if(saved.strategy==='single-model')providerStrategy='first-only';else if(['first-only','round-robin','fallback','master-slaves'].includes(saved.strategy??''))providerStrategy=saved.strategy!;
   }
 }catch{}
-if (providers.some(provider => provider.modelDiscovery)) {
-  try { await new ProviderChain(providers).refreshDiscoveredModels(AbortSignal.timeout(2000)); }
+if (enabledProviders(providers).some(provider => provider.modelDiscovery)) {
+  try { await new ProviderChain(enabledProviders(providers)).refreshDiscoveredModels(AbortSignal.timeout(2000)); }
   catch { /* Discovery is retried whenever the local fallback is needed. */ }
 }
-const agents = new AgentRuntime(engine, store, { providers, maxTurns: optionalTurnLimit(process.env.AGENT_MAX_TURNS) });
-agents.setInferenceConfig(providers,providerStrategy);
+const agents = new AgentRuntime(engine, store, { providers:enabledProviders(providers), maxTurns: optionalTurnLimit(process.env.AGENT_MAX_TURNS) });
+agents.setInferenceConfig(enabledProviders(providers),providerStrategy);
 for(const event of store.eventsAt(engine.tick,'',500)){
   if(event.type!=='decision'&&event.type!=='movement-decision')continue;
   const provider=(event.data as {provider?:unknown}|undefined)?.provider;
@@ -52,7 +52,7 @@ const vite = production ? undefined : await (await import('vite')).createServer(
 const publicLlmConfig = () => ({
   strategy: agents.inference.providers.length < 2 ? 'first-only' : agents.inference.strategy,
   currentStatus:agents.inference.currentStatus,
-  providers: agents.inference.providers.map(({id,type,name,baseUrl,model,region,displayModel,apiKey,maxOutputTokens,enableThinking})=>({id,type:type??'openai-compatible',name,baseUrl,model,region,displayModel,maxOutputTokens,enableThinking,apiKeyConfigured:!!apiKey,health:agents.inference.healthFor(id)})),
+  providers: providers.map(({id,type,enabled,name,baseUrl,model,region,displayModel,apiKey,apiKeyRemoved,tokenless,maxOutputTokens,enableThinking})=>({id,type:type??'openai-compatible',enabled:enabled!==false,name,baseUrl,model,region,displayModel,maxOutputTokens,enableThinking,apiKeyConfigured:!!apiKey,apiKeyRemoved:apiKeyRemoved===true,tokenless:tokenless===true,health:enabled===false?{state:'unknown' as const,detail:'Disabled in settings.'}:agents.inference.healthFor(id)})),
 });
 const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.inference.label, providerStrategy:publicLlmConfig().strategy, llmConfig:publicLlmConfig(), parallelRequests: agents.parallelRequests, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
 function broadcast(event: string, value: unknown) {
@@ -64,6 +64,7 @@ function broadcast(event: string, value: unknown) {
 }
 const json = (res: ServerResponse, value: unknown, code = 200) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
 const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml' };
+const supportedProviderTypes=new Set(['openai-compatible','openai','openrouter','amazon-bedrock']);
 
 const server = createServer(async (req, res) => {
   try {
@@ -73,21 +74,42 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
     if (url.pathname.startsWith('/api/')) {
       if(url.pathname==='/api/llm-config'&&req.method==='GET'){json(res,publicLlmConfig());return;}
+      if(url.pathname==='/api/llm-models'&&req.method==='POST'){
+        let body='';for await(const chunk of req){body+=chunk;if(body.length>8192){json(res,{error:'Model discovery settings are too large.'},413);return;}}
+        const row=JSON.parse(body) as Record<string,unknown>,id=typeof row.id==='string'?row.id:'',type=String(row.type??''),bedrock=type==='amazon-bedrock',clearApiKey=row.clearApiKey===true,tokenless=row.tokenless===true;
+        if(!/^[a-zA-Z0-9_-]{1,64}$/.test(id)||!supportedProviderTypes.has(type)){json(res,{error:'Choose a supported provider before refreshing models.'},400);return;}
+        if(row.clearApiKey!==undefined&&typeof row.clearApiKey!=='boolean'){json(res,{error:'Token removal must be true or false.'},400);return;}
+        if(row.tokenless!==undefined&&typeof row.tokenless!=='boolean'){json(res,{error:'Tokenless server must be true or false.'},400);return;}
+        if(tokenless&&type!=='openai-compatible'){json(res,{error:'Tokenless server is only supported for OpenAI-compatible providers.'},400);return;}
+        const providedKey=typeof row.apiKey==='string'?row.apiKey:'',apiKey=resolveProviderApiKey(providers,type as NonNullable<ProviderConfig['type']>,id,providedKey,clearApiKey);
+        if(!apiKey&&type!=='openai-compatible'){json(res,{error:'Enter an API key before refreshing models.'},400);return;}
+        const defaultUrl=type==='openai'?'https://api.openai.com/v1':type==='openrouter'?'https://openrouter.ai/api/v1':'',baseUrl=bedrock?'':typeof row.baseUrl==='string'&&row.baseUrl.trim()?row.baseUrl.trim():defaultUrl;
+        if(!bedrock){let parsed:URL;try{parsed=new URL(baseUrl);}catch{json(res,{error:'Enter a valid endpoint before refreshing models.'},400);return;}
+          if(!['http:','https:'].includes(parsed.protocol)){json(res,{error:'The model endpoint must use HTTP or HTTPS.'},400);return;}}
+        const region=typeof row.region==='string'?row.region.trim():'';
+        if(bedrock&&!/^[a-zA-Z0-9-]{1,64}$/.test(region)){json(res,{error:'Enter a valid AWS region before refreshing models.'},400);return;}
+        const candidate:ProviderConfig={id,type:type as ProviderConfig['type'],name:'Provider',apiKey,tokenless,baseUrl,model:'',...(region?{region}:{}),headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined};
+        try{json(res,{models:await discoverProviderModels(candidate,AbortSignal.timeout(20000))});}catch(error){json(res,{error:error instanceof Error?error.message:'Model discovery failed.'},502);}return;
+      }
       if(url.pathname==='/api/llm-config'&&req.method==='POST'){
         let body='';for await(const chunk of req){body+=chunk;if(body.length>16384){json(res,{error:'Configuration is too large.'},413);return;}}
         const data=JSON.parse(body) as {providers?:unknown;strategy?:unknown};
-        const supportedTypes=new Set(['openai-compatible','openai','openrouter','amazon-bedrock']);
         const strategies=new Set(['first-only','round-robin','fallback','master-slaves']);
         if(!Array.isArray(data.providers)||data.providers.length>12||!strategies.has(String(data.strategy))){json(res,{error:'Choose a supported strategy and up to 12 models.'},400);return;}
-        const previous=new Map(agents.inference.providers.map(provider=>[provider.id,provider]));
+        const previousProviders=providers,previous=new Map(previousProviders.map(provider=>[provider.id,provider]));
         const ids=new Set<string>();const next:ProviderConfig[]=[];
         for(const value of data.providers){
           if(!value||typeof value!=='object'){json(res,{error:'Each model needs valid settings.'},400);return;}
           const row=value as Record<string,unknown>,id=typeof row.id==='string'?row.id:'',type=String(row.type??''),name=typeof row.name==='string'?row.name.trim():'',model=typeof row.model==='string'?row.model.trim():'';
           if(!/^[a-zA-Z0-9_-]{1,64}$/.test(id)||ids.has(id)){json(res,{error:`${name||'Each model'} needs a unique ID.`},400);return;}
-          if(!supportedTypes.has(type)){json(res,{error:`${name||'This model'} uses an unsupported provider: ${type||'none'}.`},400);return;}
+          if(!supportedProviderTypes.has(type)){json(res,{error:`${name||'This model'} uses an unsupported provider: ${type||'none'}.`},400);return;}
           if(!name||name.length>80){json(res,{error:'Each model needs a name of 1 to 80 characters.'},400);return;}
           if(!model||model.length>200){json(res,{error:`Enter a model identifier for ${name}.`},400);return;}
+          if(row.enabled!==undefined&&typeof row.enabled!=='boolean'){json(res,{error:`Activation for ${name} must be true or false.`},400);return;}
+          if(row.clearApiKey!==undefined&&typeof row.clearApiKey!=='boolean'){json(res,{error:`Token removal for ${name} must be true or false.`},400);return;}
+          if(row.tokenless!==undefined&&typeof row.tokenless!=='boolean'){json(res,{error:`Tokenless server for ${name} must be true or false.`},400);return;}
+          const tokenless=row.tokenless===true;
+          if(tokenless&&type!=='openai-compatible'){json(res,{error:`Tokenless server is only supported for OpenAI-compatible providers such as ${name}.`},400);return;}
           ids.add(id);
           const bedrock=type==='amazon-bedrock',defaultUrl=type==='openai'?'https://api.openai.com/v1':type==='openrouter'?'https://openrouter.ai/api/v1':'';
           const baseUrl=bedrock?'':typeof row.baseUrl==='string'&&row.baseUrl.trim()?row.baseUrl.trim():defaultUrl;
@@ -96,18 +118,19 @@ const server = createServer(async (req, res) => {
           const region=typeof row.region==='string'?row.region.trim():'';
           if(bedrock&&!region){json(res,{error:`Enter an AWS region for ${name}.`},400);return;}
           if(bedrock&&!/^[a-zA-Z0-9-]{1,64}$/.test(region)){json(res,{error:`Enter a valid AWS region for ${name}.`},400);return;}
-          const old=previous.get(id),providedKey=typeof row.apiKey==='string'?row.apiKey.trim():'';
+          const old=previous.get(id),providedKey=typeof row.apiKey==='string'?row.apiKey:'',clearApiKey=row.clearApiKey===true,enabled=row.enabled!==false;
           const maxOutputTokens=row.maxOutputTokens??old?.maxOutputTokens;
           const enableThinking=row.enableThinking??old?.enableThinking;
           if(maxOutputTokens!==undefined&&(!Number.isInteger(maxOutputTokens)||Number(maxOutputTokens)<32||Number(maxOutputTokens)>32768)){json(res,{error:`Output tokens for ${name} must be an integer from 32 to 32768.`},400);return;}
           if(enableThinking!==undefined&&typeof enableThinking!=='boolean'){json(res,{error:`Thinking for ${name} must be true or false.`},400);return;}
-          const apiKey=providedKey||(old?.type===type?old.apiKey:'')||(type==='openai-compatible'?'local-openai-compatible':'');
-          if(!apiKey){json(res,{error:`Enter an API key for ${name}.`},400);return;}
-          next.push({id,type:type as ProviderConfig['type'],name,apiKey,baseUrl,model,...(region?{region}:{}),modelDiscovery:old?.modelDiscovery,timeoutMs:old?.timeoutMs,...(maxOutputTokens===undefined?{}:{maxOutputTokens:Number(maxOutputTokens)}),...(enableThinking===undefined?{}:{enableThinking:enableThinking as boolean}),headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined});
+          const apiKey=resolveProviderApiKey(previousProviders,type as NonNullable<ProviderConfig['type']>,id,providedKey,clearApiKey);
+          if(!apiKey&&enabled&&type!=='openai-compatible'){json(res,{error:`Enter an API key or deactivate ${name}.`},400);return;}
+          const sameOldType=(old?.type??'openai-compatible')===type,apiKeyRemoved=!providedKey.trim()&&(clearApiKey||(sameOldType&&old?.apiKeyRemoved===true));
+          next.push({id,type:type as ProviderConfig['type'],enabled,name,apiKey,...(apiKeyRemoved?{apiKeyRemoved:true}:{}),...(tokenless?{tokenless:true}:{}),baseUrl,model,...(region?{region}:{}),timeoutMs:old?.timeoutMs,...(maxOutputTokens===undefined?{}:{maxOutputTokens:Number(maxOutputTokens)}),...(enableThinking===undefined?{}:{enableThinking:enableThinking as boolean}),headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined});
         }
         const strategy=data.strategy as ProviderStrategy,tempPath=`${llmConfigPath}.tmp`;
         await writeFile(tempPath,JSON.stringify({strategy,providers:next}),{encoding:'utf8',mode:0o600});await rename(tempPath,llmConfigPath);
-        agents.setInferenceConfig(next,strategy);
+        providers=next;agents.setInferenceConfig(enabledProviders(providers),strategy);
         const config=publicLlmConfig();broadcast('llm-config',config);broadcast('settings',{parallelRequests:agents.parallelRequests});json(res,{...metadata(),llmConfig:config});return;
       }
       if (url.pathname === '/api/control' && req.method === 'POST') {

@@ -30,6 +30,9 @@ type JsonSchemaScalarType = Exclude<JsonSchemaType, 'object' | 'array'>
 export interface JsonSchemaNode {
   /** Omit with no constraints for any JSON value, or use `oneOf`. */
   type?: JsonSchemaType
+  /** Emergent extension: Unicode code-point length constraints for strings. */
+  minLength?: number
+  maxLength?: number
   /** Exactly one branch must validate; at least two branches are required. */
   oneOf?: JsonSchemaNode[]
   /** Nested property schemas (`type: 'object'` only). */
@@ -81,6 +84,8 @@ const CONSTRAINT_KEYWORDS = new Set([
   'items',
   'enum',
   'const',
+  'minLength',
+  'maxLength',
 ])
 const ANNOTATION_KEYWORDS = new Set(['description', 'title', 'default', 'examples'])
 const SCHEMA_TYPES: readonly JsonSchemaType[] = ['object', 'array', 'string', 'number', 'integer', 'boolean', 'null']
@@ -196,7 +201,7 @@ type SchemaWalkTask =
   | { kind: 'object-tail'; node: Record<string, unknown>; path: string; properties: unknown }
 
 /** Keywords that are invalid beside `oneOf`. */
-const ONE_OF_SIBLING_KEYWORDS = ['properties', 'required', 'additionalProperties', 'items', 'enum', 'const'] as const
+const ONE_OF_SIBLING_KEYWORDS = ['properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'minLength', 'maxLength'] as const
 
 /** Validate object-only fields after its property schemas have been visited. */
 function checkObjectSchemaTail(
@@ -313,12 +318,18 @@ function checkSchemaNode(root: unknown, rootPath: string, violations: string[], 
       items: ['array'],
       enum: ['string', 'number', 'integer', 'boolean', 'null'],
       const: ['string', 'number', 'integer', 'boolean', 'null'],
+      minLength: ['string'],
+      maxLength: ['string'],
     }
     for (const [key, types] of Object.entries(allowedFor)) {
       if (Object.hasOwn(node, key) && !types.includes(schemaType)) {
         violations.push(`${path}.${key} is not supported on type "${schemaType}"`)
       }
     }
+    for (const key of ['minLength', 'maxLength'] as const) {
+      if (Object.hasOwn(node, key) && (!Number.isInteger(node[key]) || (node[key] as number) < 0)) violations.push(`${path}.${key} must be a nonnegative integer`)
+    }
+    if (typeof node.minLength === 'number' && typeof node.maxLength === 'number' && node.minLength > node.maxLength) violations.push(`${path}.minLength must not exceed maxLength`)
 
     switch (schemaType) {
       case 'object': {
@@ -472,6 +483,11 @@ function valueFrame(node: JsonSchemaNode, value: unknown, path: string): ValueFr
 
 /** Validate one scalar node after its primitive type check. */
 function checkScalarValue(node: JsonSchemaNode, value: unknown, path: string): string[] {
+  if (typeof value === 'string') {
+    const length = [...value].length
+    if (node.minLength !== undefined && length < node.minLength) return [`"${diagnosticPath(path)}" has ${length} characters; minimum ${node.minLength}.`]
+    if (node.maxLength !== undefined && length > node.maxLength) return [`"${diagnosticPath(path)}" has ${length} characters; maximum ${node.maxLength}. Write one short sentence, at least ${length - node.maxLength} characters shorter.`]
+  }
   const allowed = Object.hasOwn(node, 'enum') ? node.enum : undefined
   if (allowed !== undefined && !allowed.includes(value as JsonSchemaScalar)) {
     return [`"${diagnosticPath(path)}" must be one of ${JSON.stringify(allowed)}`]
