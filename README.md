@@ -30,7 +30,7 @@ Token-limit responses and tool calls with malformed JSON arguments are discarded
 - `server/agents`: independent per-entity decisions, bounded memory, tool contracts, model adapter, and an agent-scoped Harness plugin bridge.
 - `server/turn-clock.ts`: all decisions share one observation boundary; deterministic rotating priority commits them together, then twenty physics steps advance exactly one world second. NPCs, gravity, movement and speech use that same clock. Long movements continue into subsequent turns without another decision.
 - `server/store.ts`: SQLite WAL, compressed 10 Hz state deltas, 30-second checkpoints and append-only event identities. Seeking reads recordings; it never reruns a model.
-- `src/view`: Three.js chunk instances, camera navigation and interpolation between recorded positions.
+- `src/view`: Three.js chunk instances, camera navigation, transient speech labels and interpolation between recorded positions.
 
 Records live in `data/`; restarting resumes the world. A world day is ten simulation minutes. Change `DATA_DIR` to start a fresh experiment. Export downloads the complete recording as NDJSON. Ready decisions survive pause, provider outages and restart. Unfinished requests are reissued after restart; a partially committed turn finishes its remaining physics before asking again.
 

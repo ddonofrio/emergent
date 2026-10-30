@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { key, unkey, type Body, type Entity, type Frame, type ModuleManifest, type Vec3, type WorldState } from '../core/types';
+import { entityLabelText } from './entity-label';
 
 const neighbors: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 export class WorldView {
@@ -281,7 +282,7 @@ export class WorldView {
         const label=this.labels.get(e.id)!;const projected=group.position.clone().add(new THREE.Vector3(0,e.height+.7,0)).project(this.camera);
         label.style.display=Math.abs(projected.x)>1||Math.abs(projected.y)>1||projected.z>1?'none':'block';
         label.style.left=`${(projected.x*.5+.5)*this.container.clientWidth}px`;label.style.top=`${(-projected.y*.5+.5)*this.container.clientHeight}px`;
-        label.classList.toggle('selected',e.id===this.selected);label.classList.toggle('disabled',!enabled);label.textContent=e.name;
+        label.classList.toggle('selected',e.id===this.selected);label.classList.toggle('disabled',!enabled);label.textContent=entityLabelText(e);
         if (e.id === this.selected && enabled && this.following) { const next = group.position.clone().add(new THREE.Vector3(0,1,0)); const delta = next.clone().sub(this.controls.target); this.camera.position.add(delta); this.controls.target.copy(next); }
       }
       const ids = new Set(this.current.bodies.map(b => b.id));
