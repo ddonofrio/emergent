@@ -1,15 +1,22 @@
 import { key, unkey, type Block, type Vec3, type Material } from './types';
 
+export interface ProceduralFluid { kind:string;level:number;bounds:{min:Vec3;max:Vec3} }
+
 export class Voxels {
   readonly cells = new Map<string, string>();
   readonly chunks = new Map<string, Set<string>>();
   changes = new Map<string, string | null>();
-  constructor(readonly materials: Record<string, Material>, blocks: Block[] = []) {
+  constructor(readonly materials: Record<string, Material>, blocks: Block[] = [],readonly fluid?:ProceduralFluid) {
     for (const [x, y, z, kind] of blocks) this.set([x, y, z], kind);
     this.changes.clear();
   }
   chunk(p: Vec3) { return p.map(v => Math.floor(v / 16)).join(','); }
-  get(p: Vec3) { return this.cells.get(key(p.map(Math.floor) as Vec3)); }
+  private fluidAt(p:Vec3) {
+    if(!this.fluid)return undefined;
+    const point=p.map(Math.floor) as Vec3;
+    return point.every((value,index)=>value>=this.fluid!.bounds.min[index]&&value<this.fluid!.bounds.max[index])&&point[1]<this.fluid.level?this.fluid.kind:undefined;
+  }
+  get(p: Vec3) { const point=p.map(Math.floor) as Vec3;return this.cells.get(key(point))??this.fluidAt(point); }
   solid(p: Vec3) { const kind = this.get(p); return !!kind && this.materials[kind]?.solid; }
   set(p: Vec3, kind: string | null) {
     const k = key(p), c = this.chunk(p);
@@ -31,6 +38,15 @@ export class Voxels {
       for (const k of this.chunks.get(`${x},${y},${z}`) ?? []) {
         const p = unkey(k);
         if (Math.hypot(p[0] + .5 - center[0], p[1] + .5 - center[1], p[2] + .5 - center[2]) <= radius) blocks.push([...p, this.cells.get(k)!]);
+      }
+    }
+    if(this.fluid){
+      const y=Math.ceil(this.fluid.level)-1;
+      for(let x=Math.max(this.fluid.bounds.min[0],Math.floor(center[0]-radius));x<Math.min(this.fluid.bounds.max[0],Math.ceil(center[0]+radius));x++){
+        for(let z=Math.max(this.fluid.bounds.min[2],Math.floor(center[2]-radius));z<Math.min(this.fluid.bounds.max[2],Math.ceil(center[2]+radius));z++){
+          const point:Vec3=[x,y,z];
+          if(!this.cells.has(key(point))&&!this.solid([x,y+1,z])&&Math.hypot(x+.5-center[0],y+.5-center[1],z+.5-center[2])<=radius)blocks.push([x,y,z,this.fluid.kind]);
+        }
       }
     }
     return blocks;

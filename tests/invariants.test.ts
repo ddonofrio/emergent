@@ -320,6 +320,20 @@ test('half-height water boundary and swept movement refuse a deep intermediate c
   assert.match(engine.entity('t1').lastAction!.message,/water|drops away/i);
 });
 
+test('water is a visible procedural material block with traversable fluid physics',()=>{
+  const creature=entity();creature.position=[.5,-1,.5];
+  const engine=new Engine({...island,generate:()=>({blocks:[[0,-2,0,'sand'],[0,-2,1,'sand']],entities:[creature]})});
+  const observation=engine.observe('t1'),water=observation.surfaces.find(surface=>surface.kind==='water');
+  assert.ok(water);assert.equal(engine.voxels.get(water.nearest),'water');assert.equal(engine.voxels.solid(water.nearest),false);
+  assert.match(observation.description,/water block.*fluid.*depth is safe/);assert.doesNotMatch(observation.description,/water block.*hit it/);
+  assert.ok(observation.blocks.some(block=>block[3]==='water'));
+  assert.ok(engine.materialsAround('t1').some(material=>material.material==='water'));
+  assert.ok(!observation.interactions.hit.some(target=>target.kind==='water'));
+  assert.equal(island.canEnter(creature,creature.position).ok,true);
+  const scan=engine.act('t1',{action:'find_material'});assert.ok((scan.feedback?.materials as {material:string}[]).some(material=>material.material==='water'));
+  for(let tick=0;tick<20;tick++)engine.step();assert.ok(engine.discoveries.get('t1')?.has(observedMaterialKnowledge('water')));
+});
+
 test('walking and running are half speed when one block of water reaches half the body',()=>{
   for(const [action,distance,speed] of [['walk',3,1],['run',3,2]] as const){
     const engine=fixture(),actor=engine.entity('t1');

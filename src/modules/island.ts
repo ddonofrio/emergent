@@ -10,6 +10,7 @@ export const island: WorldModule = {
     daySeconds: WORLD_DAY_SECONDS, vocabulary: [],
     perception: { range: 18, fieldOfView: 120, maxBlocks: 96 },
     materials: {
+      water: { color: '#4d86a8', solid: false, floats: false, fluid: true },
       grass: { color: '#74955a', solid: true, floats: false },
       dirt: { color: '#8e7555', solid: true, floats: false },
       sand: { color: '#d3c394', solid: true, floats: false },

@@ -220,6 +220,11 @@ export class AgentRuntime {
           const answer=await this.infer(id,'planning',request,abort,(provider)=>report(id,{state:'planning',message:`Planning with ${provider.name}; world time is held.`}));
           staged.modelCalls++;return answer;
         },
+        compact:async(request,abort)=>{
+          report(id,{state:'planning',message:'Compacting an expanded planning draft; world time is held.'});
+          const answer=await this.infer(id,'plan-compaction',request,abort,(provider)=>report(id,{state:'planning',message:`Compacting the plan with ${provider.name}; world time is held.`}));
+          staged.modelCalls++;return answer;
+        },
         waiting:message=>report(id,{state:'waiting',message}),
         save:plan=>{staged.plan=clone(plan);staged.events.push(clone(plan));this.store.savePending(observation.tick,actor,this.inference.cacheKey,staged);},
       });

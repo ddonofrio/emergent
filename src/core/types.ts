@@ -1,6 +1,6 @@
 export type Vec3 = [number, number, number];
 export type Block = [number, number, number, string];
-export interface Material { color: string; solid: boolean; floats: boolean; stackLimit?: number; vessel?: boolean; }
+export interface Material { color: string; solid: boolean; floats: boolean; stackLimit?: number; vessel?: boolean; fluid?: boolean; }
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }

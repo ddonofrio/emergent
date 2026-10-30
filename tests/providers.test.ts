@@ -138,11 +138,11 @@ test('Bedrock uses the European inference profile for Claude Sonnet 4.6',()=>{
 
 test('Bedrock reasoning defaults on with a separate thinking budget',()=>{
   const sonnet={...provider('sonnet'),model:'eu.anthropic.claude-sonnet-4-6'};
-  const planning={...request,max_tokens:2200,messages:[{role:'user',content:'Review my recorded experience.'}]};
-  assert.deepEqual(bedrockThinkingConfig(sonnet,planning),{inferenceConfig:{maxTokens:12200},additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:'high'}}});
-  assert.deepEqual(bedrockThinkingConfig(sonnet,{...planning,reasoning:'minimum'}),{inferenceConfig:{maxTokens:2200}});
-  assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'unknown-model'},planning),{inferenceConfig:{maxTokens:2200}});
-  assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'eu.anthropic.claude-haiku-4-5-20251001-v1:0'},planning),{inferenceConfig:{maxTokens:12200},additionalModelRequestFields:{thinking:{type:'enabled',budget_tokens:10000}}});
+  const planning={...request,max_tokens:4400,messages:[{role:'user',content:'Review my recorded experience.'}]};
+  assert.deepEqual(bedrockThinkingConfig(sonnet,planning),{inferenceConfig:{maxTokens:14400},additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:'high'}}});
+  assert.deepEqual(bedrockThinkingConfig(sonnet,{...planning,reasoning:'minimum'}),{inferenceConfig:{maxTokens:4400}});
+  assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'unknown-model'},planning),{inferenceConfig:{maxTokens:4400}});
+  assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'eu.anthropic.claude-haiku-4-5-20251001-v1:0'},planning),{inferenceConfig:{maxTokens:14400},additionalModelRequestFields:{thinking:{type:'enabled',budget_tokens:10000}}});
   assert.equal(bedrockThinkingConfig(sonnet,{...planning,messages:[{role:'assistant',content:'An existing tool conversation.'}]}).additionalModelRequestFields,undefined,'Do not enable thinking midway through a conversation lacking signed reasoning blocks.');
 });
 

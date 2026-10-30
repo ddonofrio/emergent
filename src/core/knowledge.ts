@@ -22,6 +22,9 @@ export function knowledgeDescription(knowledge:string) {
   if(knowledge==='wood-shape:door_half_down')return 'Strike wood at front_edge with orientation down to make a lower door half.';
   if(knowledge==='wood-shape:door')return 'Join one upper and one lower wooden door half to make a rustic door.';
   if(knowledge.startsWith('wood-shape:'))return `Wood can be shaped into a ${knowledge.slice('wood-shape:'.length)}.`;
-  if(knowledge.startsWith(OBSERVED_MATERIAL_PREFIX))return `I have observed ${knowledge.slice(OBSERVED_MATERIAL_PREFIX.length)} terrain on this island.`;
+  if(knowledge.startsWith(OBSERVED_MATERIAL_PREFIX)){
+    const material=knowledge.slice(OBSERVED_MATERIAL_PREFIX.length);
+    return material==='water'?'I have directly observed water on this island.':`I have observed ${material} terrain on this island.`;
+  }
   return knowledge;
 }

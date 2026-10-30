@@ -114,10 +114,50 @@ test('the planner rejects a plan without a standing journal action',async()=>{
   assert.ok(next.suggestedActions!.some(action=>/\bjournal\b/i.test(action)));
 });
 
-test('planning truncates explanation after three consecutive overlong corrections',async()=>{
-  let calls=0;const explanation='x'.repeat(502);
-  const next=await planDecision({...base(),async complete(){calls++;return answer('set_plan',{...authored,explanation});}});
-  assert.equal(calls,4);assert.equal(next.explanation,'x'.repeat(500));
+test('planning accepts a double-sized draft and compacts it without asking the planner again',async()=>{
+  let plannerCalls=0,compactorCalls=0;
+  const expanded={...structuredClone(projectFields),...authored,explanation:'Useful reason. '.repeat(50),project:{...structuredClone(projectFields.project),progress:'Observed detail. '.repeat(100)}};
+  const next=await planDecision({...base(),async complete(request){
+    plannerCalls++;
+    const schema=(request.tools[0] as any).function.parameters;
+    assert.equal(request.max_tokens,4400);
+    assert.match((request.messages[0] as any).content,/within 2200 output tokens/);
+    assert.equal(schema.properties.explanation.maxLength,500);assert.equal(schema.properties.project.properties.progress.maxLength,1200);
+    return answer('set_plan',expanded);
+  },async compact(request){
+    compactorCalls++;
+    assert.equal(request.reasoning,'maximum');assert.equal(request.max_tokens,2200);
+    assert.match((request.messages[0] as any).content,/Merge redundant or overlapping wording/);
+    const context=JSON.parse((request.messages[1] as any).content);assert.deepEqual(context.draft,expanded);
+    const schema=(request.tools[0] as any).function.parameters;
+    assert.equal(schema.properties.explanation.maxLength,500);assert.equal(schema.properties.project.properties.progress.maxLength,1200);
+    return answer('submit_compacted_plan',{...structuredClone(projectFields),...authored});
+  }});
+  assert.equal(plannerCalls,1);assert.equal(compactorCalls,1);assert.equal(next.explanation,authored.explanation);
+});
+
+test('planning corrects drafts beyond double the declared contract before compaction',async()=>{
+  let plannerCalls=0,compactorCalls=0;
+  const next=await planDecision({...base(),async complete(request){
+    plannerCalls++;
+    if(plannerCalls===1)return answer('set_plan',{...authored,explanation:'x'.repeat(1001)});
+    const context=JSON.parse((request.messages[1] as any).content);
+    assert.match(context.correction,/maximum 1000|at most 500/);
+    return answer('set_plan',authored);
+  },async compact(){compactorCalls++;return answer('submit_compacted_plan',authored);}});
+  assert.equal(plannerCalls,2);assert.equal(compactorCalls,0);assert.equal(next.explanation,authored.explanation);
+});
+
+test('plan compaction cannot change a review outcome or its evidence references',async()=>{
+  const current:AgentPlan={version:4,...structuredClone(projectFields),goal:authored.goal,status:'active',steps:[{task:authored.successCondition,status:'pending'}],explanation:authored.explanation,createdTurn:1,reviewedTurn:1,startedAtSecond:0};
+  const draft={outcome:'continue',explanation:'Still useful. '.repeat(50),project:structuredClone(projectFields.project),suggestedActions:structuredClone(projectFields.suggestedActions),evidenceEventIds:[42]};
+  let plannerCalls=0,compactorCalls=0;
+  const next=await planDecision({...base(),plan:current,async complete(){plannerCalls++;return answer('review_plan',draft);},async compact(){
+    compactorCalls++;
+    const compacted={...draft,explanation:'The task remains useful.'};
+    return answer('submit_compacted_plan',compactorCalls===1?{...compacted,outcome:'abandon',evidenceEventIds:[99]}:compacted);
+  }});
+  assert.equal(plannerCalls,1);assert.equal(compactorCalls,2);assert.equal(next.status,'active');assert.equal(next.explanation,'The task remains useful.');
 });
 
 test('identical surroundings allow different model-authored goals without substitution',async()=>{

@@ -30,7 +30,8 @@ export class Engine {
   private impactNotices=new Map<string,BlockImpactNotice[]>();
   constructor(readonly module: WorldModule, state?: WorldState) {
     const initial = state ?? module.generate();
-    this.voxels = new Voxels(module.manifest.materials, initial.blocks);
+    const water=module.manifest.materials.water?.fluid?{kind:'water',level:module.manifest.waterLevel,bounds:module.manifest.bounds}:undefined;
+    this.voxels = new Voxels(module.manifest.materials, initial.blocks,water);
     this.entities = clone(initial.entities).map(entity => ({ ...entity, enabled: entity.enabled !== false, hitbox: entity.hitbox ?? { radius: entity.kind === 'duck' ? .24 : .36, height: entity.height }, inventory: normalizeInventory(entity.inventory) }));
     for (const [voxel, damage] of Object.entries((state as WorldState | undefined)?.blockDamage ?? {})) this.blockDamage.set(voxel, damage);
     for (const [actor, learned] of Object.entries((state as WorldState | undefined)?.discoveries ?? {})) this.discoveries.set(actor,new Set(learned));
@@ -162,7 +163,8 @@ export class Engine {
       if(clear&&!held.contents&&!this.cellOccupied(target)&&this.hasSupport(target,!rawBlock(held.kind)))place.push(target);
       if(held.kind!=='bucket')continue;
       const canChangeContents=(contents?:string)=>!!exchangeInventory(e.inventory,[{index:e.inventory!.selected!,count:1}],[{kind:'bucket',count:1,...(contents?{contents}:{})}],true);
-      if(!held.contents&&((clear&&point[1]<this.module.manifest.waterLevel)||((kind==='sand'||kind==='dirt')&&!this.standingOn(target)&&this.blockInReach(e,target)&&this.blockSurfaces(target,eye).some(p=>this.visible(e,p))))&&canChangeContents(kind??'water'))fill.push(target);
+      const fluid=kind&&this.module.manifest.materials[kind]?.fluid;
+      if(!held.contents&&(((fluid&&distance(eye,point)<=3&&this.visible(e,point))||((kind==='sand'||kind==='dirt')&&!this.standingOn(target)&&this.blockInReach(e,target)&&this.blockSurfaces(target,eye).some(p=>this.visible(e,p))))&&canChangeContents(kind)))fill.push(target);
       if(held.contents&&clear&&(held.contents==='water'||(!this.cellOccupied(target)&&this.hasSupport(target)))&&canChangeContents())empty.push(target);
     }
     const nearest=(targets:Vec3[])=>targets.sort((a,b)=>distance(eye,center(a))-distance(eye,center(b))).slice(0,3);
@@ -192,7 +194,7 @@ export class Engine {
     const interactions = {
       hit: emptyHands||hasShovel ? blocks.filter(block=>{
         const target=block.slice(0,3) as Vec3;
-        return this.blockInReach(e,target)&&!this.standingOn(target)&&(!hasShovel||['sand','dirt','grass'].includes(block[3]));
+        return !this.module.manifest.materials[block[3]]?.fluid&&this.blockInReach(e,target)&&!this.standingOn(target)&&(!hasShovel||['sand','dirt','grass'].includes(block[3]));
       }).sort((a,b)=>(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0)||Number(obstacles.has(key(b.slice(0,3) as Vec3)))-Number(obstacles.has(key(a.slice(0,3) as Vec3)))||Number(b[3]==='wood')-Number(a[3]==='wood'))
         .slice(0,2).map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
       pickup: emptyHands ? items.filter(item=>distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
@@ -373,11 +375,11 @@ export class Engine {
       parts.push(`Walking clearance in the viewing direction: ${forward.clearance.toFixed(1)} m before contact. ${forward.issue.message}${forward.issue.target?` Obstacle block [${forward.issue.target.join(',')}].`:''}`);
     }
     else parts.push(`The ground in the viewing direction is traversable for at least ${navigation.checkedDistance} m.`);
-    for (const surface of surfaces.filter(surface => ['wood','plant','leaves','stone','sand'].includes(surface.kind)).slice(0,4)) {
+    for (const surface of surfaces.filter(surface => ['water','wood','plant','leaves','stone','sand'].includes(surface.kind)).slice(0,4)) {
       const metres = distance(e.position,center(surface.nearest));
       const label = surface.kind === 'plant' ? 'plant or shrub' : `${surface.kind} block`;
       const reach=this.blockInReach(e,surface.nearest)&&!this.standingOn(surface.nearest);
-      const interaction=held?.kind==='shovel'&&['sand','dirt','grass'].includes(surface.kind)?' Within reach: dig with your shovel.':held?' Within reach; free your hands to hit it.':' Within reach: hit it without moving closer.';
+      const interaction=this.module.manifest.materials[surface.kind]?.fluid?' It is fluid and can be entered where its depth is safe.':held?.kind==='shovel'&&['sand','dirt','grass'].includes(surface.kind)?' Within reach: dig with your shovel.':held?' Within reach; free your hands to hit it.':' Within reach: hit it without moving closer.';
       parts.push(`A ${label} at [${surface.nearest.join(',')}] is ${metres.toFixed(1)} m to its centre, ${this.direction(body,center(surface.nearest))} (body-relative ${bearing(center(surface.nearest))} degrees).${reach?interaction:''}`);
     }
     for (const other of entities.slice(0,4)) parts.push(`${other.name}, a ${other.kind}, is ${distance(e.position,other.position).toFixed(1)} m ${this.direction(body,other.position)} (body-relative ${bearing(other.position)} degrees).`);
@@ -667,6 +669,7 @@ export class Engine {
     if (!Array.isArray(target) || target.length !== 3 || !target.every(Number.isInteger) || !this.inside(target)) return fail('Target must be an integer voxel coordinate inside the world.');
     const point = center(target);
     const kind = this.voxels.get(target);
+    const fluid=kind&&this.module.manifest.materials[kind]?.fluid;
     const surfaceAction=!!kind&&(a.action==='hit'||a.action==='dig'||a.action==='fill');
     if(surfaceAction){
       if(!this.blockInReach(e,target)){
@@ -680,7 +683,7 @@ export class Engine {
     if (a.action === 'place') {
       const held=this.held(e);if(!held)return fail('Your hands are empty.');
       if(held.contents)return fail('Empty this object before placing it as a fixed object.');
-      if (kind) return fail('That cell is occupied.');
+      if (kind&&!fluid) return fail('That cell is occupied.');
       if (this.cellOccupied(target)) return fail('A creature occupies that cell.');
       if(!rawBlock(held.kind)){
         if(!this.voxels.solid([target[0]+.5,target[1]-.01,target[2]+.5]))return fail('A placed object needs solid ground directly beneath it.');
@@ -695,6 +698,7 @@ export class Engine {
       if(a.action==='dig'&&!usingShovel)return fail('Hold a shovel before digging.');
       if(held&&!usingShovel)return fail('You cannot strike the world while holding an object. Store, place, or throw it first.');
       if (!kind) return fail('There is nothing to hit.');
+      if(fluid)return fail(`The ${kind} block flows around a strike; enter it or use a suitable container instead.`);
       if(usingShovel&&!['sand','dirt','grass'].includes(kind))return fail('The wooden shovel can remove only sand, dirt, or grass in one strike.');
       const supported=this.standingOn(target);
       if(supported)return fail(`You cannot strike that block because ${supported.name} is standing on it.`);
@@ -714,9 +718,9 @@ export class Engine {
     }
     if (a.action === 'fill') {
       const held=this.held(e);if(!held||held.kind!=='bucket'||held.contents)return fail('You need to hold an empty bucket.');
-      if(!kind&&point[1]<this.module.manifest.waterLevel){
-        if(!this.replaceHeld(e,{kind:'bucket',count:1,contents:'water'}))return fail('No stack space for a water-filled bucket. Put something down first.');
-        return ok('You fill one bucket with water and hold it. The other buckets keep their contents.');
+      if(fluid){
+        if(!this.replaceHeld(e,{kind:'bucket',count:1,contents:kind}))return fail(`No stack space for a ${kind}-filled bucket. Put something down first.`);
+        return ok(`You fill one bucket with ${kind} and hold it. The other buckets keep their contents.`);
       }
       if(kind!=='dirt'&&kind!=='sand')return fail('The bucket can currently be filled from water, dirt, or sand.');
       const supported=this.standingOn(target);
@@ -730,7 +734,7 @@ export class Engine {
         if(!this.replaceHeld(e,{kind:'bucket',count:1}))return fail('No stack space for an empty bucket. Put something down first.');
         this.event(e.id,'splash','Emptied a bucket of water.',{position:point});return ok('You empty one bucket and hold it. The water splashes and disperses.');
       }
-      if(kind)return fail('That cell is occupied.');
+      if(kind&&!fluid)return fail('That cell is occupied.');
       if(this.cellOccupied(target))return fail('A creature occupies that cell.');
       if(!faces.some(d=>this.voxels.solid(target.map((v,i)=>v+d[i]) as Vec3)))return fail('The emptied material needs adjacent support.');
       const contents=held.contents;
