@@ -10,6 +10,8 @@ const fail = (message: string, navigation?: NavigationReport): ActionResult => (
 const center = (p: Vec3): Vec3 => p.map(v => v + .5) as Vec3;
 const faces: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 const rawBlock = (kind: string) => ['grass','dirt','sand','stone','wood','leaves'].includes(kind);
+const TREE_FALL_HORIZONTAL_SPEED = 4;
+const TREE_FALL_DOWNWARD_SPEED = .8;
 
 export class Engine {
   readonly voxels: Voxels;
@@ -703,9 +705,11 @@ export class Engine {
       const supported=this.standingOn(target);
       if(supported)return fail(`You cannot strike that block because ${supported.name} is standing on it.`);
       e.yaw=((Math.atan2(point[0]-e.position[0],point[2]-e.position[2])*180/Math.PI)%360+360)%360;
+      const awayX=point[0]-e.position[0],awayZ=point[2]-e.position[2],awayDistance=Math.hypot(awayX,awayZ),facing=e.yaw*Math.PI/180;
+      const treeFallDirection:Vec3=awayDistance>.001?[awayX/awayDistance,0,awayZ/awayDistance]:[Math.sin(facing),0,Math.cos(facing)];
       const voxel=key(target),damage=(this.blockDamage.get(voxel)??0)+1;
       if(!usingShovel&&damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return {...ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`),feedback:{target,material:kind,blockOutcome:'cracked',cracks:damage}};}
-      this.blockDamage.delete(voxel);this.voxels.set(target,null);const treeCollapsed=this.collapseUnsupportedTree(target);this.wakeBodies();if(!usingShovel)this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
+      this.blockDamage.delete(voxel);this.voxels.set(target,null);const treeCollapsed=this.collapseUnsupportedTree(target,treeFallDirection);this.wakeBodies();if(!usingShovel)this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
       const collected=kind==='plant'?'stick':kind,heldResult=this.canHold(e,collected);
       if(heldResult.ok)this.addInventory(e,collected,undefined,!usingShovel);
       else this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:collected,position:center(target),velocity:[0,0,0],resting:false});
@@ -714,7 +718,7 @@ export class Engine {
         :kind==='plant'
           ?heldResult.ok?'The plant breaks. You pick up a stick.':'The plant breaks, but the stick falls loose because your inventory is full.'
           :heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`;
-      return {...ok(result+(treeCollapsed?' You break the tree, and its unsupported wood and leaves fall into loose blocks.':'')),feedback:{target,material:kind,blockOutcome:heldResult.ok?'collected':'broken',...(heldResult.ok?{collected}: {}),...(treeCollapsed?{treeCollapsed:true}:{})}};
+      return {...ok(result+(treeCollapsed?' You break the tree, and its unsupported wood and leaves topple away from you into loose blocks.':'')),feedback:{target,material:kind,blockOutcome:heldResult.ok?'collected':'broken',...(heldResult.ok?{collected}: {}),...(treeCollapsed?{treeCollapsed:true}:{})}};
     }
     if (a.action === 'fill') {
       const held=this.held(e);if(!held||held.kind!=='bucket'||held.contents)return fail('You need to hold an empty bucket.');
@@ -775,7 +779,7 @@ export class Engine {
     if(e.controller!=='agent')return;
     if(issue.kind==='water')this.discover(e.id,'deep-water-limit',knowledgeDescription('deep-water-limit'),{issue});
   }
-  private collapseUnsupportedTree(removed:Vec3){
+  private collapseUnsupportedTree(removed:Vec3,direction:Vec3){
     const treeKinds=new Set(['wood','leaves']),visited=new Set<string>();
     let collapsed=false;
     for(const offset of faces){
@@ -786,8 +790,8 @@ export class Engine {
       const supported=component.some(point=>{const below:[number,number,number]=[point[0],point[1]-1,point[2]];return this.voxels.solid(below)&&!componentKeys.has(key(below));});
       if(supported)continue;
       collapsed=component.length>0||collapsed;
-      for(const point of component){const kind=this.voxels.get(point)!;this.voxels.set(point,null);this.blockDamage.delete(key(point));this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind,position:center(point),velocity:[0,0,0],resting:false});}
-      if(component.length)this.event('world','collapse',`An unsupported tree section collapsed into ${component.length} loose blocks.`,{origin:removed,count:component.length});
+      for(const point of component){const kind=this.voxels.get(point)!;this.voxels.set(point,null);this.blockDamage.delete(key(point));this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind,position:center(point),velocity:[direction[0]*TREE_FALL_HORIZONTAL_SPEED,-TREE_FALL_DOWNWARD_SPEED,direction[2]*TREE_FALL_HORIZONTAL_SPEED],resting:false});}
+      if(component.length)this.event('world','collapse',`An unsupported tree section toppled into ${component.length} loose blocks.`,{origin:removed,count:component.length,direction:clone(direction)});
     }
     return collapsed;
   }

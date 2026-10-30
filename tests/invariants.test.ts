@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from '../src/core/engine';
 import { island } from '../src/modules/island';
-import type { Block, Entity, WorldModule } from '../src/core/types';
+import type { Block, Entity, Vec3, WorldModule } from '../src/core/types';
 import { Store } from '../server/store';
 import { worldTools } from '../server/agents/tools';
 import { apply } from '../server/agents/harness-plugin';
@@ -252,8 +252,16 @@ test('breaking a tree reports its visible collapse along with the collected bloc
   engine.entity('t1').position=[.5,1,-.5];
   for(let hit=0;hit<2;hit++)engine.act('t1',{action:'hit',target:[0,1,1]});
   const result=engine.act('t1',{action:'hit',target:[0,1,1]});
-  assert.equal(result.ok,true);assert.match(result.message,/pick it up.*unsupported part of the tree falls/);
+  assert.equal(result.ok,true);assert.match(result.message,/pick it up.*unsupported wood and leaves topple away from you/);
   assert.equal(engine.bodies.length,2);assert.equal(engine.held(engine.entity('t1'))?.kind,'wood');
+  for(const body of engine.bodies){
+    assert.ok(body.velocity[2]>0,'The tree must fall away from the character on the opposite side of the trunk.');
+    assert.ok(Math.hypot(body.velocity[0],body.velocity[2])>Math.abs(body.velocity[1]),'The initial fall must travel more sideways than downward.');
+  }
+  const before=engine.bodies.map(body=>[...body.position] as Vec3);engine.step();
+  for(const [index,body] of engine.bodies.entries()){
+    assert.ok(body.position[2]>before[index][2]);assert.ok(body.position[1]<before[index][1]);
+  }
 });
 
 test('a fallen tree block stays visibly loose for a full turn before it can replace removed terrain',()=>{
