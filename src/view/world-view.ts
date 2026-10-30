@@ -168,7 +168,7 @@ export class WorldView {
   }
   private heldVisual(kind: string, color: string, inHand=true, contents?: string) {
     const visual=new THREE.Group();visual.userData.kind=kind;visual.userData.contents=contents;
-    if(inHand){if(kind==='spear'||kind==='stick')visual.position.set(0,-.565,.4);else visual.position.set(.36,1,.38);}
+    if(inHand){if(kind==='knife'||kind==='shovel')visual.position.set(0,-.565,.23);else if(kind==='spear'||kind==='stick')visual.position.set(0,-.565,.4);else visual.position.set(.36,1,.38);}
     const material=(value:string)=>{const result=new THREE.MeshStandardMaterial({color:value,roughness:.86});result.userData.activeColor=value;return result;};
     if(kind==='stick'){
       const shaft=new THREE.Mesh(new THREE.CylinderGeometry(.035,.05,.68,7),material(color));shaft.rotation.x=Math.PI/2;shaft.rotation.z=.08;shaft.castShadow=true;visual.add(shaft);
@@ -180,8 +180,18 @@ export class WorldView {
       const fletching=this.box(visual,[.16,.035,.18],[0,0,-.42],'#d8c7a0');fletching.rotation.z=Math.PI/4;
       }
     }else if(kind==='shovel'){
-      const handle=new THREE.Mesh(new THREE.CylinderGeometry(.035,.045,.62,7),material(color));handle.rotation.x=.35;handle.position.set(0,.02,0);handle.castShadow=true;visual.add(handle);
-      this.box(visual,[.28,.32,.07],[0,-.3,.12],color);
+      const handle=new THREE.Mesh(new THREE.CylinderGeometry(.035,.045,.62,8),material('#6d482d'));handle.rotation.x=Math.PI/2;handle.position.z=.14;handle.castShadow=true;visual.add(handle);
+      const outline=new THREE.Shape();
+      outline.moveTo(-.055,0);outline.lineTo(.055,0);outline.lineTo(.14,.08);outline.lineTo(.13,.25);outline.lineTo(0,.35);outline.lineTo(-.13,.25);outline.lineTo(-.14,.08);outline.closePath();
+      const geometry=new THREE.ExtrudeGeometry(outline,{depth:.05,steps:1,bevelEnabled:true,bevelSegments:1,bevelSize:.008,bevelThickness:.006});geometry.rotateX(Math.PI/2);geometry.translate(0,.025,.43);
+      const blade=new THREE.Mesh(geometry,material(color));blade.castShadow=true;blade.receiveShadow=true;visual.add(blade);
+    }else if(kind==='knife'){
+      const handle=new THREE.Mesh(new THREE.CylinderGeometry(.055,.065,.3,8),material('#5c3a24'));handle.rotation.x=Math.PI/2;handle.position.z=-.2;handle.castShadow=true;visual.add(handle);
+      this.box(visual,[.19,.055,.055],[0,0,-.035],'#6d482d');
+      const outline=new THREE.Shape();
+      outline.moveTo(-.075,0);outline.lineTo(.075,0);outline.lineTo(.065,.25);outline.lineTo(.02,.44);outline.lineTo(0,.5);outline.lineTo(-.065,.3);outline.closePath();
+      const geometry=new THREE.ExtrudeGeometry(outline,{depth:.035,steps:1,bevelEnabled:true,bevelSegments:1,bevelSize:.008,bevelThickness:.006});geometry.rotateX(Math.PI/2);geometry.translate(0,.018,0);
+      const blade=new THREE.Mesh(geometry,material(color));blade.castShadow=true;blade.receiveShadow=true;visual.add(blade);
     }else if(kind==='bucket'){
       const size=inHand ? .46 : .56,wall=size*.11,inside=size-wall*2;
       this.box(visual,[size,wall,size],[0,-size/2+wall/2,0],color);
@@ -283,7 +293,7 @@ export class WorldView {
         if (carried) {
           const color=this.manifest!.materials[carried.kind]?.color??'#ffffff';
           const contents=carried.contents??(carried.water?'water':undefined);
-          if (!held || held.userData.kind!==carried.kind || held.userData.contents!==contents) { if(held)this.disposeItemVisual(held);held=this.heldVisual(carried.kind,color,true,contents);const hand=carried.kind==='spear'||carried.kind==='stick'?group.getObjectByName('arm-right'):undefined;(hand??group).add(held);this.held.set(e.id,held);group.userData.enabled=undefined; }
+          if (!held || held.userData.kind!==carried.kind || held.userData.contents!==contents) { if(held)this.disposeItemVisual(held);held=this.heldVisual(carried.kind,color,true,contents);const hand=carried.kind==='spear'||carried.kind==='stick'||carried.kind==='knife'||carried.kind==='shovel'?group.getObjectByName('arm-right'):undefined;(hand??group).add(held);this.held.set(e.id,held);group.userData.enabled=undefined; }
           held.visible = true;
         } else if (held) held.visible = false;
         this.styleEntity(group,enabled);
@@ -307,7 +317,7 @@ export class WorldView {
         let object = this.objects.get(b.id);
         if (!object) {
           const color=this.manifest!.materials[b.kind]?.color??'#ffffff';
-          if(['stick','arrow','spear','shovel','bucket','plank','door_half_up','door_half_down','door'].includes(b.kind))object=this.heldVisual(b.kind,color,false,b.contents??(b.water?'water':undefined));else{const mesh=new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial({color}));mesh.scale.setScalar(.56);mesh.castShadow=true;object=mesh;}
+          if(['stick','arrow','spear','shovel','knife','bucket','plank','door_half_up','door_half_down','door'].includes(b.kind))object=this.heldVisual(b.kind,color,false,b.contents??(b.water?'water':undefined));else{const mesh=new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial({color}));mesh.scale.setScalar(.56);mesh.castShadow=true;object=mesh;}
           this.scene.add(object);this.objects.set(b.id,object);
         }
         const previous = this.prior?.bodies.find(p => p.id === b.id) ?? b; object.position.set(...previous.position).lerp(new THREE.Vector3(...b.position),alpha);
