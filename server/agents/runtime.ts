@@ -315,7 +315,7 @@ export class AgentRuntime {
         signal.throwIfAborted();attempts++;
         report(id,{state:attempts===1?'thinking':'waiting',attempts,message:lastProviderError?`Model error: ${lastProviderError}. Retrying; world time is held.`:'Waiting for an inference provider; world time is held.'});
         try{
-          const answer=await this.infer(id,'action',{messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}${lastProviderError?`; previous model error: ${lastProviderError}`:''}; world time is held.`}));
+          const answer=await this.infer(id,'action',{messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'default'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}${lastProviderError?`; previous model error: ${lastProviderError}`:''}; world time is held.`}));
           lastProviderError=undefined;return answer;
         }
         catch(error){

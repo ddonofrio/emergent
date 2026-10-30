@@ -120,7 +120,7 @@ test('planning accepts a double-sized draft and compacts it without asking the p
   const next=await planDecision({...base(),async complete(request){
     plannerCalls++;
     const schema=(request.tools[0] as any).function.parameters;
-    assert.equal(request.max_tokens,4400);
+    assert.equal(request.max_tokens,4400);assert.equal(request.reasoning,'medium');
     assert.match((request.messages[0] as any).content,/within 2200 output tokens/);
     assert.equal(schema.properties.explanation.maxLength,500);assert.equal(schema.properties.project.properties.progress.maxLength,1200);
     return answer('set_plan',expanded);

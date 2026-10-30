@@ -42,12 +42,12 @@ test('truncated OpenAI tool calls recover without poisoning history or advancing
   t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{
     const body=JSON.parse(String(init.body));
     assert.equal(engine.tick,0);
-    assert.equal(body.max_tokens,10900);
-    assert.equal(body.max_completion_tokens,10900);
+    assert.equal(body.max_tokens,900);
+    assert.equal(body.max_completion_tokens,900);
     if(attempts===1){
       const retryText=body.messages.filter((message:{role?:string})=>message.role==='user').at(-1).content;
       assert.equal(retryText.match(/^Limit token usage\./gm)?.length,1);
-      assert.match(retryText,/10000 reasoning tokens and 900 output tokens/);
+      assert.match(retryText,/0 reasoning tokens and 900 output tokens/);
     }
     for(const message of body.messages)for(const call of message.tool_calls??[])assert.doesNotThrow(()=>JSON.parse(call.function.arguments));
     attempts++;

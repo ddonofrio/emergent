@@ -217,7 +217,7 @@ test('multiple physical actions are rejected before one corrected action consume
   try{
     engine.setEntityEnabled('t2',false);engine.setEntityEnabled('duck',false);
     r.clock.pump();await until(()=>p.requests.length===1);
-    assert.equal(p.requests[0].body.max_tokens,900+DEFAULT_REASONING_TOKENS);assert.equal(p.requests[0].body.max_completion_tokens,900+DEFAULT_REASONING_TOKENS);assert.match(p.requests[0].body.messages[0].content,/End this decision with exactly one physical action/i);
+    assert.equal(p.requests[0].body.max_tokens,900);assert.equal(p.requests[0].body.max_completion_tokens,900);assert.equal(p.requests[0].body.reasoning_effort,undefined);assert.match(p.requests[0].body.messages[0].content,/End this decision with exactly one physical action/i);
     respondActions(p.requests[0],[{action:'turn',angle:90},{action:'wait'}]);
     await until(()=>p.requests.length===2);
     assert.equal(engine.tick,0);assert.equal(engine.entity('t1').yaw,0);

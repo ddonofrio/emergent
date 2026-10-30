@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BedrockClient } from '@aws-sdk/client-bedrock';
+import { BedrockClient, ListFoundationModelsCommand, ListInferenceProfilesCommand } from '@aws-sdk/client-bedrock';
 import { bedrockInferenceModelId, bedrockThinkingConfig, DEFAULT_REASONING_TOKENS, discoverProviderModels, enabledProviders, InvalidCompletionError, normalizeSavedProvider, OutputTokenLimitError, ProviderChain, providerHeaders, resolveProviderApiKey, retryTokenLimitedCompletion, savedApiKeyForProvider, type CompletionRequest, type CompletionResult, type ProviderConfig } from '../server/agents/providers';
 
 const request:CompletionRequest={messages:[],tools:[],max_tokens:32};
@@ -66,14 +66,24 @@ test('model discovery errors redact provider credentials',async t=>{
   await assert.rejects(discoverProviderModels(config,AbortSignal.timeout(1000)),error=>error instanceof Error&&/HTTP 401.*\[REDACTED\]/.test(error.message)&&!error.message.includes(config.apiKey));
 });
 
-test('Bedrock model discovery requests text foundation models',async t=>{
-  const prototype=BedrockClient.prototype as unknown as {send(command:{input:{byOutputModality?:string}},options:{abortSignal:AbortSignal}):Promise<unknown>};
-  t.mock.method(prototype,'send',async(command:{input:{byOutputModality?:string}},options:{abortSignal:AbortSignal})=>{
-    assert.equal(command.input.byOutputModality,'TEXT');assert.ok(options.abortSignal);
-    return{modelSummaries:[{modelId:'anthropic.claude-test',modelName:'Claude Test',providerName:'Anthropic'}]};
+test('Bedrock model discovery lists EU inference profiles before text foundation models',async t=>{
+  const prototype=BedrockClient.prototype as unknown as {send(command:ListFoundationModelsCommand|ListInferenceProfilesCommand,options:{abortSignal:AbortSignal}):Promise<unknown>};
+  let profilePage=0;
+  t.mock.method(prototype,'send',async(command:ListFoundationModelsCommand|ListInferenceProfilesCommand,options:{abortSignal:AbortSignal})=>{
+    assert.ok(options.abortSignal);
+    if(command instanceof ListFoundationModelsCommand){assert.equal(command.input.byOutputModality,'TEXT');return{modelSummaries:[{modelId:'anthropic.claude-test',modelName:'Claude Test',providerName:'Anthropic'}]};}
+    assert.equal(command.input.typeEquals,'SYSTEM_DEFINED');
+    const textModel=[{modelArn:'arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-test'}];
+    if(profilePage++===0){assert.equal(command.input.nextToken,undefined);return{inferenceProfileSummaries:[{inferenceProfileId:'global.anthropic.claude-global',inferenceProfileName:'Global Claude',status:'ACTIVE',models:textModel},{inferenceProfileId:'eu.anthropic.claude-eu',inferenceProfileName:'EU Claude',status:'ACTIVE',models:textModel},{inferenceProfileId:'eu.anthropic.inactive',inferenceProfileName:'Inactive EU Claude',status:'INACTIVE',models:textModel},{inferenceProfileId:'eu.cohere.embed',inferenceProfileName:'EU Embed',status:'ACTIVE',models:[{modelArn:'arn:aws:bedrock:eu-west-1::foundation-model/cohere.embed-v4:0'}]}],nextToken:'page-2'};}
+    assert.equal(command.input.nextToken,'page-2');return{inferenceProfileSummaries:[{inferenceProfileId:'eu.anthropic.claude-second',inferenceProfileName:'Second EU Claude',status:'ACTIVE',models:textModel}]};
   });
   const config={...provider('bedrock'),type:'amazon-bedrock' as const,baseUrl:'',region:'eu-west-1'};
-  assert.deepEqual(await discoverProviderModels(config,AbortSignal.timeout(1000)),[{id:'anthropic.claude-test',label:'Claude Test — Anthropic'}]);
+  assert.deepEqual(await discoverProviderModels(config,AbortSignal.timeout(1000)),[
+    {id:'eu.anthropic.claude-eu',label:'EU Claude - Bedrock inference profile'},
+    {id:'eu.anthropic.claude-second',label:'Second EU Claude - Bedrock inference profile'},
+    {id:'global.anthropic.claude-global',label:'Global Claude - Bedrock inference profile'},
+    {id:'anthropic.claude-test',label:'Claude Test — Anthropic'},
+  ]);
 });
 
 test('round robin starts successive requests with successive providers',async()=>{
@@ -140,6 +150,8 @@ test('Bedrock reasoning defaults on with a separate thinking budget',()=>{
   const sonnet={...provider('sonnet'),model:'eu.anthropic.claude-sonnet-4-6'};
   const planning={...request,max_tokens:4400,messages:[{role:'user',content:'Review my recorded experience.'}]};
   assert.deepEqual(bedrockThinkingConfig(sonnet,planning),{inferenceConfig:{maxTokens:14400},additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:'high'}}});
+  assert.deepEqual(bedrockThinkingConfig(sonnet,{...planning,reasoning:'medium'}),{inferenceConfig:{maxTokens:14400},additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:'medium'}}});
+  assert.deepEqual(bedrockThinkingConfig(sonnet,{...planning,reasoning:'default'}),{inferenceConfig:{maxTokens:4400}});
   assert.deepEqual(bedrockThinkingConfig(sonnet,{...planning,reasoning:'minimum'}),{inferenceConfig:{maxTokens:4400}});
   assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'unknown-model'},planning),{inferenceConfig:{maxTokens:4400}});
   assert.deepEqual(bedrockThinkingConfig({...sonnet,model:'eu.anthropic.claude-haiku-4-5-20251001-v1:0'},planning),{inferenceConfig:{maxTokens:14400},additionalModelRequestFields:{thinking:{type:'enabled',budget_tokens:10000}}});

@@ -1,5 +1,5 @@
 import { detectTokenLoop, tokenizeLoopText } from '../../vendor/deepseek-harness/loop-detector';
-import { BedrockClient, ListFoundationModelsCommand } from '@aws-sdk/client-bedrock';
+import { BedrockClient, ListFoundationModelsCommand, ListInferenceProfilesCommand } from '@aws-sdk/client-bedrock';
 import { BedrockRuntimeClient, ConverseCommand, type ConverseCommandInput } from '@aws-sdk/client-bedrock-runtime';
 
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string }; }
@@ -49,9 +49,10 @@ export function normalizeSavedProvider(provider: ProviderConfig): ProviderConfig
   return apiKey===provider.apiKey?provider:{...provider,apiKey};
 }
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high';
+export type ReasoningProfile = 'default' | 'minimum' | 'medium' | 'maximum';
 export type ProviderStrategy = 'first-only' | 'round-robin' | 'fallback' | 'master-slaves';
 export interface ProviderHealth { state:'unknown'|'ok'|'bad'; detail:string; inFlight?:boolean; }
-export interface CompletionRequest { messages: unknown[]; tools: unknown[]; max_tokens: number; reasoning?: 'minimum' | 'maximum'; reasoning_tokens?: number; }
+export interface CompletionRequest { messages: unknown[]; tools: unknown[]; max_tokens: number; reasoning?: ReasoningProfile; reasoning_tokens?: number; }
 export const DEFAULT_REASONING:NonNullable<CompletionRequest['reasoning']>='maximum';
 export const DEFAULT_REASONING_TOKENS=10000;
 export interface CompletionResult {
@@ -168,11 +169,25 @@ export async function discoverProviderModels(provider:ProviderConfig,signal:Abor
     try{
       const client=new BedrockClient({region:provider.region||undefined,token:async()=>({token:provider.apiKey}),authSchemePreference:['httpBearerAuth']});
       const response=await client.send(new ListFoundationModelsCommand({byOutputModality:'TEXT'}),{abortSignal:signal});
-      const models=uniqueProviderModels((response.modelSummaries??[]).flatMap(model=>{
+      const textFoundationIds=new Set((response.modelSummaries??[]).flatMap(model=>model.modelId?[model.modelId]:[]));
+      const profiles:ProviderModel[]=[],seenTokens=new Set<string>();let nextToken:string|undefined;
+      do{
+        const page=await client.send(new ListInferenceProfilesCommand({typeEquals:'SYSTEM_DEFINED',...(nextToken?{nextToken}:{})}),{abortSignal:signal});
+        profiles.push(...(page.inferenceProfileSummaries??[]).flatMap(profile=>{
+          const id=profile.inferenceProfileId?.trim(),supportsText=(profile.models??[]).some(model=>textFoundationIds.has(model.modelArn?.split('foundation-model/')[1]??''));
+          if(!id||profile.status!=='ACTIVE'||!supportsText)return[];
+          const name=profile.inferenceProfileName?.trim();
+          return[{id,label:`${name||id} - Bedrock inference profile`.slice(0,200)}];
+        }));
+        const returned=page.nextToken?.trim();nextToken=returned&&!seenTokens.has(returned)?returned:undefined;if(nextToken)seenTokens.add(nextToken);
+      }while(nextToken);
+      profiles.sort((a,b)=>Number(!a.id.startsWith('eu.'))-Number(!b.id.startsWith('eu.'))||a.label.localeCompare(b.label));
+      const foundations=(response.modelSummaries??[]).flatMap(model=>{
         const id=model.modelId?.trim();if(!id)return[];
         const name=model.modelName?.trim(),owner=model.providerName?.trim();
         return[{id,label:([name,owner].filter(Boolean).join(' — ')||id).slice(0,200)}];
-      }));
+      });
+      const models=uniqueProviderModels([...profiles,...foundations]);
       if(!models.length)throw new Error('No text models were returned.');
       return models;
     }catch(error){
@@ -343,9 +358,9 @@ export class ProviderChain {
     const requestSignal = timeout ? AbortSignal.any([signal, timeout]) : signal;
     let response: Response;
     const {reasoning,reasoning_tokens,max_tokens,...completion}=request;
-    const reasoningEffort=reasoning&&provider.reasoningOptions?.length?selectReasoningEffort(provider.reasoningOptions,reasoning):undefined;
+    const reasoningEffort=reasoning&&reasoning!=='default'&&provider.reasoningOptions?.length?selectReasoningEffort(provider.reasoningOptions,reasoning):undefined;
     const outputLimit=provider.maxOutputTokens??max_tokens;
-    const reasoningLimit=reasoning==='maximum'?(reasoning_tokens??DEFAULT_REASONING_TOKENS):0;
+    const reasoningLimit=reasoning==='maximum'||reasoning==='medium'?(reasoning_tokens??DEFAULT_REASONING_TOKENS):0;
     const generationLimit=outputLimit+reasoningLimit;
     try {
       response = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
@@ -439,7 +454,8 @@ export class ProviderChain {
 function bedrockBudgets(provider:ProviderConfig,request:CompletionRequest) {
   const output=provider.maxOutputTokens??request.max_tokens;
   const supportsThinking=/anthropic\.claude-(?:(?:sonnet|opus)-4-6|(?:haiku|sonnet|opus)-4-5)(?:\b|-)/.test(provider.model);
-  const reasoning=(request.reasoning??DEFAULT_REASONING)==='maximum'&&supportsThinking&&!request.messages.some(message=>(message as {role?:string}).role==='assistant')
+  const profile=request.reasoning??DEFAULT_REASONING;
+  const reasoning=(profile==='maximum'||profile==='medium')&&supportsThinking&&!request.messages.some(message=>(message as {role?:string}).role==='assistant')
     ? request.reasoning_tokens??DEFAULT_REASONING_TOKENS
     : 0;
   return{output,reasoning};
@@ -450,7 +466,7 @@ export function bedrockThinkingConfig(provider:ProviderConfig,request:Completion
   if(!budgets.reasoning)return base;
   if(/anthropic\.claude-(?:sonnet|opus)-4-6(?:\b|-)/.test(provider.model))return {
     inferenceConfig:{maxTokens:budgets.output+budgets.reasoning},
-    additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:'high'}},
+    additionalModelRequestFields:{thinking:{type:'adaptive'},output_config:{effort:request.reasoning==='medium'?'medium':'high'}},
   };
   if(/anthropic\.claude-(?:haiku|sonnet|opus)-4-5(?:\b|-)/.test(provider.model))return {
     inferenceConfig:{maxTokens:budgets.output+budgets.reasoning},
@@ -485,10 +501,10 @@ function isReasoningEffort(value:string):value is ReasoningEffort {
   return ['none','low','medium','high'].includes(value);
 }
 
-function selectReasoningEffort(options:ReasoningEffort[],profile:'minimum'|'maximum') {
+function selectReasoningEffort(options:ReasoningEffort[],profile:Exclude<ReasoningProfile,'default'>) {
   const preference:ReasoningEffort[]=profile==='minimum'
     ?['none','low','medium','high']
-    :['high','medium','low','none'];
+    :profile==='medium'?['medium','high','low','none']:['high','medium','low','none'];
   return preference.find(value=>options.includes(value));
 }
 
