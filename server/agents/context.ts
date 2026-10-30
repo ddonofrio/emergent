@@ -51,7 +51,7 @@ export function decisionView(view:Observation,criterion?:MilestoneCriterion) {
     perception:held==='empty'?'Your hands are empty.':`You hold ${held}.`,
     ...(compact.viewAngle===undefined?{}:{viewAngle:compact.viewAngle}),paths:compact.paths,
     surfaces:[...surfaces,...distant],
-    creatures:view.entities.map(entity=>({id:entity.id,name:entity.name,position:entity.position})),
+    creatures:view.entities.map(entity=>({id:entity.id,name:entity.name,kind:entity.kind,position:entity.position,holding:entity.holding?`${entity.holding.kind}${entity.holding.contents?` containing ${entity.holding.contents}`:''}`:'empty'})),
     looseObjects:view.items.map(item=>({id:item.id,kind:item.kind,position:item.position,...(item.contents?{contents:item.contents}:{}),canPickUpNow:view.interactions.pickup.some(target=>target.itemId===item.id)})),
     interactions:{speak:view.interactions.speak,follow:view.interactions.follow},
     unknown:'Unseen space is unknown. Bearings are body-relative. Only current sightings give current locations.',
@@ -101,7 +101,7 @@ export function compactResult(result:ActionResult,conciseScans=false) {
     ...(outcome==='started'&&feedback.destination?{destination:feedback.destination}:{}),
     ...(feedback.unchanged===true?{unchanged:true,previousScanEventId:feedback.previousScanEventId}:{}),
     ...(!(conciseScans&&feedback.unchanged)&&Array.isArray(feedback.materials)?{materials:feedback.materials.map(({material,target,distance,bodyRelativeDegrees})=>({material,...(target?{target}:{}),distance,bodyRelativeDegrees}))}:{}),
-    ...(!(conciseScans&&feedback.unchanged)&&Array.isArray(feedback.entities)?{entities:feedback.entities.map(({entityId,name,kind,distance,bodyRelativeDegrees})=>({...(entityId?{entityId}:{}),name,kind,distance,bodyRelativeDegrees}))}:{}),
+    ...(!(conciseScans&&feedback.unchanged)&&Array.isArray(feedback.entities)?{entities:feedback.entities.map(({entityId,name,kind,holding,distance,bodyRelativeDegrees})=>({...(entityId?{entityId}:{}),name,kind,holding,distance,bodyRelativeDegrees}))}:{}),
     ...(typeof feedback.facing==='number'?{facing:feedback.facing}:{}),
     ...(Array.isArray(feedback.target)?{target:feedback.target}:{}),
     ...(typeof feedback.material==='string'?{material:feedback.material}:{}),
@@ -179,7 +179,7 @@ export function historicalActions(actions:ReturnType<typeof recentActions>) {
     const {facing,materials,entities,...result}=entry.result;
     return {...entry,result:{...result,
       ...(!result.unchanged&&materials?{materials:materials.map(({material,target}: {material:string;target?:Vec3})=>({material,...(target?{target}:{})}))}:{}),
-      ...(!result.unchanged&&entities?{entities:entities.map(({entityId,name,kind}: {entityId?:string;name:string;kind:string})=>({...(entityId?{entityId}:{}),name,kind}))}:{}),
+      ...(!result.unchanged&&entities?{entities:entities.map(({entityId,name,kind,holding}: {entityId?:string;name:string;kind:string;holding?:unknown})=>({...(entityId?{entityId}:{}),name,kind,holding}))}:{}),
     }};
   });
 }

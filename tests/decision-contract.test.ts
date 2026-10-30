@@ -209,6 +209,27 @@ test('decision views keep reachable targets once and historical speech has no us
   }finally{store.close();}
 });
 
+test('visible creature sightings expose the held object but not the other inventory',()=>{
+  const {engine,store}=fixture();
+  try{
+    engine.entity('t2').inventory={stacks:[{kind:'bucket',contents:'water',count:1},{kind:'sand',count:64}],selected:0,capacity:640};
+    const observation=engine.observe('t1'),moss=observation.entities.find(entity=>entity.id==='t2')!;
+    assert.deepEqual(moss.holding,{kind:'bucket',contents:'water'});
+    assert.doesNotMatch(JSON.stringify(moss),/count|stacks|inventory|sand/);
+    assert.match(observation.description,/Moss holds bucket containing water/);
+    assert.equal(decisionView(observation).creatures.find(entity=>entity.id==='t2')!.holding,'bucket containing water');
+
+    const scan=engine.act('t1',{action:'find_entity'});
+    assert.match(scan.message,/Moss, a troglodyte, holding bucket containing water/);
+    assert.deepEqual(compactResult(scan).entities![0].holding,{kind:'bucket',contents:'water'});
+
+    engine.entity('t2').inventory!.selected=null;
+    const empty=engine.observe('t1').entities.find(entity=>entity.id==='t2')!;
+    assert.equal(empty.holding,null);
+    assert.equal(decisionView(engine.observe('t1')).creatures.find(entity=>entity.id==='t2')!.holding,'empty');
+  }finally{store.close();}
+});
+
 test('changing goals clears the old intention and regenerates the complete action menu',async()=>{
   const {engine,store,runtime}=fixture();let calls=0;
   try{

@@ -3,7 +3,7 @@ import { TICKS_PER_SECOND, TURN_TICKS } from './time';
 import { exchangeInventory, normalizeInventory } from './inventory';
 import { knowledgeDescription, observedMaterialKnowledge } from './knowledge';
 import { speechProblem, speechTurn, speechWordCount, speechWordsRemaining } from './speech';
-import { clone, distance, key, type Action, type ActionResult, type BlockImpactNotice, type Body, type EncounterNotice, type Entity, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
+import { clone, distance, key, type Action, type ActionResult, type BlockImpactNotice, type Body, type EncounterNotice, type Entity, type EntitySighting, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
 
 const ok = (message: string): ActionResult => ({ ok: true, message });
 const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
@@ -184,7 +184,10 @@ export class Engine {
     // Preserve nearby reach targets and a representative of every visible material.
     const samples = new Map(blocks.slice(0,Math.max(0,maxBlocks-surfaces.size)).map(b => [key(b.slice(0,3) as Vec3),b]));
     for (const surface of surfaces.values()) { const b = blocks.find(b => b[3]===surface.kind)!; samples.set(key(surface.nearest),b); }
-    const entities = this.entities.filter(other => other.id !== id && this.active(other) && this.visible(e, this.eye(other))).map(({ id, name, kind, position }) => ({ id, name, kind, position: clone(position) }));
+    const entities = this.entities.filter(other => other.id !== id && this.active(other) && this.visible(e, this.eye(other))).map(other => {
+      const holding=this.held(other);
+      return{id:other.id,name:other.name,kind:other.kind,position:clone(other.position),holding:holding?{kind:holding.kind,...(holding.contents?{contents:holding.contents}:{})}:null};
+    });
     const navigation = this.navigationReport(e);
     const items = clone(this.bodies.filter(b => this.visible(e, b.position)).sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)));
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
@@ -192,7 +195,7 @@ export class Engine {
     const held=this.held(e),emptyHands=!held,hasShovel=held?.kind==='shovel';
     const followCandidates=[...entities];
     const invited=e.followInvitation&&e.followInvitation.untilTick>=this.tick?this.entities.find(other=>other.id===e.followInvitation!.speakerId&&this.active(other)):undefined;
-    if(invited&&!followCandidates.some(other=>other.id===invited.id))followCandidates.push({id:invited.id,name:invited.name,kind:invited.kind,position:clone(invited.position)});
+    if(invited&&!followCandidates.some(other=>other.id===invited.id)){const holding=this.held(invited);followCandidates.push({id:invited.id,name:invited.name,kind:invited.kind,position:clone(invited.position),holding:holding?{kind:holding.kind,...(holding.contents?{contents:holding.contents}:{})}:null});}
     const interactions = {
       hit: emptyHands||hasShovel ? blocks.filter(block=>{
         const target=block.slice(0,3) as Vec3;
@@ -338,7 +341,7 @@ export class Engine {
     }).sort((a,b)=>a.distance-b.distance||a.material.localeCompare(b.material));
   }
   entitiesAround(id:string) {
-    const entity=this.entity(id),yaw=entity.yaw,nearest=new Map<string,Pick<Entity,'id'|'name'|'kind'|'position'>>(),range=this.module.manifest.perception.range;
+    const entity=this.entity(id),yaw=entity.yaw,nearest=new Map<string,EntitySighting>(),range=this.module.manifest.perception.range;
     try{
       for(const offset of [0,120,240]){
         entity.yaw=(yaw+offset)%360;
@@ -352,7 +355,7 @@ export class Engine {
     return [...nearest.values()].map(other=>{
       const dx=other.position[0]-entity.position[0],dz=other.position[2]-entity.position[2],horizontal=Math.hypot(dx,dz);
       const absolute=Math.atan2(dx,dz)*180/Math.PI,angle=((absolute-yaw+540)%360)-180;
-      return {entityId:other.id,name:other.name,kind:other.kind,distance:Math.round(distance(entity.position,other.position)*10)/10,directionXZ:{x:Math.round(dx/Math.max(horizontal,.0001)*100)/100,z:Math.round(dz/Math.max(horizontal,.0001)*100)/100},bodyRelativeDegrees:Math.round(angle)};
+      return {entityId:other.id,name:other.name,kind:other.kind,holding:clone(other.holding),distance:Math.round(distance(entity.position,other.position)*10)/10,directionXZ:{x:Math.round(dx/Math.max(horizontal,.0001)*100)/100,z:Math.round(dz/Math.max(horizontal,.0001)*100)/100},bodyRelativeDegrees:Math.round(angle)};
     }).sort((a,b)=>a.distance-b.distance||a.name.localeCompare(b.name));
   }
   private direction(e: Entity, point: Vec3) {
@@ -366,7 +369,7 @@ export class Engine {
     return 'behind';
   }
   held(e: Entity) { return e.inventory?.selected === null || !e.inventory ? undefined : e.inventory.stacks[e.inventory.selected]; }
-  private describe(e: Entity, surfaces: {kind:string;count:number;nearest:Vec3}[], entities: Pick<Entity,'id'|'name'|'kind'|'position'>[], items: Body[], navigation: NavigationReport, bodyYaw=e.yaw) {
+  private describe(e: Entity, surfaces: {kind:string;count:number;nearest:Vec3}[], entities: EntitySighting[], items: Body[], navigation: NavigationReport, bodyYaw=e.yaw) {
     const parts: string[] = [];
     const held = this.held(e);
     const body={...e,yaw:bodyYaw};
@@ -384,7 +387,7 @@ export class Engine {
       const interaction=this.module.manifest.materials[surface.kind]?.fluid?' It is fluid and can be entered where its depth is safe.':held?.kind==='shovel'&&['sand','dirt','grass'].includes(surface.kind)?' Within reach: dig with your shovel.':held?' Within reach; free your hands to hit it.':' Within reach: hit it without moving closer.';
       parts.push(`A ${label} at [${surface.nearest.join(',')}] is ${metres.toFixed(1)} m to its centre, ${this.direction(body,center(surface.nearest))} (body-relative ${bearing(center(surface.nearest))} degrees).${reach?interaction:''}`);
     }
-    for (const other of entities.slice(0,4)) parts.push(`${other.name}, a ${other.kind}, is ${distance(e.position,other.position).toFixed(1)} m ${this.direction(body,other.position)} (body-relative ${bearing(other.position)} degrees).`);
+    for (const other of entities.slice(0,4)) parts.push(`${other.name}, a ${other.kind}, is ${distance(e.position,other.position).toFixed(1)} m ${this.direction(body,other.position)} (body-relative ${bearing(other.position)} degrees). ${other.holding?`${other.name} holds ${other.holding.kind}${other.holding.contents?` containing ${other.holding.contents}`:''}.`:`${other.name}'s hands are empty.`}`);
     for (const item of items.slice(0,3)) parts.push(`A loose ${item.kind} is ${distance(e.position,item.position).toFixed(1)} m ${this.direction(body,item.position)} (item ${item.id}).`);
     return parts.join(' ');
   }
@@ -561,7 +564,7 @@ export class Engine {
         &&JSON.stringify(previous.scanPosition)===JSON.stringify(e.position)&&previous.facing===e.yaw;
       const message=unchanged?'Nothing has changed since the previous scan.':materials
         ?materials.length?`You scan all around and find ${materials.map(item=>item.material).join(', ')}.`:'You scan all around but find no visible block materials.'
-        :entities!.length?`You scan all around and see ${entities!.map(other=>`${other.name}, a ${other.kind}`).join('; ')}.`:'You scan all around but see no other living beings.';
+        :entities!.length?`You scan all around and see ${entities!.map(other=>`${other.name}, a ${other.kind}, ${other.holding?`holding ${other.holding.kind}${other.holding.contents?` containing ${other.holding.contents}`:''}`:'with empty hands'}`).join('; ')}.`:'You scan all around but see no other living beings.';
       e.motion={kind:'scan',destination:clone(e.position),speed:0,origin:clone(e.position),progress:0,duration:1,startYaw:e.yaw};e.status='scanning';
       return {ok:true,message,feedback:{outcome:'started',...(materials?{materials}:{entities}),scanType:a.action,scanSignature:signature,scanPosition:clone(e.position),...(unchanged?{unchanged:true,previousScanEventId:previous.scanEventId}:{})}};
     }

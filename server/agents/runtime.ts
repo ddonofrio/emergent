@@ -482,7 +482,7 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
     body:bodyContext(observation),
     surroundings:{
       terrain:observation.surfaces.map(({kind,count,nearest})=>({kind,visibleBlocks:count,nearest})),
-      creatures:observation.entities.map(({name,kind})=>({name,kind})),
+      creatures:observation.entities.map(({name,kind,holding})=>({name,kind,holding:holding?`${holding.kind}${holding.contents?` containing ${holding.contents}`:''}`:'empty'})),
       obstacles:kinds(observation.navigation.paths.flatMap(path=>path.issue?[path.issue.message]:[])),
       possibleInteractions:{
         hit:interactions.hit,

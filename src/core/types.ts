@@ -41,6 +41,7 @@ export interface EncounterNotice { eventId:number; tick:number; otherId:string; 
 export interface TerrainNotice { eventId:number; tick:number; target:Vec3; kind:string; message:string; }
 export interface BlockImpactNotice { eventId:number; tick:number; itemId:string; kind:string; message:string; }
 export interface HeardVoice { from: string; word: string; tick: number; speakerId?: string; direction?: string; distance?: number; }
+export interface EntitySighting extends Pick<Entity,'id'|'name'|'kind'|'position'> { holding: Pick<Stack,'kind'|'contents'> | null; }
 export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, HeardVoice[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; terrainNotices:Record<string,TerrainNotice[]>; impactNotices?:Record<string,BlockImpactNotice[]>; }
 export interface WorldState extends DynamicState { blocks: Block[]; }
 export interface Frame extends DynamicState { changes: [string, string | null][]; events: WorldEvent[]; }
@@ -67,7 +68,7 @@ export interface InteractionTargets {
 }
 export interface Observation {
   tick: number; time: number; self: Entity; blocks: Block[];
-  entities: Pick<Entity, 'id' | 'name' | 'kind' | 'position'>[];
+  entities: EntitySighting[];
   items: Body[]; heard: HeardVoice[];
   following?: { entityId: string; name: string; metres?: number; direction?: string; message: string };
   beingFollowed?: { id: string; name: string; message: string }[];
