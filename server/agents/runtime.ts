@@ -492,6 +492,8 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
         ...(interactions.place.length?{place:true}:{}),
         ...(interactions.fill.length?{fill:true}:{}),
         ...(interactions.empty.length?{empty:true}:{}),
+        ...(interactions.open.length?{open:interactions.open}:{}),
+        ...(interactions.close.length?{close:interactions.close}:{}),
       },
     },
     capabilities,

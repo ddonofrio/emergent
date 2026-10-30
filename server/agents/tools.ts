@@ -75,6 +75,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   const view=availableOnly?engine.observeAt(id,options.viewAngle??0):undefined;
   const targets=view?.interactions;
   const target=(values:readonly number[][]=[],details:readonly string[]=[])=>object({target:{type:'array',items:{type:'integer'},description:values.length?`Use one currently reachable [x,y,z] target: ${details.length?details.join('; '):values.map(value=>`[${value.join(',')}]`).join('; ')}.`:'Block coordinates [x,y,z].',...(values.length?{examples:values.map(value=>[...value])}:{})}},['target']);
+  const doorTarget=(values:{itemId:string;metres:number;outsideYaw:number}[])=>object({itemId:{...choice(values.map(value=>value.itemId)),description:values.length?`Current reachable doors: ${values.map(value=>`${value.itemId}, ${value.metres} m away, outside yaw ${value.outsideYaw}, inside yaw ${(value.outsideYaw+180)%360}, left hinge viewed from outside, opens inward`).join('; ')}.`:'Installed door item ID.'}},['itemId']);
   const hitTargets=targets?.hit.map(block=>block.target)??[];
   const hitDetails=targets?.hit.map(block=>`${block.kind} at [${block.target.join(',')}]${block.cracks?` (${block.cracks} cracks)`:''}`)??[];
   const movement=(maximum:number)=>object({distance:{type:'number',description:`Metres: greater than 0, at most ${maximum}.`},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right.'}},['distance']);
@@ -94,6 +95,9 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   if(raw)tools.push(tool('run',`Disabled while you hold ${held!.kind}; store, place, or throw it before running.`,movement(24),false,()=>({ok:false,message:`Run is unavailable while you hold ${held!.kind}. Store, place, or throw it first.`})));
   else tools.push(action('run','Run across clear terrain at twice the speed of walking.',movement(24),'run'));
   tools.push(action('jump','Jump up one block or across a gap; unsafe landings are refused.',object({distance:{type:'number',description:'Metres from here: 0.75..2.5, default 2; use the checked jump when given.'},angle:{type:'number',description:'Body-relative degrees (-90..90).'}}),'jump'));
+  const openDoors=targets?.open??[],closeDoors=targets?.close??[];
+  if(!availableOnly||openDoors.length)tools.push(action('open',`Open one reachable closed door inward by exactly 90 degrees.${availableOnly&&!openDoors.length?' No closed door is currently within reach.':''}`,doorTarget(openDoors),'open'));
+  if(!availableOnly||closeDoors.length)tools.push(action('close',`Close one reachable open door to 0 degrees.${availableOnly&&!closeDoors.length?' No open door is currently within reach.':''}`,doorTarget(closeDoors),'close'));
   if(!held){
     tools.push(action('hit',`Strike one currently reachable block using its exact target coordinates.${availableOnly&&!hitTargets.length?' No reachable block is visible now; inspect another direction or approach one.':''}`,target(hitTargets,hitDetails),'hit'));
     {

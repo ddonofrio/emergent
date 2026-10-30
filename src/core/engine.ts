@@ -12,6 +12,8 @@ const faces: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 const rawBlock = (kind: string) => ['grass','dirt','sand','stone','wood','leaves'].includes(kind);
 const TREE_FALL_HORIZONTAL_SPEED = 4;
 const TREE_FALL_DOWNWARD_SPEED = .8;
+const DOOR_WIDTH = .86;
+const DOOR_HEIGHT = 1.9;
 
 export class Engine {
   readonly voxels: Voxels;
@@ -107,6 +109,42 @@ export class Engine {
     const point=center(target);
     return this.entities.some(other=>this.active(other)&&Math.abs(other.position[0]-point[0])<.8&&Math.abs(other.position[2]-point[2])<.8&&target[1]<other.position[1]+other.height&&target[1]+1>other.position[1]);
   }
+  private doorSegment(body:Body,angle:number=body.door!.angle) {
+    const yaw=body.door!.outsideYaw*Math.PI/180,open=angle*Math.PI/180;
+    const across={x:Math.cos(yaw),z:-Math.sin(yaw)},outside={x:Math.sin(yaw),z:Math.cos(yaw)};
+    const hinge:{x:number;z:number}={x:body.position[0]-across.x*DOOR_WIDTH/2,z:body.position[2]-across.z*DOOR_WIDTH/2};
+    const direction={x:across.x*Math.cos(open)-outside.x*Math.sin(open),z:across.z*Math.cos(open)-outside.z*Math.sin(open)};
+    return {hinge,end:{x:hinge.x+direction.x*DOOR_WIDTH,z:hinge.z+direction.z*DOOR_WIDTH}};
+  }
+  private segmentDistance(point:{x:number;z:number},start:{x:number;z:number},end:{x:number;z:number}) {
+    const dx=end.x-start.x,dz=end.z-start.z,length=dx*dx+dz*dz,t=length?Math.max(0,Math.min(1,((point.x-start.x)*dx+(point.z-start.z)*dz)/length)):0;
+    return Math.hypot(point.x-(start.x+dx*t),point.z-(start.z+dz*t));
+  }
+  private collidingDoor(e:Entity,point:Vec3) {
+    const radius=e.hitbox?.radius??.36;
+    return this.bodies.find(body=>{
+      if(!body.door)return false;
+      const bottom=body.position[1]-DOOR_HEIGHT/2,top=body.position[1]+DOOR_HEIGHT/2;
+      if(point[1]>=top||point[1]+e.height<=bottom)return false;
+      const segment=this.doorSegment(body);
+      return this.segmentDistance({x:point[0],z:point[2]},segment.hinge,segment.end)<radius+.045;
+    });
+  }
+  private doorSwingProblem(body:Body,targetAngle:0|90) {
+    const start=body.door!.angle,bottom=body.position[1]-DOOR_HEIGHT/2,top=body.position[1]+DOOR_HEIGHT/2;
+    for(let step=1;step<=6;step++){
+      const angle=start+(targetAngle-start)*step/6,segment=this.doorSegment(body,angle);
+      for(const fraction of [.15,.4,.65,.9,1]){
+        const x=segment.hinge.x+(segment.end.x-segment.hinge.x)*fraction,z=segment.hinge.z+(segment.end.z-segment.hinge.z)*fraction;
+        for(const y of [bottom+.1,bottom+DOOR_HEIGHT/2,top-.1])if(this.voxels.solid([x,y,z]))return 'A solid block obstructs the door swing.';
+      }
+      for(const entity of this.entities){
+        if(!this.active(entity)||entity.position[1]>=top||entity.position[1]+entity.height<=bottom)continue;
+        const radius=entity.hitbox?.radius??.36;
+        if(this.segmentDistance({x:entity.position[0],z:entity.position[2]},segment.hinge,segment.end)<radius+.05)return `${entity.name} is standing in the door swing.`;
+      }
+    }
+  }
   private collidesWithLooseBlock(body:Body,position:Vec3) {
     if(!rawBlock(body.kind)||body.contents)return false;
     return this.bodies.some(other=>other.id!==body.id&&rawBlock(other.kind)&&!other.contents
@@ -162,7 +200,8 @@ export class Engine {
       const target:Vec3=[x,y,z],point=center(target),kind=this.voxels.get(target);
       if(!this.inside(target))continue;
       const clear=!kind&&distance(eye,point)<=3&&this.visible(e,point);
-      if(clear&&!held.contents&&!this.cellOccupied(target)&&this.hasSupport(target,!rawBlock(held.kind)))place.push(target);
+      const objectFits=held.kind!=='door'||this.inside([target[0],target[1]+1,target[2]])&&!this.voxels.get([target[0],target[1]+1,target[2]]);
+      if(clear&&objectFits&&!held.contents&&!this.cellOccupied(target)&&this.hasSupport(target,!rawBlock(held.kind)))place.push(target);
       if(held.kind!=='bucket')continue;
       const canChangeContents=(contents?:string)=>!!exchangeInventory(e.inventory,[{index:e.inventory!.selected!,count:1}],[{kind:'bucket',count:1,...(contents?{contents}:{})}],true);
       const fluid=kind&&this.module.manifest.materials[kind]?.fluid;
@@ -190,6 +229,7 @@ export class Engine {
     });
     const navigation = this.navigationReport(e);
     const items = clone(this.bodies.filter(b => this.visible(e, b.position)).sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)));
+    const doors=items.filter(item=>item.door&&distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)).map(item=>({itemId:item.id,kind:'door' as const,metres:Math.round(distance(eye,item.position)*10)/10,angle:item.door!.angle,outsideYaw:item.door!.outsideYaw}));
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
     const obstacles=new Set(navigation.paths.flatMap(path=>path.issue?.target?[key(path.issue.target)]:[]));
     const held=this.held(e),emptyHands=!held,hasShovel=held?.kind==='shovel';
@@ -202,11 +242,13 @@ export class Engine {
         return !this.module.manifest.materials[block[3]]?.fluid&&this.blockInReach(e,target)&&!this.standingOn(target)&&(!hasShovel||['sand','dirt','grass'].includes(block[3]));
       }).sort((a,b)=>(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0)||Number(obstacles.has(key(b.slice(0,3) as Vec3)))-Number(obstacles.has(key(a.slice(0,3) as Vec3)))||Number(b[3]==='wood')-Number(a[3]==='wood'))
         .slice(0,2).map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
-      pickup: emptyHands ? items.filter(item=>distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
+      pickup: emptyHands ? items.filter(item=>(!item.door||item.door.angle===0)&&distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
         .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).slice(0,3).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
       speak: entities.filter(other=>this.canSpeakTo(e,this.entity(other.id))).map(({id,name})=>({id,name})),
       follow: followCandidates.filter(other=>this.canFollow(e,this.entity(other.id))).map(({id,name,position})=>({id,name,metres:Math.round(distance(e.position,position)*10)/10})),
       ...this.containerTargets(e),
+      open:doors.filter(door=>door.angle===0).map(({angle:_,...door})=>({...door,angle:0 as const})),
+      close:doors.filter(door=>door.angle===90).map(({angle:_,...door})=>({...door,angle:90 as const})),
     };
     const followed=e.following&&this.entities.find(other=>other.id===e.following!.entityId);
     const tracking=followed&&this.active(followed)&&distance(e.position,followed.position)<=20&&this.voxels.clearLine(eye,this.eye(followed));
@@ -388,7 +430,7 @@ export class Engine {
       parts.push(`A ${label} at [${surface.nearest.join(',')}] is ${metres.toFixed(1)} m to its centre, ${this.direction(body,center(surface.nearest))} (body-relative ${bearing(center(surface.nearest))} degrees).${reach?interaction:''}`);
     }
     for (const other of entities.slice(0,4)) parts.push(`${other.name}, a ${other.kind}, is ${distance(e.position,other.position).toFixed(1)} m ${this.direction(body,other.position)} (body-relative ${bearing(other.position)} degrees). ${other.holding?`${other.name} holds ${other.holding.kind}${other.holding.contents?` containing ${other.holding.contents}`:''}.`:`${other.name}'s hands are empty.`}`);
-    for (const item of items.slice(0,3)) parts.push(`A loose ${item.kind} is ${distance(e.position,item.position).toFixed(1)} m ${this.direction(body,item.position)} (item ${item.id}).`);
+    for (const item of items.slice(0,3)) parts.push(item.door?`A rustic door is ${distance(e.position,item.position).toFixed(1)} m ${this.direction(body,item.position)} (item ${item.id}). It is ${item.door.angle===90?'open inward at 90 degrees':'closed at 0 degrees'}; its outside faces yaw ${item.door.outsideYaw}, with the inside on the opposite face.`:`A loose ${item.kind} is ${distance(e.position,item.position).toFixed(1)} m ${this.direction(body,item.position)} (item ${item.id}).`);
     return parts.join(' ');
   }
   private footAt(x: number, z: number, from: number, height: number, maxRise = 0, maxDrop = 1, edgeSupport = false): Vec3 | null {
@@ -444,6 +486,8 @@ export class Engine {
     if (!allowed.ok) return { issue: { kind:'water',target:[Math.floor(x),Math.floor(point[1]),Math.floor(z)],message:allowed.message } };
     const other = this.collidingEntity(e,point);
     if (other) return { issue: { kind:'entity',entity:other.name,entityId:other.id,message:`${other.name}'s body blocks your path.` } };
+    const door=this.collidingDoor(e,point);
+    if(door)return {issue:{kind:'obstructed',itemId:door.id,target:[Math.floor(door.position[0]),Math.floor(door.position[1]-DOOR_HEIGHT/2),Math.floor(door.position[2])],message:door.door!.angle===0?'A closed door blocks your path. Open it to pass through.':'The open door leaf blocks this exact path.'}};
     return { point };
   }
   private traceMovement(e: Entity, yaw: number, requestedDistance: number): { destination?: Vec3; clearance: number; issue?: MovementIssue } {
@@ -486,6 +530,10 @@ export class Engine {
       else if(reachable)options.push('hit');
     }
     if(issue?.kind==='entity')options.push('wait','say');
+    if(issue?.kind==='obstructed'&&issue.itemId){
+      const door=this.bodies.find(body=>body.id===issue.itemId&&body.door);
+      if(door)options.push(door.door!.angle===0?'open':'close');
+    }
     options.push('turn');
     return {options,approach,jump};
   }
@@ -580,6 +628,16 @@ export class Engine {
       if (!this.held(e)) return fail('Your hands are already empty.');
       e.inventory!.selected = null; return ok('Your hands are empty. Inventory space is unchanged.');
     }
+    if(a.action==='open'||a.action==='close'){
+      const body=this.bodies.find(candidate=>candidate.id===a.itemId);
+      if(!body?.door)return fail('Choose a currently visible installed door by its item ID.');
+      if(distance(this.eye(e),body.position)>3||!this.voxels.clearLine(this.eye(e),body.position))return fail('The door is not within clear arm reach (3 metres).');
+      const targetAngle:0|90=a.action==='open'?90:0;
+      if(body.door.angle===targetAngle)return fail(`The door is already ${targetAngle===90?'open':'closed'}.`);
+      const problem=this.doorSwingProblem(body,targetAngle);if(problem)return fail(problem);
+      body.door.angle=targetAngle;e.yaw=((Math.atan2(body.position[0]-e.position[0],body.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
+      return {ok:true,message:targetAngle===90?'You open the door inward by 90 degrees. The passage is clear away from the hinged leaf.':'You close the door to 0 degrees. It blocks the doorway again.',feedback:{itemId:body.id,doorState:targetAngle===90?'open':'closed',angle:targetAngle,outsideYaw:body.door.outsideYaw}};
+    }
     if (a.action === 'walk' || a.action === 'run') {
       const held=this.held(e), running=a.action==='run', maximum=running?24:32;
       if (running && held && rawBlock(held.kind)) return fail('You cannot run while carrying a raw block.');
@@ -631,6 +689,7 @@ export class Engine {
         if(target&&kind&&this.visible(e,center(target),true))return fail(`That item has settled into ${kind} terrain at block [${target.join(',')}]. It is no longer loose; you can hit the block when it is within reach and your hands are empty.`);
         return fail('That item is no longer loose here. Use look and the current interactions.pickup item IDs; raw loose blocks can settle into terrain.');
       }
+      if(body.door?.angle===90)return fail('Close the door before taking it down.');
       if (distance(this.eye(e), body.position) > 3 || !this.voxels.clearLine(this.eye(e), body.position)) return fail('The loose item is not within clear arm reach (3 metres). Use look for current interactions.pickup targets.');
       const result = this.canHold(e, body.kind,body.contents??(body.water?'water':undefined));
       if (!result.ok) return result;
@@ -692,7 +751,16 @@ export class Engine {
       if (this.cellOccupied(target)) return fail('A creature occupies that cell.');
       if(!rawBlock(held.kind)){
         if(!this.voxels.solid([target[0]+.5,target[1]-.01,target[2]+.5]))return fail('A placed object needs solid ground directly beneath it.');
-        const placed=held.kind,placedY=placed==='door_half_down'?target[1]+.45:placed==='door_half_up'?target[1]+1.35:placed==='door'?target[1]+.95:target[1]+.09;this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:placed,position:[point[0],placedY,point[2]],velocity:[0,0,0],resting:true});this.consume(e);
+        const placed=held.kind,placedY=placed==='door_half_down'?target[1]+.45:placed==='door_half_up'?target[1]+1.35:placed==='door'?target[1]+.95:target[1]+.09;
+        if(placed==='door'){
+          const above:Vec3=[target[0],target[1]+1,target[2]];
+          if(!this.inside(above)||this.voxels.get(above))return fail('A door needs two clear vertical cells.');
+          if(this.bodies.some(body=>body.door&&Math.hypot(body.position[0]-point[0],body.position[2]-point[2])<1))return fail('Another installed door already occupies that doorway.');
+          const rawYaw=Math.atan2(e.position[0]-point[0],e.position[2]-point[2])*180/Math.PI,outsideYaw=((Math.round(rawYaw/90)*90)%360+360)%360,id=`item-${this.tick}-${this.nextBody++}`;
+          this.bodies.push({id,kind:placed,position:[point[0],placedY,point[2]],velocity:[0,0,0],resting:true,door:{angle:0,outsideYaw}});this.consume(e);
+          return {...ok(`You install the door closed at 0 degrees. The face toward you is outside; the opposite face is inside, and the left-hinged door opens inward by 90 degrees.`),feedback:{placed,target,itemId:id,doorState:'closed',angle:0,outsideYaw}};
+        }
+        this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:placed,position:[point[0],placedY,point[2]],velocity:[0,0,0],resting:true});this.consume(e);
         return {...ok(`You set the ${placed} down on the ground. It remains a loose object that can be picked up.`),feedback:{placed,target}};
       }
       if (![[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]].some(d => this.voxels.solid(target.map((v,i) => v + d[i]) as Vec3))) return fail('A placed block needs an adjacent solid block.');

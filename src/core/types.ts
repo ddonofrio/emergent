@@ -3,7 +3,7 @@ export type Block = [number, number, number, string];
 export interface Material { color: string; solid: boolean; floats: boolean; stackLimit?: number; vessel?: boolean; fluid?: boolean; }
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
-export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; }
+export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; itemId?: string; }
 export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'approach'|'communicate'|'shape'; subject?:string; entityId?:string; }
 export interface AgentPlan {
   version?: 2 | 3 | 4;
@@ -35,7 +35,8 @@ export interface Entity {
   motion?: { kind?: 'walk' | 'run' | 'jump' | 'bounce' | 'scan'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number };
   lastAction?: ActionResult;
 }
-export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; settleAfter?: number; impactTicks?:Record<string,number>; }
+export interface DoorState { angle: 0 | 90; outsideYaw: number; }
+export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; settleAfter?: number; impactTicks?:Record<string,number>; door?:DoorState; }
 export interface WorldEvent { id: number; tick: number; time: number; day: number; actor: string; type: string; message: string; data?: unknown; }
 export interface EncounterNotice { eventId:number; tick:number; otherId:string; otherName:string; message:string; }
 export interface TerrainNotice { eventId:number; tick:number; target:Vec3; kind:string; message:string; }
@@ -53,7 +54,7 @@ export interface ModuleManifest {
   agentInstructions: string;
   planningInstructions?: string;
 }
-export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'find_material' | 'find_entity' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; x?: number; y?: number; z?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
+export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'find_material' | 'find_entity' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'open' | 'close' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; x?: number; y?: number; z?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
 export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: number; clearance: number; approach?: { distance:number; angle:number }; jump?: { distance:number; angle:number }; }
 export interface NavigationReport { checkedDistance: number; paths: (NavigationPath & { issue?: MovementIssue; options?: string[] })[]; blockedAfter?: number; }
 export interface ActionResult { ok: boolean; message: string; navigation?: NavigationReport; feedback?: Record<string, unknown>; }
@@ -65,6 +66,8 @@ export interface InteractionTargets {
   place: Vec3[];
   fill: Vec3[];
   empty: Vec3[];
+  open: { itemId:string; kind:'door'; metres:number; angle:0; outsideYaw:number }[];
+  close: { itemId:string; kind:'door'; metres:number; angle:90; outsideYaw:number }[];
 }
 export interface Observation {
   tick: number; time: number; self: Entity; blocks: Block[];

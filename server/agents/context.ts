@@ -52,8 +52,8 @@ export function decisionView(view:Observation,criterion?:MilestoneCriterion) {
     ...(compact.viewAngle===undefined?{}:{viewAngle:compact.viewAngle}),paths:compact.paths,
     surfaces:[...surfaces,...distant],
     creatures:view.entities.map(entity=>({id:entity.id,name:entity.name,kind:entity.kind,position:entity.position,holding:entity.holding?`${entity.holding.kind}${entity.holding.contents?` containing ${entity.holding.contents}`:''}`:'empty'})),
-    looseObjects:view.items.map(item=>({id:item.id,kind:item.kind,position:item.position,...(item.contents?{contents:item.contents}:{}),canPickUpNow:view.interactions.pickup.some(target=>target.itemId===item.id)})),
-    interactions:{speak:view.interactions.speak,follow:view.interactions.follow},
+    looseObjects:view.items.map(item=>({id:item.id,kind:item.kind,position:item.position,...(item.contents?{contents:item.contents}:{}),...(item.door?{door:{state:item.door.angle===90?'open':'closed',angle:item.door.angle,outsideYaw:item.door.outsideYaw,insideYaw:(item.door.outsideYaw+180)%360,hinge:'left when viewed from outside',swing:'inward by 90 degrees'}}:{}),canPickUpNow:view.interactions.pickup.some(target=>target.itemId===item.id)})),
+    interactions:{speak:view.interactions.speak,follow:view.interactions.follow,open:view.interactions.open,close:view.interactions.close},
     unknown:'Unseen space is unknown. Bearings are body-relative. Only current sightings give current locations.',
   });
 }
@@ -110,6 +110,7 @@ export function compactResult(result:ActionResult,conciseScans=false) {
     ...(typeof feedback.collected==='string'?{collected:feedback.collected}:{}),
     ...(typeof feedback.placed==='string'?{placed:feedback.placed}:{}),
     ...(typeof feedback.shaped==='string'?{shaped:feedback.shaped}:{}),
+    ...(typeof feedback.doorState==='string'?{doorState:feedback.doorState,angle:feedback.angle,outsideYaw:feedback.outsideYaw,itemId:feedback.itemId}:{}),
     ...(feedback.treeCollapsed===true?{treeCollapsed:true}:{}),
     ...(Array.isArray(feedback.recipientIds)?{heardBy:feedback.recipientIds as string[]}:{}),
     ...(Array.isArray(feedback.inventoryDelta)?{inventoryDelta:feedback.inventoryDelta as {kind:string;contents?:string;change:number}[]}:{}),

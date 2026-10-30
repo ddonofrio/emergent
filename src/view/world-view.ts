@@ -209,9 +209,16 @@ export class WorldView {
       const board=new THREE.Mesh(this.cube,material(color));board.scale.set(inHand ? .46 : 1,inHand ? .09 : .2,inHand ? .46 : 1);board.castShadow=true;visual.add(board);
     }else if(kind==='door_half_up'||kind==='door_half_down'||kind==='door'){
       const full=kind==='door',height=full ? 1.9 : .9,width=full ? .86 : .8,base=-height/2;
-      this.box(visual,[.07,height,.07],[-width/2+.04,base+height/2,0],color);this.box(visual,[.07,height,.07],[width/2-.04,base+height/2,0],color);
-      this.box(visual,[width,.07,.07],[0,base+height-.04,0],color);this.box(visual,[width,.07,.07],[0,base+.04,0],color);
-      for(let y=base+.16;y<base+height-.1;y+=.2)this.box(visual,[width-.12,.09,.045],[0,y,0],color);
+      const leaf=full&&!inHand?new THREE.Group():visual,offset=full&&!inHand?width/2:0;
+      if(leaf!==visual){leaf.name='door-hinge';leaf.position.x=-width/2;visual.add(leaf);}
+      this.box(leaf,[.07,height,.07],[offset-width/2+.04,base+height/2,0],color);this.box(leaf,[.07,height,.07],[offset+width/2-.04,base+height/2,0],color);
+      this.box(leaf,[width,.07,.07],[offset,base+height-.04,0],color);this.box(leaf,[width,.07,.07],[offset,base+.04,0],color);
+      for(let y=base+.16;y<base+height-.1;y+=.2)this.box(leaf,[width-.12,.09,.045],[offset,y,0],color);
+      if(full){
+        const brace=this.box(leaf,[width*.72,.065,.035],[offset,base+height*.52,.065],'#70492f');brace.rotation.z=-.92;
+        const outsideKnob=new THREE.Mesh(new THREE.SphereGeometry(.045,10,7),material('#c7a36c'));outsideKnob.position.set(offset+width*.3,base+height*.52,.085);outsideKnob.castShadow=true;leaf.add(outsideKnob);
+        const insideKnob=new THREE.Mesh(new THREE.SphereGeometry(.04,10,7),material('#6a4630'));insideKnob.position.set(offset+width*.3,base+height*.52,-.085);insideKnob.castShadow=true;leaf.add(insideKnob);
+      }
     }else{
       const item=new THREE.Mesh(this.cube,material(color));item.scale.setScalar(.42);item.castShadow=true;visual.add(item);
     }
@@ -321,7 +328,11 @@ export class WorldView {
           this.scene.add(object);this.objects.set(b.id,object);
         }
         const previous = this.prior?.bodies.find(p => p.id === b.id) ?? b; object.position.set(...previous.position).lerp(new THREE.Vector3(...b.position),alpha);
-        if (!b.resting) object.rotation.set(visualTime*2,visualTime*.8,0);
+        if(b.door){
+          object.rotation.set(0,b.door.outsideYaw*Math.PI/180,0);
+          const hinge=object.getObjectByName('door-hinge'),previousAngle=previous.door?.angle??b.door.angle;
+          if(hinge)hinge.rotation.y=(previousAngle+(b.door.angle-previousAngle)*alpha)*Math.PI/180;
+        }else if (!b.resting) object.rotation.set(visualTime*2,visualTime*.8,0);
       }
       this.effects = this.effects.filter(effect => {
         if (this.current!.time >= effect.until) { this.scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose(); return false; }

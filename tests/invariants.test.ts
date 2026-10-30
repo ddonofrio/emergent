@@ -709,6 +709,37 @@ test('front-edge wood strikes make chosen door halves which join into one rustic
   assert.equal(engine.act('t1',{action:'join'}).ok,true);
   assert.equal(engine.held(engine.entity('t1'))?.kind,'door');
 });
+test('installed doors preserve their outside face, block when closed and swing inward by ninety degrees',()=>{
+  const engine=fixture(),actor=engine.entity('t1');
+  actor.inventory={stacks:[{kind:'door',count:1}],selected:0,capacity:640};
+  const placed=engine.act('t1',{action:'place',target:[0,1,1]});assert.equal(placed.ok,true);assert.match(placed.message,/face toward you is outside.*opens inward by 90 degrees/i);
+  const door=engine.bodies.find(body=>body.kind==='door')!;assert.deepEqual(door.door,{angle:0,outsideYaw:180});
+  let observation=engine.observe('t1');assert.deepEqual(observation.interactions.open.map(target=>target.itemId),[door.id]);assert.deepEqual(observation.interactions.close,[]);
+  const openTool=worldTools(engine,'t1',{notes:[]}).find(tool=>tool.name==='open')!;assert.deepEqual(openTool.parameters.properties!.itemId.enum,[door.id]);
+  assert.match(observation.description,/closed at 0 degrees.*outside faces yaw 180.*inside on the opposite face/i);
+
+  actor.position=[.5,1,.95];
+  const closedWalk=engine.act('t1',{action:'walk',distance:1});assert.equal(closedWalk.ok,false);assert.match(closedWalk.message,/closed door blocks your path.*open/i);
+  assert.equal(engine.act('t1',{action:'open',itemId:door.id}).ok,true);assert.equal(door.door!.angle,90);
+  observation=engine.observe('t1');assert.deepEqual(observation.interactions.open,[]);assert.deepEqual(observation.interactions.close.map(target=>target.itemId),[door.id]);
+  assert.match(engine.act('t1',{action:'pickup',itemId:door.id}).message,/close the door/i);
+  assert.equal(engine.act('t1',{action:'close',itemId:door.id}).ok,true);assert.equal(door.door!.angle,0);
+  assert.equal(engine.act('t1',{action:'open',itemId:door.id}).ok,true);
+  const restored=new Engine(engine.module,engine.state());assert.deepEqual(restored.bodies.find(body=>body.id===door.id)!.door,{angle:90,outsideYaw:180});
+  assert.equal(engine.act('t1',{action:'walk',distance:1}).ok,true,'The inward-open leaf must clear the centre of the doorway.');
+
+  const obstructed=fixture([[0,1,2,'stone']]),builder=obstructed.entity('t1');builder.inventory={stacks:[{kind:'door',count:1}],selected:0,capacity:640};
+  assert.equal(obstructed.act('t1',{action:'place',target:[0,1,1]}).ok,true);
+  const blockedDoor=obstructed.bodies.find(body=>body.kind==='door')!;
+  const blockedOpen=obstructed.act('t1',{action:'open',itemId:blockedDoor.id});assert.equal(blockedOpen.ok,false);assert.match(blockedOpen.message,/solid block obstructs/i);assert.equal(blockedDoor.door!.angle,0);
+
+  const occupied=fixture([],[entity(),entity('t2',5.5,5.5)]),owner=occupied.entity('t1');owner.inventory={stacks:[{kind:'door',count:1}],selected:0,capacity:640};
+  assert.equal(occupied.act('t1',{action:'place',target:[0,1,1]}).ok,true);const occupiedDoor=occupied.bodies.find(body=>body.kind==='door')!;occupied.entity('t2').position=[.93,1,2];
+  const occupiedOpen=occupied.act('t1',{action:'open',itemId:occupiedDoor.id});assert.equal(occupiedOpen.ok,false);assert.match(occupiedOpen.message,/t2 is standing in the door swing/i);
+
+  const lowCeiling=fixture([[0,2,1,'stone']]),installer=lowCeiling.entity('t1');installer.inventory={stacks:[{kind:'door',count:1}],selected:0,capacity:640};
+  assert.equal(lowCeiling.act('t1',{action:'place',target:[0,1,1]}).ok,false);assert.ok(!lowCeiling.observe('t1').interactions.place.some(target=>target.join(',')==='0,1,1'));
+});
 test('bucket stacks split and merge by contents while dirt filling conserves one world block',()=>{
   const engine=fixture([[1,1,0,'dirt']]);
   engine.entity('t1').inventory={stacks:[{kind:'bucket',count:64}],selected:0,capacity:640};
