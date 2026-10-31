@@ -5,11 +5,14 @@ import { BedrockRuntimeClient, ConverseCommand, type ConverseCommandInput } from
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string }; }
 export interface ProviderConfig {
   id: string;
-  type?: 'openai-compatible' | 'openai' | 'openrouter' | 'amazon-bedrock';
+  type?: 'openai-compatible' | 'openai' | 'openrouter' | 'vast-ai' | 'amazon-bedrock';
   enabled?: boolean;
   name: string;
   apiKey: string;
   apiKeyRemoved?: boolean;
+  vastToken?: string;
+  vastTokenRemoved?: boolean;
+  vastContainerLabel?: string;
   tokenless?: boolean;
   baseUrl: string;
   model: string;
@@ -34,19 +37,24 @@ export function resolveProviderApiKey(providers: readonly ProviderConfig[], type
   if(clearSavedKey)return '';
   const existing=providers.find(provider=>provider.id===id&&(provider.type??'openai-compatible')===type);
   if(existing?.apiKeyRemoved)return '';
-  const saved=savedApiKeyForProvider(providers,type,id);
-  return existing?.modelDiscovery==='lm-studio'&&saved==='local-lm-studio'?'':saved;
+  return savedApiKeyForProvider(providers,type,id);
+}
+export function resolveProviderVastToken(providers: readonly ProviderConfig[], id: string, providedToken: string, clearSavedToken = false) {
+  const provided=providedToken.trim();
+  if(provided)return provided;
+  if(clearSavedToken)return '';
+  const existing=providers.find(provider=>provider.id===id&&provider.type==='vast-ai');
+  return existing?.vastTokenRemoved?'':existing?.vastToken?.trim()??'';
 }
 export function enabledProviders(providers: readonly ProviderConfig[]) {
   return providers.filter(provider => provider.enabled !== false);
 }
 export function normalizeSavedProvider(provider: ProviderConfig): ProviderConfig {
-  const apiKey=provider.modelDiscovery==='lm-studio'&&provider.apiKey==='local-lm-studio'?'':provider.apiKey;
   if(provider.modelDiscovery==='lm-studio'&&provider.model!=='auto-detect loaded model'){
     const {modelDiscovery:_legacyDiscovery,...configured}=provider;
-    return{...configured,apiKey};
+    return configured;
   }
-  return apiKey===provider.apiKey?provider:{...provider,apiKey};
+  return provider;
 }
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high';
 export type ReasoningProfile = 'default' | 'minimum' | 'medium' | 'maximum';
@@ -113,7 +121,13 @@ export async function retryTokenLimitedCompletion(request:CompletionRequest,sign
 
 export function providerHeaders(provider:ProviderConfig,headers:Record<string,string>={}) {
   const apiKey=provider.apiKey.trim();
-  return {...(!provider.tokenless && apiKey ? { Authorization:`Bearer ${apiKey}` } : {}),...headers,...provider.headers};
+  const vastToken=provider.type==='vast-ai'?provider.vastToken?.trim()??'':'';
+  const authorization=vastToken&&!apiKey?vastToken:apiKey;
+  const result:Record<string,string>={};
+  if(!provider.tokenless&&authorization)result.Authorization=`Bearer ${authorization}`;
+  if(vastToken&&apiKey&&provider.vastContainerLabel)result.Cookie=`${provider.vastContainerLabel}_auth_token=${vastToken}`;
+  Object.assign(result,headers,provider.headers);
+  return result;
 }
 
 function usageTokenCount(value:unknown) {
@@ -155,7 +169,8 @@ async function httpErrorDetail(response:Response,provider:ProviderConfig):Promis
     const detail=payload.error?.message??payload.detail??payload.message;
     if(typeof detail!=='string')return '';
     const apiKey=provider.apiKey.trim();
-    return (apiKey?detail.replaceAll(apiKey,'[REDACTED]'):detail).replace(/\s+/g,' ').slice(0,600);
+    const vastToken=provider.vastToken?.trim()??'';
+    return [apiKey,vastToken].filter(Boolean).reduce((redacted,secret)=>redacted.replaceAll(secret,'[REDACTED]'),detail).replace(/\s+/g,' ').slice(0,600);
   }catch{return '';}
 }
 
@@ -236,7 +251,7 @@ export function providersFromEnv(env: NodeJS.ProcessEnv = process.env): Provider
     id: 'local',
     type: 'openai-compatible',
     name: 'Local LM Studio',
-    apiKey: env.LOCAL_LLM_API_KEY?.trim()==='local-lm-studio'?'':env.LOCAL_LLM_API_KEY?.trim()??'',
+    apiKey: env.LOCAL_LLM_API_KEY?.trim()??'',
     baseUrl: env.LOCAL_LLM_BASE_URL.trim(),
     model: env.LOCAL_LLM_MODEL?.trim() || 'auto-detect loaded model',
     modelDiscovery: 'lm-studio',
@@ -269,8 +284,8 @@ export class ProviderChain {
     const detail=`Last successful inference in turn ${turn}.`;
     this.providerHealth.set(id,{state:'ok',detail});this.currentStatus=`${provider.name}: ${detail}`;
   }
-  get cacheKey() { return `${this.strategy}:${this.providers.map(provider => `${provider.id}:${provider.type??'openai-compatible'}:${provider.region??''}:${provider.model}`).join('->') || 'demo'}`; }
-  get label() { return this.providers.map(provider => `${provider.name} (${provider.displayModel ?? provider.model})`).join(' -> ') || 'Scripted demo'; }
+  get cacheKey() { return `${this.strategy}:${this.providers.map(provider => `${provider.id}:${provider.type??'openai-compatible'}:${provider.region??''}:${provider.model}`).join('->') || 'no-provider'}`; }
+  get label() { return this.providers.map(provider => `${provider.name} (${provider.displayModel ?? provider.model})`).join(' -> ') || 'No active model'; }
 
   private providerOrder() {
     const count=this.providers.length;

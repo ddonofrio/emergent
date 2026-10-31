@@ -815,6 +815,15 @@ test('resuming trims private notes and sources recent actions from the recorded 
   }finally{store.close();}
 });
 
+test('agents wait without a provider unless scripted demo is explicitly enabled',()=>{
+  const waitingEngine=world(),waitingStore=new Store(':memory:',waitingEngine.module.manifest);
+  const demoEngine=world(),demoStore=new Store(':memory:',demoEngine.module.manifest);
+  try{
+    assert.equal(new AgentRuntime(waitingEngine,waitingStore,{providers:[],maxTurns:null}).mode,'waiting');
+    assert.equal(new AgentRuntime(demoEngine,demoStore,{providers:[],maxTurns:null,scriptedDemo:true}).mode,'demo');
+  }finally{waitingStore.close();demoStore.close();}
+});
+
 test('encounter notices reach both prompts and are acknowledged only at the shared commit',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest);
   engine.setEntityEnabled('duck',false);

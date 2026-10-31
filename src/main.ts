@@ -7,9 +7,9 @@ import { knowledgeDescription } from './core/knowledge';
 import { PLAN_REVIEW_INTERVAL } from './core/memory';
 
 interface ProviderHealth {state:'unknown'|'ok'|'bad';detail:string;inFlight?:boolean;}
-interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm'; model: string; providerStrategy:string; llmConfig?:LlmConfig; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
+interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm' | 'waiting'; model: string; providerStrategy:string; llmConfig?:LlmConfig; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
-interface LlmProvider {id:string;type:string;enabled:boolean;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKeyRemoved?:boolean;tokenless?:boolean;apiKeySource?:'own'|'provider';apiKeySavedType?:string;apiKeyCleared?:boolean;apiKey?:string;health?:ProviderHealth;}
+interface LlmProvider {id:string;type:string;enabled:boolean;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKeyRemoved?:boolean;tokenless?:boolean;apiKeySource?:'own'|'provider';apiKeySavedType?:string;apiKeyCleared?:boolean;apiKey?:string;vastTokenConfigured?:boolean;vastTokenRemoved?:boolean;vastTokenCleared?:boolean;vastToken?:string;vastContainerLabel?:string;health?:ProviderHealth;}
 interface LlmConfig {strategy:string;currentStatus?:string;providers:LlmProvider[];}
 interface ProviderModelOption {id:string;label:string;}
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -80,10 +80,11 @@ function readModelRows():LlmProvider[]{
     const field=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement|HTMLSelectElement).value;
     const enabled=(card.querySelector('[data-field="enabled"]') as HTMLInputElement).checked;
     const apiKey=card.querySelector('[data-field="apiKey"]') as HTMLInputElement;
+    const vastToken=card.querySelector('[data-field="vastToken"]') as HTMLInputElement;
     const tokenless=(card.querySelector('[data-field="tokenless"]') as HTMLInputElement).checked;
     const apiKeySource=apiKey.dataset.keySource as LlmProvider['apiKeySource'];
     const apiKeySavedType=apiKey.dataset.savedType||undefined,apiKeyCleared=apiKey.dataset.clear==='true',apiKeyRemoved=apiKey.dataset.removed==='true';
-    return{id:(card as HTMLElement).dataset.id!,type:field('type'),enabled,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),apiKey:apiKey.value,apiKeyConfigured:!!apiKeySavedType||!!apiKeySource,apiKeyRemoved,tokenless,...(apiKeySource?{apiKeySource}:{}),...(apiKeySavedType?{apiKeySavedType}:{}),...(apiKeyCleared?{apiKeyCleared:true}:{})};
+    return{id:(card as HTMLElement).dataset.id!,type:field('type'),enabled,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),apiKey:apiKey.value,apiKeyConfigured:!!apiKeySavedType||!!apiKeySource,apiKeyRemoved,tokenless,vastToken:vastToken.value,vastTokenConfigured:vastToken.dataset.configured==='true',vastTokenRemoved:vastToken.dataset.removed==='true',vastTokenCleared:vastToken.dataset.clear==='true',vastContainerLabel:field('vastContainerLabel'),...(apiKeySource?{apiKeySource}:{}),...(apiKeySavedType?{apiKeySavedType}:{}),...(apiKeyCleared?{apiKeyCleared:true}:{})};
   });
 }
 function renderModelRows(providers:LlmProvider[]){
@@ -109,38 +110,47 @@ function renderModelRows(providers:LlmProvider[]){
     grid.hidden=true;
     const typeLabel=document.createElement('label');typeLabel.className='model-field';typeLabel.textContent='Provider';
     const type=document.createElement('select');type.dataset.field='type';
-    for(const [value,labelText,disabled] of [['openai-compatible','OpenAI Compatible',false],['openai','OpenAI',false],['openrouter','OpenRouter',false],['amazon-bedrock','Amazon Bedrock',false],['anthropic','Anthropic (adapter pending)',true]] as [string,string,boolean][]){const option=new Option(labelText,value);option.disabled=disabled;type.add(option);}
+    for(const [value,labelText,disabled] of [['openai-compatible','OpenAI Compatible',false],['vast-ai','Vast.ai',false],['openai','OpenAI',false],['openrouter','OpenRouter',false],['amazon-bedrock','Amazon Bedrock',false],['anthropic','Anthropic (adapter pending)',true]] as [string,string,boolean][]){const option=new Option(labelText,value);option.disabled=disabled;type.add(option);}
     type.value=provider.type;typeLabel.append(type);grid.append(typeLabel);
     const nameInput=settingField(grid,'Name','name',provider.name);
     const endpoint=settingField(grid,'Base URL','baseUrl',provider.baseUrl,'url','https://...');
     const modelField=document.createElement('div');modelField.className='model-field';
     const modelLabel=document.createElement('label');modelLabel.textContent='Model';modelLabel.htmlFor=`model-picker-${provider.id}`;
     const modelControl=document.createElement('div');modelControl.className='model-picker-control';
-    const modelSelect=document.createElement('select');modelSelect.id=modelLabel.htmlFor;modelSelect.dataset.field='model';
-    if(provider.model)modelSelect.add(new Option(provider.model,provider.model));else modelSelect.add(new Option('Refresh to detect models',''));
+    const modelSelect=document.createElement('input');modelSelect.id=modelLabel.htmlFor;modelSelect.dataset.field='model';modelSelect.value=provider.model;modelSelect.placeholder='Enter a model ID or refresh';
+    const modelOptions=document.createElement('datalist');modelOptions.id=`model-options-${provider.id}`;modelSelect.setAttribute('list',modelOptions.id);
     const refreshModelsButton=document.createElement('button');refreshModelsButton.type='button';refreshModelsButton.className='model-refresh';refreshModelsButton.textContent='Refresh';refreshModelsButton.title='Refresh available models';
-    const modelStatus=document.createElement('small');modelStatus.className='model-discovery-status';modelControl.append(modelSelect,refreshModelsButton);modelField.append(modelLabel,modelControl,modelStatus);grid.append(modelField);
+    const modelStatus=document.createElement('small');modelStatus.className='model-discovery-status';modelControl.append(modelSelect,modelOptions,refreshModelsButton);modelField.append(modelLabel,modelControl,modelStatus);grid.append(modelField);
     const apiKey=settingField(grid,'API key','apiKey',provider.apiKey??'', 'password');
+    const vastToken=settingField(grid,'Vast.ai token','vastToken',provider.vastToken??'', 'password');
+    const vastContainerLabel=settingField(grid,'Vast container label','vastContainerLabel',provider.vastContainerLabel??'','text','C.12345');
     const region=settingField(grid,'AWS region','region',provider.region??'','text','e.g. eu-west-1');
     const tokenlessField=document.createElement('label');tokenlessField.className='request-setting tokenless-setting';tokenlessField.title='Never send an Authorization header to this OpenAI-compatible server.';
     const tokenlessInput=document.createElement('input');tokenlessInput.type='checkbox';tokenlessInput.dataset.field='tokenless';tokenlessInput.checked=provider.tokenless===true;
     const tokenlessText=document.createElement('span');tokenlessText.textContent='Tokenless server';tokenlessField.append(tokenlessInput,tokenlessText);grid.append(tokenlessField);
-    const endpointField=endpoint.closest('.model-field')!,apiKeyField=apiKey.closest('.model-field')!,regionField=region.closest('.model-field')!;
+    const endpointField=endpoint.closest('.model-field')!,apiKeyField=apiKey.closest('.model-field')!,vastTokenField=vastToken.closest('.model-field')!,vastContainerLabelField=vastContainerLabel.closest('.model-field')!,regionField=region.closest('.model-field')!;
     const savedKeyType=provider.apiKeySavedType??(provider.apiKeyConfigured&&provider.apiKeySource!=='provider'?provider.type:'');apiKey.dataset.savedType=savedKeyType;apiKey.dataset.clear=String(provider.apiKeyCleared===true);apiKey.dataset.removed=String(provider.apiKeyRemoved===true);
     const clearKeyButton=document.createElement('button');clearKeyButton.type='button';clearKeyButton.className='api-key-clear';
     const apiKeyStatus=document.createElement('small');apiKeyStatus.className='api-key-status';apiKeyField.append(clearKeyButton,apiKeyStatus);
+    vastToken.dataset.configured=String(provider.vastTokenConfigured===true);vastToken.dataset.clear=String(provider.vastTokenCleared===true);vastToken.dataset.removed=String(provider.vastTokenRemoved===true);
+    const clearVastTokenButton=document.createElement('button');clearVastTokenButton.type='button';clearVastTokenButton.className='api-key-clear';
+    const vastTokenStatus=document.createElement('small');vastTokenStatus.className='api-key-status';vastTokenField.append(clearVastTokenButton,vastTokenStatus);
     const updateProviderFields=()=>{
-      const bedrock=type.value==='amazon-bedrock',openaiCompatible=type.value==='openai-compatible';if(!openaiCompatible)tokenlessInput.checked=false;endpointField.classList.toggle('hidden',bedrock);apiKeyField.classList.toggle('hidden',openaiCompatible&&tokenlessInput.checked);regionField.classList.toggle('hidden',!bedrock);tokenlessField.classList.toggle('hidden',!openaiCompatible);
+      const bedrock=type.value==='amazon-bedrock',openaiCompatible=type.value==='openai-compatible',vast=type.value==='vast-ai';if(!openaiCompatible)tokenlessInput.checked=false;endpointField.classList.toggle('hidden',bedrock);apiKeyField.classList.toggle('hidden',openaiCompatible&&tokenlessInput.checked);vastTokenField.classList.toggle('hidden',!vast);vastContainerLabelField.classList.toggle('hidden',!vast);regionField.classList.toggle('hidden',!bedrock);tokenlessField.classList.toggle('hidden',!openaiCompatible);
       const clearing=apiKey.dataset.clear==='true',removed=apiKey.dataset.removed==='true'&&type.value===provider.type,ownKey=!clearing&&!removed&&apiKey.dataset.savedType===type.value;
       const providerKey=!clearing&&!removed&&!ownKey&&llmConfig.providers.some(candidate=>candidate.type===type.value&&candidate.apiKeyConfigured);
       apiKey.dataset.keySource=ownKey?'own':providerKey?'provider':'';
-      apiKey.placeholder=clearing?'Token will be removed when saved':removed?'No token saved for this model':ownKey?'Saved on server; blank keeps it':providerKey?'Saved provider key; blank reuses it':type.value==='openai-compatible'?'Enter API key (optional for local models)':'Enter API key';
+      apiKeyField.firstChild!.textContent=vast?'Upstream API key (optional)':'API key';
+      apiKey.placeholder=clearing?'Token will be removed when saved':removed?'No token saved for this model':ownKey?'Saved on server; blank keeps it':providerKey?'Saved provider key; blank reuses it':vast?'Enter an upstream API key only if the service also requires one':type.value==='openai-compatible'?'Enter API key (optional for local models)':'Enter API key';
       clearKeyButton.hidden=apiKey.dataset.savedType!==type.value&&!clearing;clearKeyButton.textContent=clearing?'Undo token removal':'Remove saved token';apiKeyStatus.textContent=clearing?'The model is inactive until a token is configured.':'';
+      const vastClearing=vastToken.dataset.clear==='true',vastRemoved=vastToken.dataset.removed==='true',vastConfigured=vastToken.dataset.configured==='true'&&!vastClearing&&!vastRemoved;
+      vastToken.placeholder=vastClearing?'Vast.ai token will be removed when saved':vastRemoved?'No Vast.ai token saved':vastConfigured?'Saved on server; blank keeps it':'Enter the Bearer token from onstart.log';
+      clearVastTokenButton.hidden=!vastConfigured&&!vastClearing;clearVastTokenButton.textContent=vastClearing?'Undo token removal':'Remove saved token';vastTokenStatus.textContent=vastClearing?'The Vast.ai token will be removed when saved.':'';
     };
     tokenlessInput.onchange=updateProviderFields;
     type.onchange=()=>{
       if(type.value==='openai')endpoint.value='https://api.openai.com/v1';else if(type.value==='openrouter')endpoint.value='https://openrouter.ai/api/v1';else if(!endpoint.value||endpoint.value.includes('api.openai.com')||endpoint.value.includes('openrouter.ai'))endpoint.value='';
-      modelSelect.replaceChildren(new Option('Loading models…',''));modelStatus.textContent='';updateProviderFields();summary.textContent=type.options[type.selectedIndex]?.text||type.value;void refreshModels(true);
+      modelSelect.value='';modelOptions.replaceChildren();modelStatus.textContent='';updateProviderFields();summary.textContent=type.options[type.selectedIndex]?.text||type.value;void refreshModels(true);
     };
     updateProviderFields();
     const updateActive=()=>{card.classList.toggle('disabled-model',!enabledInput.checked);updateStrategyControl();};
@@ -148,23 +158,25 @@ function renderModelRows(providers:LlmProvider[]){
     const restoreAfterTokenRemoval=()=>{apiKey.dataset.clear='false';apiKey.dataset.removed='false';if(apiKey.dataset.wasEnabled==='true')enabledInput.checked=true;updateActive();updateProviderFields();};
     clearKeyButton.onclick=event=>{event.preventDefault();event.stopPropagation();if(apiKey.dataset.clear==='true'){restoreAfterTokenRemoval();return;}apiKey.dataset.wasEnabled=String(enabledInput.checked);apiKey.dataset.clear='true';apiKey.value='';enabledInput.checked=false;updateActive();updateProviderFields();};
     apiKey.oninput=()=>{if(apiKey.value.trim()&&apiKey.dataset.clear==='true')restoreAfterTokenRemoval();};
+    clearVastTokenButton.onclick=event=>{event.preventDefault();event.stopPropagation();const clearing=vastToken.dataset.clear==='true';vastToken.dataset.clear=String(!clearing);vastToken.value='';if(clearing)vastToken.dataset.removed='false';updateProviderFields();};
+    vastToken.oninput=()=>{if(vastToken.value.trim()){vastToken.dataset.clear='false';vastToken.dataset.removed='false';}updateProviderFields();};
     nameInput.oninput=()=>{title.textContent=nameInput.value||'Model';expand.setAttribute('aria-label',`Expand ${title.textContent} settings`);};
-    modelSelect.onchange=()=>{summary.textContent=modelSelect.value||type.options[type.selectedIndex]?.text||type.value;};
+    modelSelect.oninput=()=>{summary.textContent=modelSelect.value||type.options[type.selectedIndex]?.text||type.value;};
     let discoveryRequest=0;
     const applyModels=(models:ProviderModelOption[],selectFirst:boolean)=>{
-      const current=modelSelect.value,keepCurrent=!selectFirst&&models.some(model=>model.id===current);
-      modelSelect.replaceChildren(...models.map(model=>new Option(model.label===model.id?model.id:`${model.label} (${model.id})`,model.id)));
-      if(keepCurrent)modelSelect.value=current;else if(models[0])modelSelect.value=models[0].id;
+      const current=modelSelect.value;
+      modelOptions.replaceChildren(...models.map(model=>new Option(model.label===model.id?model.id:`${model.label} (${model.id})`,model.id)));
+      if((selectFirst||!current)&&models[0])modelSelect.value=models[0].id;else modelSelect.value=current;
       summary.textContent=modelSelect.value||type.options[type.selectedIndex]?.text||type.value;
     };
     const refreshModels=async(automatic=false)=>{
       const bedrock=type.value==='amazon-bedrock';
       if((bedrock&&!region.value.trim())||(!bedrock&&!endpoint.value.trim())){if(!automatic)modelStatus.textContent=bedrock?'Enter an AWS region first.':'Enter a base URL first.';return;}
-      const cacheKey=JSON.stringify([provider.id,type.value,endpoint.value.trim(),region.value.trim()]),cached=modelOptionsCache.get(cacheKey);
+      const cacheKey=JSON.stringify([provider.id,type.value,endpoint.value.trim(),region.value.trim(),vastContainerLabel.value.trim()]),cached=modelOptionsCache.get(cacheKey);
       if(automatic&&cached){applyModels(cached,!modelSelect.value||modelSelect.value==='auto-detect loaded model');modelStatus.textContent=`${cached.length} models available.`;return;}
       const request=++discoveryRequest;refreshModelsButton.disabled=true;modelStatus.textContent='Loading models…';
       try{
-        const apiKeyValue=apiKey.value.trim(),body={id:provider.id,type:type.value,baseUrl:endpoint.value,region:region.value,clearApiKey:apiKey.dataset.clear==='true',tokenless:tokenlessInput.checked,...(apiKeyValue?{apiKey:apiKeyValue}:{})};
+        const apiKeyValue=apiKey.value.trim(),vastTokenValue=vastToken.value.trim(),body={id:provider.id,type:type.value,baseUrl:endpoint.value,region:region.value,clearApiKey:apiKey.dataset.clear==='true',clearVastToken:vastToken.dataset.clear==='true',vastContainerLabel:vastContainerLabel.value,tokenless:tokenlessInput.checked,...(apiKeyValue?{apiKey:apiKeyValue}:{}),...(vastTokenValue?{vastToken:vastTokenValue}:{})};
         const response=await fetch('/api/llm-models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
         const data=await response.json() as {models?:ProviderModelOption[];error?:string};
         if(!response.ok)throw new Error(data.error??'Could not load models.');
@@ -523,7 +535,8 @@ $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
     const enabled=(card.querySelector('[data-field="enabled"]') as HTMLInputElement).checked;
     const tokenless=(card.querySelector('[data-field="tokenless"]') as HTMLInputElement).checked;
     const apiKeyInput=card.querySelector('[data-field="apiKey"]') as HTMLInputElement,apiKey=apiKeyInput.value.trim();
-    return{id:(card as HTMLElement).dataset.id,type:field('type'),enabled,tokenless,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),clearApiKey:apiKeyInput.dataset.clear==='true',...(apiKey?{apiKey}:{})};
+    const vastTokenInput=card.querySelector('[data-field="vastToken"]') as HTMLInputElement,vastToken=vastTokenInput.value.trim();
+    return{id:(card as HTMLElement).dataset.id,type:field('type'),enabled,tokenless,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),vastContainerLabel:field('vastContainerLabel'),clearApiKey:apiKeyInput.dataset.clear==='true',clearVastToken:vastTokenInput.dataset.clear==='true',...(apiKey?{apiKey}:{}),...(vastToken?{vastToken}:{})};
   });
   const requestedStrategy=$<HTMLSelectElement>('settings-strategy').value;
   try{
@@ -534,7 +547,8 @@ $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
     if(data.llmConfig)llmConfig=data.llmConfig;
     if(data.llmConfig){if(meta)meta.llmConfig=data.llmConfig;renderProviderStatus(data.llmConfig);}
     renderModelRows(llmConfig.providers);$<HTMLSelectElement>('settings-strategy').value=llmConfig.strategy;
-    status.textContent='Configuration saved.';
+    const incomplete=llmConfig.providers.filter(provider=>!provider.model.trim()).map(provider=>provider.name);
+    status.textContent=incomplete.length?`Configuration saved. ${incomplete.join(', ')} will remain inactive until a model is selected.`:'Configuration saved.';
   }catch(error){status.textContent=error instanceof Error?error.message:'Could not save configuration.';}
 };
 $('live').onclick = goLive;

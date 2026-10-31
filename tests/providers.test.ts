@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BedrockClient, ListFoundationModelsCommand, ListInferenceProfilesCommand } from '@aws-sdk/client-bedrock';
-import { bedrockInferenceModelId, bedrockThinkingConfig, DEFAULT_REASONING_TOKENS, discoverProviderModels, enabledProviders, InvalidCompletionError, normalizeSavedProvider, OutputTokenLimitError, ProviderChain, providerHeaders, resolveProviderApiKey, retryTokenLimitedCompletion, savedApiKeyForProvider, type CompletionRequest, type CompletionResult, type ProviderConfig } from '../server/agents/providers';
+import { bedrockInferenceModelId, bedrockThinkingConfig, DEFAULT_REASONING_TOKENS, discoverProviderModels, enabledProviders, InvalidCompletionError, normalizeSavedProvider, OutputTokenLimitError, ProviderChain, providerHeaders, providersFromEnv, resolveProviderApiKey, resolveProviderVastToken, retryTokenLimitedCompletion, savedApiKeyForProvider, type CompletionRequest, type CompletionResult, type ProviderConfig } from '../server/agents/providers';
 
 const request:CompletionRequest={messages:[],tools:[],max_tokens:32};
 const provider=(id:string):ProviderConfig=>({id,name:id,apiKey:'test-key',baseUrl:'http://localhost/v1',model:`model-${id}`});
@@ -33,11 +33,13 @@ test('providers are enabled by default and disabled providers are excluded',()=>
   assert.deepEqual(new ProviderChain(providers).providers.map(candidate=>candidate.id),['default','enabled'],'The runtime must enforce activation even if a caller passes the complete saved list.');
 });
 
-test('a saved concrete model no longer performs legacy LM Studio discovery',()=>{
+test('a saved concrete model stops legacy discovery without discarding its token',()=>{
   const legacy={...provider('local'),apiKey:'local-lm-studio',model:'ornith-ai/Ornith-1.5-9B-GGUF',modelDiscovery:'lm-studio' as const};
-  assert.deepEqual(normalizeSavedProvider(legacy),{...provider('local'),apiKey:'',model:'ornith-ai/Ornith-1.5-9B-GGUF'});
+  assert.deepEqual(normalizeSavedProvider(legacy),{...provider('local'),apiKey:'local-lm-studio',model:'ornith-ai/Ornith-1.5-9B-GGUF'});
   const automatic={...legacy,model:'auto-detect loaded model'};
-  assert.deepEqual(normalizeSavedProvider(automatic),{...automatic,apiKey:''});
+  assert.deepEqual(normalizeSavedProvider(automatic),automatic);
+  assert.equal(resolveProviderApiKey([automatic],'openai-compatible','local',''),'local-lm-studio');
+  assert.equal(providersFromEnv({LOCAL_LLM_BASE_URL:'http://localhost:1234/v1',LOCAL_LLM_API_KEY:'local-lm-studio',OPENROUTER_ENABLED:'false'} as NodeJS.ProcessEnv)[0].apiKey,'local-lm-studio');
 });
 
 test('tokenless providers never send an Authorization header',()=>{
@@ -45,6 +47,17 @@ test('tokenless providers never send an Authorization header',()=>{
   assert.equal(providerHeaders(authenticated).Authorization,'Bearer secret');
   assert.equal(providerHeaders({...authenticated,tokenless:true}).Authorization,undefined);
   assert.equal(providerHeaders({...authenticated,apiKey:''}).Authorization,undefined);
+});
+
+test('Vast.ai uses its gateway token directly or as a cookie beside an upstream API key',()=>{
+  const direct={...provider('vast'),type:'vast-ai' as const,apiKey:'',vastToken:'vast-token'};
+  assert.equal(providerHeaders(direct).Authorization,'Bearer vast-token');
+  assert.equal(providerHeaders(direct).Cookie,undefined);
+  const nested={...direct,apiKey:'upstream-key',vastContainerLabel:'C.12345'};
+  assert.equal(providerHeaders(nested).Authorization,'Bearer upstream-key');
+  assert.equal(providerHeaders(nested).Cookie,'C.12345_auth_token=vast-token');
+  assert.equal(resolveProviderVastToken([nested],'vast',''),'vast-token');
+  assert.equal(resolveProviderVastToken([nested],'vast','',true),'');
 });
 
 test('model discovery preserves provider order, labels models and removes duplicates',async t=>{

@@ -67,7 +67,7 @@ export class AgentRuntime {
   inference: ProviderChain;
   parallelRequests: boolean;
   constructor(readonly engine: Engine, readonly store: Store, readonly config: {
-    providers: ProviderConfig[]; maxTurns: number | null; retryDelayMs?: number;
+    providers: ProviderConfig[]; maxTurns: number | null; retryDelayMs?: number; scriptedDemo?: boolean;
   }) {
     this.parallelRequests=store.loadParallelRequests();
     this.inference = new ProviderChain(config.providers);
@@ -85,7 +85,7 @@ export class AgentRuntime {
     }
   }
   persistence(): [string, unknown][] { return [...this.minds]; }
-  get mode(): 'llm' | 'demo' { return this.inference.enabled ? 'llm' : 'demo'; }
+  get mode(): 'llm' | 'demo' | 'waiting' { return this.inference.enabled?'llm':this.config.scriptedDemo===true?'demo':'waiting'; }
   private infer(id:string,phase:string,request:CompletionRequest,signal:AbortSignal,onAttempt:(provider:ProviderConfig,index:number)=>void) {
     request={reasoning:DEFAULT_REASONING,reasoning_tokens:DEFAULT_REASONING_TOKENS,...request};
     return retryTokenLimitedCompletion(request,signal,candidate=>
