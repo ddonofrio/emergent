@@ -41,13 +41,6 @@ function argumentProblems(parameters:JsonSchemaNode,args:any,strategic:boolean,r
   }
   return problems;
 }
-function changedDecisionProblems(draft:any,value:any,reviewing:boolean,free:boolean) {
-  if(!reviewing)return [];
-  const problems:string[]=[];
-  if(value?.outcome!==draft?.outcome)problems.push('Compaction must preserve outcome exactly.');
-  if(free&&JSON.stringify(value?.evidenceEventIds??[])!==JSON.stringify(draft?.evidenceEventIds??[]))problems.push('Compaction must preserve evidenceEventIds exactly.');
-  return problems;
-}
 export function needsPlanReview(plan:AgentPlan|undefined,turn:number,actions:ReturnType<typeof recentActions>=[]) {
   return !plan||![2,3,4].includes(plan.version??0)||plan.steps.length!==1||((plan.version??0)<3&&!plan.steps[0].criterion)||(plan.version===4&&(!text(plan.identity,COMPACT_LIMITS.text)||!validProject(plan.project)||!shortList(plan.suggestedActions,3,1)||!hasJournalAction(plan.suggestedActions)))||plan.status!=='active'||!plan.steps.some(step=>step.status==='pending')||turn-plan.reviewedTurn>=PLAN_REVIEW_INTERVAL
     || !!decisionCycle(actions.filter(entry=>entry.atSecond>(plan.startedAtSecond??0)&&entry.eventId>(plan.reviewedEventId??0)));
@@ -103,14 +96,17 @@ export async function planDecision(options:{
       let args:any;
       if(answer.calls.length===1&&answer.calls[0].function.name===name){try{args=JSON.parse(answer.calls[0].function.arguments);}catch{}}
       let problems=args?argumentProblems(acceptedParameters,args,strategic,reviewing,EXPANDED_LIMITS):[`Call ${name} exactly once with valid JSON arguments.`];
+      // A compactor may shorten a decision, but cannot repair its missing or invalid citations.
+      if(reviewing&&free&&args?.outcome==='complete'&&!referencedGoalEvidence(previous!,options.actions,args.evidenceEventIds)){
+        problems.push(`For outcome "complete", evidenceEventIds must contain 1..10 integer IDs from availableEvidence; received ${JSON.stringify(args.evidenceEventIds)??'no evidenceEventIds field'}. References in explanation do not populate evidenceEventIds.`);
+      }
       if(args&&!problems.length){
         const compactProblems=argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS);
         if(compactProblems.length){
           options.waiting('Compacting an expanded planning draft; world time is held.');
-          const draft=args;
-          args=await compactPlanDraft({name:options.name,mode:name,draft:args,parameters:compactParameters,signal:options.signal,retryDelayMs:options.retryDelayMs,
-            validate:value=>[...argumentProblems(compactParameters,value,strategic,reviewing,COMPACT_LIMITS),...changedDecisionProblems(draft,value,reviewing,free)],complete:options.compact??options.complete,waiting:options.waiting,reasoning:options.compactionReasoning});
-          problems=[...argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS),...changedDecisionProblems(draft,args,reviewing,free)];
+          args=await compactPlanDraft({name:options.name,mode:name,draft:args,parameters:compactParameters,textErrors:compactProblems,signal:options.signal,retryDelayMs:options.retryDelayMs,
+            validate:value=>argumentProblems(compactParameters,value,strategic,reviewing,COMPACT_LIMITS),complete:options.compact??options.complete,waiting:options.waiting,reasoning:options.compactionReasoning});
+          problems=argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS);
         }
       }
       let next:AgentPlan|undefined;

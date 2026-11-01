@@ -132,6 +132,7 @@ test('planning accepts a double-sized draft and compacts it without asking the p
     assert.equal(request.reasoning,'medium');assert.equal(request.max_tokens,2200);
     assert.match((request.messages[0] as any).content,/Merge redundant or overlapping wording/);
     const context=JSON.parse((request.messages[1] as any).content);assert.deepEqual(context.draft,expanded);
+    assert.ok(context.textErrors.some((error:string)=>/explanation.*maximum 500/.test(error)));
     const schema=(request.tools[0] as any).function.parameters;
     assert.equal(schema.properties.explanation.maxLength,500);assert.equal(schema.properties.project.properties.progress.maxLength,1200);
     return answer('submit_compacted_plan',{...structuredClone(projectFields),...authored});
@@ -151,16 +152,82 @@ test('planning corrects drafts beyond double the declared contract before compac
   assert.equal(plannerCalls,2);assert.equal(compactorCalls,0);assert.equal(next.explanation,authored.explanation);
 });
 
-test('plan compaction cannot change a review outcome or its evidence references',async()=>{
+test('oversized completion drafts must correct citations before compaction',async t=>{
+  const cases=[{name:'missing',ids:undefined},{name:'empty',ids:[]},{name:'unknown',ids:[999]},{name:'older than task',ids:[7]},{name:'too many',ids:Array(11).fill(665)}];
+  for(const invalid of cases)await t.test(invalid.name,async()=>{
+    const current:AgentPlan={version:4,...structuredClone(projectFields),goal:'Test whether I can pick up the loose item.',status:'active',steps:[{task:'I have observed the result of one pickup attempt.',status:'pending'}],explanation:'I want to test its reach.',createdTurn:1,reviewedTurn:1,startedAtSecond:0};
+    const draft={outcome:'complete',identity:projectFields.identity,explanation:'The pickup failed at eventId 665. '.repeat(17),project:structuredClone(projectFields.project),suggestedActions:structuredClone(projectFields.suggestedActions)};
+    const pickup=recorded('pickup',{},665);pickup.result={...pickup.result,ok:false,outcome:'rejected'};
+    const actions=[{...recorded('wait',{},7),atSecond:0},pickup];
+    const saved:AgentPlan[]=[];let plannerCalls=0,compactorCalls=0;
+    await planDecision({...base(),plan:current,actions,save(value){saved.push(value);},async complete(request){
+      plannerCalls++;
+      if(plannerCalls===1)return answer('review_plan',{...draft,...(invalid.ids===undefined?{}:{evidenceEventIds:invalid.ids})});
+      if(plannerCalls===2){
+        assert.equal(compactorCalls,0,'The planner must repair citations before text compaction.');
+        assert.equal(saved.length,0);
+        const context=JSON.parse((request.messages[1] as any).content);
+        assert.match(context.correction,/evidenceEventIds must contain 1\.\.10 integer IDs from availableEvidence/);
+        assert.ok(context.correction.includes(`received ${JSON.stringify(invalid.ids)??'no evidenceEventIds field'}`));
+        assert.match(context.correction,/References in explanation do not populate evidenceEventIds/);
+        return answer('review_plan',{...draft,evidenceEventIds:[665]});
+      }
+      return answer('set_plan',authored);
+    },async compact(request){
+      compactorCalls++;assert.equal(plannerCalls,2);
+      const context=JSON.parse((request.messages[1] as any).content);
+      assert.deepEqual(context.readOnlyDecision,{outcome:'complete',evidenceEventIds:[665]});
+      assert.equal(Object.hasOwn(context.draft,'evidenceEventIds'),false);
+      return answer('submit_compacted_plan',{...context.draft,explanation:'The pickup at event 665 was rejected; I observed its reach limit.'});
+    }});
+    assert.equal(plannerCalls,3);assert.equal(compactorCalls,1);
+    assert.deepEqual(saved.map(item=>item.status),['completed','active']);
+    assert.deepEqual(saved[0].steps[0].evidenceEventIds,[665],'A rejected action is still a real observed result that the planner may cite.');
+  });
+});
+
+test('plan compaction cannot overwrite the server-owned review outcome or evidence references',async()=>{
   const current:AgentPlan={version:4,...structuredClone(projectFields),goal:authored.goal,status:'active',steps:[{task:authored.successCondition,status:'pending'}],explanation:authored.explanation,createdTurn:1,reviewedTurn:1,startedAtSecond:0};
-  const draft={outcome:'continue',identity:projectFields.identity,explanation:'Still useful. '.repeat(50),project:structuredClone(projectFields.project),suggestedActions:structuredClone(projectFields.suggestedActions),evidenceEventIds:[42]};
+  const draft={outcome:'complete',identity:projectFields.identity,explanation:'I compared the views. '.repeat(30),project:structuredClone(projectFields.project),suggestedActions:structuredClone(projectFields.suggestedActions),evidenceEventIds:[43,42]};
+  const saved:AgentPlan[]=[];
   let plannerCalls=0,compactorCalls=0;
-  const next=await planDecision({...base(),plan:current,async complete(){plannerCalls++;return answer('review_plan',draft);},async compact(){
+  await planDecision({...base(),plan:current,actions:[recorded('turn',{},42),recorded('turn',{},43)],save(value){saved.push(value);},async complete(){return ++plannerCalls===1?answer('review_plan',draft):answer('set_plan',authored);},async compact(request){
     compactorCalls++;
-    const compacted={...draft,explanation:'The task remains useful.'};
+    const context=JSON.parse((request.messages[1] as any).content);
+    assert.deepEqual(context.readOnlyDecision,{outcome:'complete',evidenceEventIds:[43,42]});
+    const schema=(request.tools[0] as any).function.parameters;
+    assert.equal(schema.properties.outcome,undefined);assert.equal(schema.properties.evidenceEventIds,undefined);
+    assert.equal(schema.required.includes('outcome'),false);assert.equal(schema.additionalProperties,false);
+    assert.doesNotMatch(JSON.stringify(request.tools),/availableEvidence/);
+    if(compactorCalls===2){
+      const correction=JSON.parse((request.messages.at(-1) as any).content);
+      assert.ok(correction.errors.some((error:string)=>/outcome.*not a declared property/.test(error)));
+      assert.ok(correction.errors.some((error:string)=>/evidenceEventIds.*not a declared property/.test(error)));
+      assert.deepEqual(correction.previousAttempt.evidenceEventIds,[99]);
+      assert.match(correction.instruction,/Omit outcome and evidenceEventIds/);
+    }
+    const compacted={...context.draft,explanation:'I observed and compared both sides.'};
     return answer('submit_compacted_plan',compactorCalls===1?{...compacted,outcome:'abandon',evidenceEventIds:[99]}:compacted);
   }});
-  assert.equal(plannerCalls,1);assert.equal(compactorCalls,2);assert.equal(next.status,'active');assert.equal(next.explanation,'The task remains useful.');
+  assert.equal(plannerCalls,2);assert.equal(compactorCalls,2);assert.equal(saved[0].status,'completed');
+  assert.deepEqual(saved[0].steps[0].evidenceEventIds,[43,42],'The server restores the exact planner-authored citation order.');
+  assert.equal(saved[0].explanation,'I observed and compared both sides.');
+});
+
+test('a continued review can compact without inventing citations mentioned in prose',async()=>{
+  const current:AgentPlan={version:4,...structuredClone(projectFields),goal:authored.goal,status:'active',steps:[{task:authored.successCondition,status:'pending'}],explanation:authored.explanation,createdTurn:1,reviewedTurn:1,startedAtSecond:0};
+  const draft={outcome:'continue',identity:projectFields.identity,explanation:'The pickup failed at eventId 665. '.repeat(17),project:structuredClone(projectFields.project),suggestedActions:structuredClone(projectFields.suggestedActions)};
+  let plannerCalls=0,compactorCalls=0;
+  const next=await planDecision({...base(),plan:current,async complete(){plannerCalls++;return answer('review_plan',draft);},async compact(request){
+    compactorCalls++;
+    const context=JSON.parse((request.messages[1] as any).content);
+    assert.deepEqual(context.readOnlyDecision,{outcome:'continue'});
+    assert.equal(Object.hasOwn(context.draft,'outcome'),false);
+    assert.equal(Object.hasOwn(context.draft,'evidenceEventIds'),false);
+    return answer('submit_compacted_plan',{...context.draft,explanation:'The pickup failed at eventId 665.'});
+  }});
+  assert.equal(plannerCalls,1);assert.equal(compactorCalls,1);assert.equal(next.status,'active');
+  assert.equal(next.steps[0].evidenceEventIds,undefined);
 });
 
 test('identical surroundings allow different model-authored goals without substitution',async()=>{
