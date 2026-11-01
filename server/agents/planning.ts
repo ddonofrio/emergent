@@ -7,6 +7,9 @@ import { inventoryAmounts, milestoneEvidence, goalEvidence, evidenceContext, ref
 import { decisionCycle, type recentActions } from './context';
 import { InferenceAuditError } from './audit';
 import { compactPlanDraft } from './plan-compaction';
+import { isDeepStrictEqual } from 'node:util';
+import { taskAssessmentProblem, taskAssessmentProperties } from './task-assessment';
+import { completionAttempt, FORMAT_REPAIR, jsonTextDraft } from './response-repair';
 
 interface PlanTextLimits { text:number;progress:number }
 const COMPACT_LIMITS:PlanTextLimits={text:500,progress:1200};
@@ -17,28 +20,38 @@ const shortList=(value:unknown,maximum:number,minimum=0,textMaximum=COMPACT_LIMI
 const projectSchema=(limits:PlanTextLimits):JsonSchemaNode=>{const sentence=sentenceSchema(limits.text);return{type:'object',properties:{goal:{...sentence,description:`Your sustained project, 1..${limits.text} characters. Preserve it across tasks while it still matters.`},successCondition:{...sentence,description:`What you would observe if this project succeeded, 1..${limits.text} characters.`},progress:{type:'string',minLength:1,maxLength:limits.progress,description:`What has actually happened, what remains, and why. Up to ${limits.progress} characters. Separate hypotheses from observed facts.`},openQuestions:{type:'array',items:sentence,description:`Up to four untested questions or assumptions, each at most ${limits.text} characters.`}},required:['goal','successCondition','progress','openQuestions'],additionalProperties:false};};
 const validProject=(value:any,limits=COMPACT_LIMITS):value is NonNullable<AgentPlan['project']>=>value&&text(value.goal,limits.text)&&text(value.successCondition,limits.text)&&text(value.progress,limits.progress)&&shortList(value.openQuestions,4,0,limits.text);
 const approachSchema=(limits:PlanTextLimits):JsonSchemaNode=>({type:'array',items:sentenceSchema(limits.text),description:`One to three conditional next actions for the executor, at most ${limits.text} characters each. Use available capabilities and state when to reconsider the method. These are suggestions, not an automatic queue. Mention journal only for a specific insight or correction that needs preserving.`});
-function planningSchema(reviewing:boolean,strategic:boolean,free:boolean,outcomes:string[],limits:PlanTextLimits):JsonSchemaNode {
+function planningSchema(reviewing:boolean,strategic:boolean,free:boolean,outcomes:string[],limits:PlanTextLimits,reuse=false):JsonSchemaNode {
   const sentence=sentenceSchema(limits.text),project=projectSchema(limits),approach=approachSchema(limits),identity={...sentence,description:`Your stable first-person understanding of who you are: temperament, values, interests, or commitments that distinguish you from another creature. Do not summarize the current task or project. Preserve it across tasks and revise it only when experience changes your self-understanding. 1..${limits.text} characters.`};
+  if(reuse)project.required=[];
   return reviewing?{
-    type:'object',properties:{outcome:{type:'string',enum:outcomes},explanation:sentence,...(strategic?{identity,project,suggestedActions:approach}:{}),...(free?{evidenceEventIds:{type:'array' as const,items:{type:'integer' as const},description:'For complete, cite recorded event IDs from availableEvidence that support your assessment.'}}:{})},required:['outcome','explanation',...(strategic?['identity','project','suggestedActions']:[])],additionalProperties:false,
+    type:'object',properties:{outcome:{type:'string',enum:outcomes,description:'Outcome of this immediate task only. Complete a satisfied task even while its parent project continues.'},explanation:{...sentence,description:'Explain how the cited results satisfy the task condition, or why work remains.'},...(strategic?{identity,direction:sentence,project,suggestedActions:approach}:{}),...taskAssessmentProperties,...(free?{evidenceEventIds:{type:'array' as const,items:{type:'integer' as const},description:'For complete, cite recorded event IDs from availableEvidence that support your assessment.'}}:{})},required:['outcome','explanation',...(free?['conditionMet','remaining']:[])],additionalProperties:false,
   }:{
-    type:'object',properties:{identity,direction:{...sentence,description:`Your longer-term interest or purpose, chosen by you. 1..${limits.text} characters.`},project,goal:{...sentence,description:`One immediate task that advances your project, 1..${limits.text} characters. Do not combine unrelated activities.`},successCondition:{...sentence,description:`A bounded, observable result for this task, 1..${limits.text} characters. Untested possibilities are not ruled out by one failure.`},suggestedActions:approach,explanation:{...sentence,description:`Why this task now, or why the project changed. 1..${limits.text} characters.`}},required:['identity','direction','project','goal','successCondition','suggestedActions','explanation'],additionalProperties:false,
+    type:'object',properties:{identity,direction:{...sentence,description:`Your longer-term interest or purpose, chosen by you. 1..${limits.text} characters.`},project,goal:{...sentence,description:`One immediate task that advances your project, 1..${limits.text} characters. Do not combine unrelated activities.`},successCondition:{...sentence,description:`One bounded observable result for this task. Avoid combining independent alternatives or milestones; an unexpected observed result can still complete a learning task.`},suggestedActions:approach,explanation:{...sentence,description:`Why this task now, or why the project changed. 1..${limits.text} characters.`}},required:[...(!reuse?['identity','direction','project']:[]),'goal','successCondition','suggestedActions','explanation'],additionalProperties:false,
   };
 }
-function argumentProblems(parameters:JsonSchemaNode,args:any,strategic:boolean,reviewing:boolean,limits=COMPACT_LIMITS) {
+function argumentProblems(parameters:JsonSchemaNode,args:any,strategic:boolean,reviewing:boolean,limits=COMPACT_LIMITS,previous?:AgentPlan) {
   const problems=validateJsonSchemaValue(parameters,args);
   if(problems.length)return problems;
   const check=(path:string,value:unknown,maximum=limits.text)=>{if(!text(value,maximum))problems.push(`${path} must contain 1..${maximum} characters; received ${typeof value==='string'?value.length:typeof value}.`);};
   check('explanation',args.explanation);
-  if(!reviewing){check('identity',args.identity);check('direction',args.direction);check('goal',args.goal);check('successCondition',args.successCondition);}
+  if(!reviewing){check('identity',args.identity??previous?.identity);check('direction',args.direction??previous?.direction);check('goal',args.goal);check('successCondition',args.successCondition);}
   if(strategic||!reviewing){
-    if(reviewing)check('identity',args.identity);
-    check('project.goal',args.project.goal);check('project.successCondition',args.project.successCondition);check('project.progress',args.project.progress,limits.progress);
-    if(!shortList(args.project.openQuestions,4,0,limits.text))problems.push(`project.openQuestions must be an array of zero to four strings, each 1..${limits.text} characters.`);
-    if(!shortList(args.suggestedActions,3,1,limits.text))problems.push(`suggestedActions must be a flat array of one to three strings, each 1..${limits.text} characters.`);
+    if(reviewing)check('identity',args.identity??previous?.identity);
+    if(args.direction!==undefined)check('direction',args.direction);
+    const project={...previous?.project,...args.project};
+    check('project.goal',project.goal);check('project.successCondition',project.successCondition);check('project.progress',project.progress,limits.progress);
+    if(!shortList(project.openQuestions,4,0,limits.text))problems.push(`project.openQuestions must be an array of zero to four strings, each 1..${limits.text} characters.`);
+    if(!shortList(args.suggestedActions??(reviewing?previous?.suggestedActions:undefined),3,1,limits.text))problems.push(`suggestedActions must be a flat array of one to three strings, each 1..${limits.text} characters.`);
   }
   return problems;
 }
+// Call only after schema validation: explicit null is invalid, not an omitted update.
+function effectivePlanArguments(args:Record<string,any>,previous?:AgentPlan) {
+  if(!previous)return args;
+  return {...args,identity:args.identity===undefined?previous.identity:args.identity,direction:args.direction===undefined?previous.direction:args.direction,
+    project:{...previous.project,...args.project},suggestedActions:args.suggestedActions===undefined?previous.suggestedActions:args.suggestedActions};
+}
+
 export function needsPlanReview(plan:AgentPlan|undefined,turn:number,actions:ReturnType<typeof recentActions>=[]) {
   return !plan||![2,3,4].includes(plan.version??0)||plan.steps.length!==1||((plan.version??0)<3&&!plan.steps[0].criterion)||(plan.version===4&&(!text(plan.identity,COMPACT_LIMITS.text)||!validProject(plan.project)||!shortList(plan.suggestedActions,3,1)))||plan.status!=='active'||!plan.steps.some(step=>step.status==='pending')||turn-plan.reviewedTurn>=PLAN_REVIEW_INTERVAL
     || !!decisionCycle(actions.filter(entry=>entry.atSecond>(plan.startedAtSecond??0)&&entry.eventId>(plan.reviewedEventId??0)));
@@ -67,7 +80,7 @@ export async function planDecision(options:{
   compact?(request:CompletionRequest,signal:AbortSignal):Promise<CompletionResult>;
   waiting(message:string):void;save(plan:AgentPlan):void;
 }):Promise<AgentPlan> {
-  let previous=options.plan,correction='',previousAttempt:unknown;
+  let previous=options.plan,correction='',previousAttempt:unknown,formatDraft:Record<string,unknown>|undefined;
   while(true){
     options.signal.throwIfAborted();
     const reviewing=!options.upgrade&&previous?.status==='active'&&previous.steps.some(step=>step.status==='pending');
@@ -77,56 +90,68 @@ export async function planDecision(options:{
     const evidence=reviewing&&!legacy?milestoneEvidence(previous!,options.actions,options.observation):[];
     const availableEvidence=reviewing?evidenceContext(goalEvidence(previous!,options.actions)):[];
     const name=reviewing?'review_plan':'set_plan';
-    const outcomes=legacy?['abandon']:free?['continue',...(availableEvidence.length?['complete']:[]),'abandon']:evidence.length?['complete','abandon']:(previous?.stalledReviews??0)>=1?['abandon']:['continue','abandon'];
-    const parameters=planningSchema(reviewing,strategic,free,outcomes,COMPACT_LIMITS);
-    const acceptedParameters=planningSchema(reviewing,strategic,free,outcomes,EXPANDED_LIMITS);
+    const outcomes=legacy?['abandon']:free?['continue',...(availableEvidence.length?['complete']:[]),'blocked','abandon']:evidence.length?['complete','abandon']:(previous?.stalledReviews??0)>=1?['abandon']:['continue','abandon'];
+    const reuse=previous?.version===4&&text(previous.identity,500)&&text(previous.direction,500)&&validProject(previous.project);
+    const inherited=reuse?previous:undefined;
+    const parameters=planningSchema(reviewing,strategic,free,outcomes,COMPACT_LIMITS,reuse);
+    const acceptedParameters=planningSchema(reviewing,strategic,free,outcomes,EXPANDED_LIMITS,reuse);
     const compactParameters=parameters;
     const instruction=reviewing
-      ? free?'Review your own success condition against current observations and availableEvidence. Preserve your identity unless lived experience genuinely changed your self-understanding. Explain progress or obstacles. For complete, cite relevant event IDs and explain how their actual results satisfy the condition; successful tool execution alone is not goal completion. Completion is your assessment, not a verified world fact. You may continue or abandon; a reminder or repeated cycle does not force a new goal.':'Review verifiedProgress and any repeated cycle. Only recorded effects prove success. Moving inventory between hands and storage does not collect anything. Choose an allowed outcome. Older incompatible plans must be abandoned before writing a new goal. Explain what changed or prevented progress.'
-      : 'Describe your own stable identity, choose your direction and sustained project, then give your executor one immediate task and one to three conditional next actions. Identity says who you are, not what the current task is. Preserve identity, project and progress across tasks unless lived experience gives you a reason to change them. There is no assigned activity or goal catalog. Use your accumulated experience, current observations and interests. A blocked task does not erase its parent project. Record unanswered questions instead of treating assumptions as facts.';
+      ? !free?'Review verifiedProgress against the task condition. Choose an allowed outcome; older incompatible tasks must be abandoned. Explain the recorded progress.':'Assess the immediate task only. Explain how recorded results match its condition and what remains. When conditionMet is true, complete the task even if its project continues. Cite availableEvidence for complete. You may continue, block or abandon an unfinished task; a reminder does not force a change.'
+      : 'Choose one immediate task and one bounded observable success condition, with one to three conditional suggestions. You author the task and project; no activity is assigned. A learning task can end with an unexpected observed result. A blocked task does not erase its project.';
     let saving=false;
     try{
       const answer=await options.complete({messages:[
-        {role:'system',content:`${options.planningInstructions?.replaceAll('{name}',options.name)??`You are ${options.name}, a curious agent planning your next activity in a physical world.`} ${instruction} Distinguish observations, hypotheses and wishes. Old plans and notes can contain mistakes: check them against learned facts and recorded experiments. Current inventory overrides historical quantities. Keep project.progress focused on durable progress and unresolved work; avoid copying transient inventory, bearings or the entire action history. The executor handles journal updates when needed; suggest one only for a specific insight, commitment or correction, naming replaceNoteIds for obsolete claims. For a learning task, choose a bounded observed result even if it differs from your prediction; writing a claim in the journal does not establish it. Another creature's speech expresses its requests or beliefs, not verified material behavior. Ideas from other worlds are hypotheses here. Compare exact experiment inputs before generalizing; an unavailable tool is a blocked test, not a negative result. Check capabilitiesAfterChangingHands before declaring a test unavailable. Use earlier discoveries even when the material is not held. When attempts repeat without new information, reconsider the method or task. Past speech and locations are historical. Write each short text field as one concise sentence of at most 500 characters; project.progress may use at most 1200 characters. Keep the complete visible tool response within 2200 output tokens. Call only ${name}; no extra prose. Use actual JSON objects and arrays, not JSON encoded inside strings. Planning consumes no world time.`},
+        {role:'system',content:`${options.planningInstructions?.replaceAll('{name}',options.name)??`You are ${options.name}, planning your life in a physical world.`} ${instruction} ${reuse?'Omit unchanged identity, direction and project fields; omitted fields retain their values. Project updates merge field by field. Review suggestions can be omitted; a new task needs its own suggestions.':'Write your stable identity, longer-term direction and sustained project.'} Current state and recorded results override old plans and notes. Distinguish facts from hypotheses; speech is another creature's belief. Compare exact experiment inputs; an unavailable tool is an untested possibility. Check conditional capabilities before declaring a test impossible. Paths describe individual directions, not a global blockage. Keep project progress durable; omit transient inventory and bearings. Suggest journal only for a specific insight or correction, using replaceNoteIds for obsolete claims. Write concise text fields of at most 500 characters; project.progress allows 1200. Keep the complete visible tool response within 2200 output tokens. Call only ${name}, using JSON objects and arrays, with no extra prose. Planning consumes no world time.`},
         {role:'user',content:JSON.stringify({...(reviewing?{successCondition:previous!.steps.find(step=>step.status==='pending')?.task,...(free?{availableEvidence,assessment:'Judge progress against the task success condition; cite actual observed effects. Completing a task does not automatically complete the project.'}:{verifiedProgress:{complete:!!evidence.length,evidence,legacy}}),allowedOutcomes:outcomes,previousPlan:previous,elapsedDecisions:options.turn-previous!.createdTurn}:{...(previous?{previousPlan:previous}:{})}),...(options.upgrade?{transition:'Reframe your existing activity as a project and one immediate task. Keep useful progress and commitments, but question unsupported assumptions.'}:{}),...(options.reviewReason?{reviewReason:options.reviewReason}:{}),situation:options.context,...(correction?{correction,previousAttempt}:{})})},
       ],tools:[{type:'function',function:{name,description:reviewing?'Review your task, update project progress and adjust the suggested method using observed results.':'Write your own direction, project, immediate task and suggested actions.',parameters}}],max_tokens:4400,reasoning:options.reasoning??DEFAULT_REASONING_SETTINGS.planning},options.signal);
       options.signal.throwIfAborted();
       let args:any;
       if(answer.calls.length===1&&answer.calls[0].function.name===name){try{args=JSON.parse(answer.calls[0].function.arguments);}catch{}}
-      let problems=args?argumentProblems(acceptedParameters,args,strategic,reviewing,EXPANDED_LIMITS):[`Call ${name} exactly once with valid JSON arguments.`];
+      let problems=args?argumentProblems(acceptedParameters,args,strategic,reviewing,EXPANDED_LIMITS,inherited):[`Call ${name} exactly once with valid JSON arguments.`];
+      if(formatDraft&&args&&!problems.length&&!isDeepStrictEqual(effectivePlanArguments(args,inherited),effectivePlanArguments(formatDraft,inherited)))problems.push('Format repair must preserve the effective values of previousAttempt; unchanged inherited fields may be omitted or repeated.');
+      if(reviewing&&free&&args){const problem=taskAssessmentProblem(args.outcome,args);if(problem)problems.push(problem);}
       // A compactor may shorten a decision, but cannot repair its missing or invalid citations.
       if(reviewing&&free&&args?.outcome==='complete'&&!referencedGoalEvidence(previous!,options.actions,args.evidenceEventIds)){
         problems.push(`For outcome "complete", evidenceEventIds must contain 1..10 integer IDs from availableEvidence; received ${JSON.stringify(args.evidenceEventIds)??'no evidenceEventIds field'}. References in explanation do not populate evidenceEventIds.`);
       }
       if(args&&!problems.length){
-        const compactProblems=argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS);
+        const compactProblems=argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS,inherited);
         if(compactProblems.length){
           options.waiting('Compacting an expanded planning draft; world time is held.');
           args=await compactPlanDraft({name:options.name,mode:name,draft:args,parameters:compactParameters,textErrors:compactProblems,signal:options.signal,retryDelayMs:options.retryDelayMs,
-            validate:value=>argumentProblems(compactParameters,value,strategic,reviewing,COMPACT_LIMITS),complete:options.compact??options.complete,waiting:options.waiting,reasoning:options.compactionReasoning});
-          problems=argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS);
+            validate:value=>argumentProblems(compactParameters,value,strategic,reviewing,COMPACT_LIMITS,inherited),complete:options.compact??options.complete,waiting:options.waiting,reasoning:options.compactionReasoning});
+          problems=argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS,inherited);
         }
       }
+      if(args&&!problems.length)args=effectivePlanArguments(args,inherited);
       let next:AgentPlan|undefined;
       if(args&&!problems.length){
         if(!reviewing){
           if(text(args.identity,500)&&text(args.direction,500)&&validProject(args.project)&&shortList(args.suggestedActions,3,1)&&text(args.goal,500)&&text(args.successCondition,500))next={version:4,identity:args.identity.trim(),direction:args.direction.trim(),project:args.project,suggestedActions:args.suggestedActions,goal:args.goal.trim(),status:'active',steps:[{task:args.successCondition.trim(),status:'pending'}],explanation:args.explanation.trim(),createdTurn:options.turn,reviewedTurn:options.turn,startedAtSecond:options.time,stalledReviews:0,inventoryBaseline:inventoryAmounts(options.observation?.self.inventory??null),reviewedEventId:options.actions.at(-1)?.eventId??0};
         }else if(reviewing&&outcomes.includes(args.outcome)){
-          const status=args.outcome==='continue'?'active':args.outcome==='complete'?'completed':'abandoned';
+          const status=args.outcome==='continue'?'active':args.outcome==='complete'?'completed':args.outcome==='blocked'?'blocked':'abandoned';
           const references=free?referencedGoalEvidence(previous!,options.actions,args.evidenceEventIds):evidence;
-          if((!strategic||(text(args.identity,500)&&validProject(args.project)&&shortList(args.suggestedActions,3,1)))&&(status!=='completed'||references?.length))next={...previous!,...(strategic?{identity:args.identity.trim(),project:args.project,suggestedActions:args.suggestedActions}:{}),...(status==='active'?{}:{intention:undefined}),status,reviewedTurn:options.turn,reviewedEventId:options.actions.at(-1)?.eventId??0,explanation:args.explanation.trim(),stalledReviews:status==='active'?(previous!.stalledReviews??0)+1:0,
-            steps:previous!.steps.map(step=>step.status!=='pending'?step:status==='active'?step:{...step,status:status==='completed'?'completed':'abandoned',evidence:free?args.explanation.trim():status==='completed'?references!.map(item=>item.message).join(' ').slice(0,500):args.explanation.trim(),...(status==='completed'?{evidenceEventIds:references!.map(item=>item.eventId),...(free?{assessment:'agent' as const}:{})}:{})})};
+          if((!strategic||(text(args.identity,500)&&validProject(args.project)&&shortList(args.suggestedActions,3,1)))&&(status!=='completed'||references?.length))next={...previous!,...(strategic?{identity:args.identity.trim(),direction:args.direction??previous!.direction,project:args.project,suggestedActions:args.suggestedActions}:{}),...(status==='active'?{}:{intention:undefined}),status,...(free?{taskAssessment:{conditionMet:args.conditionMet,remaining:args.remaining.trim()}}:{}),reviewedTurn:options.turn,reviewedEventId:options.actions.at(-1)?.eventId??0,explanation:args.explanation.trim(),stalledReviews:status==='active'?(previous!.stalledReviews??0)+1:0,
+            steps:previous!.steps.map(step=>step.status!=='pending'?step:status==='active'?step:{...step,status,evidence:free?args.explanation.trim():status==='completed'?references!.map(item=>item.message).join(' ').slice(0,500):args.explanation.trim(),...(status==='completed'?{evidenceEventIds:references!.map(item=>item.eventId),...(free?{assessment:'agent' as const}:{})}:{})})};
         }
       }
       if(next){
         if(next.intention===undefined)delete next.intention;
         saving=true;options.save(next);saving=false;
         if(next.status==='active')return next;
-        previous=next;correction='';previousAttempt=undefined;continue;
+        previous=next;correction='';previousAttempt=undefined;formatDraft=undefined;continue;
       }
-      correction=reviewing?`Choose only an allowed outcome: ${outcomes.join(', ')}. Invented evidence cannot complete a goal. For complete, cite IDs from availableEvidence.${strategic?' Include your identity, the updated project and one to three conditional suggestedActions.':''} Follow the contract: explanation must be at most 500 characters.`:'Supply identity, direction, project (goal, successCondition, progress, openQuestions), goal, successCondition, one to three conditional suggestedActions, and explanation. Follow the contract: text fields are 1..500 characters, except project.progress (1..1200), and use at most four openQuestions.';
-      if(problems.length)correction=`Correct these errors in your previous attempt: ${problems.join(' ')} ${correction}`;
-      previousAttempt=JSON.stringify(answer.calls).slice(0,10000);
+      if(!answer.calls.length){
+        const draft=jsonTextDraft(answer);
+        // Freeze only a valid decision. Invalid drafts still need semantic correction.
+        if(!formatDraft&&draft&&!argumentProblems(acceptedParameters,draft,strategic,reviewing,EXPANDED_LIMITS,inherited).length
+          &&(!reviewing||!free||(!taskAssessmentProblem(String(draft.outcome),draft)&&
+            (draft.outcome!=='complete'||!!referencedGoalEvidence(previous!,options.actions,draft.evidenceEventIds)))))formatDraft=draft;
+      }
+      correction=!answer.calls.length?FORMAT_REPAIR:`Correct only these errors: ${problems.join(' ')} Invented evidence cannot complete a task. Preserve unaffected fields; do not rewrite the decision.`;
+      if(formatDraft)correction+=' Preserve the effective values from previousAttempt; unchanged inherited fields may be omitted or repeated.';
+      previousAttempt=formatDraft??completionAttempt(answer);
       options.waiting('Waiting for a valid goal or review; world time is held.');
     }catch(error){
       if(saving||error instanceof InferenceAuditError)throw error;

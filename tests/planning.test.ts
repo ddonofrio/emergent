@@ -14,6 +14,7 @@ const authored={goal:'Compare the shade on opposite sides of the tree.',successC
 const engine=new Engine(island);engine.entity('t1').inventory={stacks:[{kind:'wood',count:1}],selected:0,capacity:640};
 const observation=engine.observe('t1');
 const answer=(name:string,args:unknown):CompletionResult=>({provider:'stub',providerName:'Stub',model:'stub',content:null,calls:[{id:'plan',type:'function',function:{name,arguments:JSON.stringify(projectReply(name,args))}}]});
+const rawAnswer=(name:string,args:unknown):CompletionResult=>({...answer('wait',{}),calls:[{id:'plan',type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 const base=()=>({name:'Moss',turn:31,time:30,context:{},observation,actions:[],signal:AbortSignal.timeout(2000),retryDelayMs:1,waiting(){},save(_plan:AgentPlan){}});
 const recorded=(action:string,feedback:Record<string,unknown>,eventId=10)=>({eventId,atSecond:1,action,args:{},result:compactResult({ok:true,message:'Recorded effect.',feedback:{...(feedback.collected?{inventoryDelta:[{kind:feedback.collected,change:1}]}:{}),...feedback}})});
 
@@ -127,11 +128,12 @@ test('planning accepts a double-sized draft and compacts it without asking the p
     compactorCalls++;
     assert.equal(request.reasoning,'medium');assert.equal(request.max_tokens,2200);
     assert.match((request.messages[0] as any).content,/Merge redundant or overlapping wording/);
-    const context=JSON.parse((request.messages[1] as any).content);assert.deepEqual(context.draft,expanded);
+    const context=JSON.parse((request.messages[1] as any).content);assert.deepEqual(context.draft,{explanation:expanded.explanation,'project.progress':expanded.project.progress});
     assert.ok(context.textErrors.some((error:string)=>/explanation.*maximum 500/.test(error)));
     const schema=(request.tools[0] as any).function.parameters;
-    assert.equal(schema.properties.explanation.maxLength,500);assert.equal(schema.properties.project.properties.progress.maxLength,1200);
-    return answer('submit_compacted_plan',{...structuredClone(projectFields),...authored});
+    assert.deepEqual(Object.keys(schema.properties).sort(),['explanation','project.progress']);
+    assert.equal(schema.properties.explanation.maxLength,500);assert.equal(schema.properties['project.progress'].maxLength,1200);
+    return answer('submit_compacted_plan',{explanation:authored.explanation,'project.progress':projectFields.project.progress});
   }});
   assert.equal(plannerCalls,1);assert.equal(compactorCalls,1);assert.equal(next.explanation,authored.explanation);
 });
@@ -172,7 +174,7 @@ test('oversized completion drafts must correct citations before compaction',asyn
     },async compact(request){
       compactorCalls++;assert.equal(plannerCalls,2);
       const context=JSON.parse((request.messages[1] as any).content);
-      assert.deepEqual(context.readOnlyDecision,{outcome:'complete',evidenceEventIds:[665]});
+      assert.deepEqual(context.readOnlyDecision,{outcome:'complete',conditionMet:true,remaining:'',evidenceEventIds:[665]});
       assert.equal(Object.hasOwn(context.draft,'evidenceEventIds'),false);
       return answer('submit_compacted_plan',{...context.draft,explanation:'The pickup at event 665 was rejected; I observed its reach limit.'});
     }});
@@ -190,7 +192,7 @@ test('plan compaction cannot overwrite the server-owned review outcome or eviden
   await planDecision({...base(),plan:current,actions:[recorded('turn',{},42),recorded('turn',{},43)],save(value){saved.push(value);},async complete(){return ++plannerCalls===1?answer('review_plan',draft):answer('set_plan',authored);},async compact(request){
     compactorCalls++;
     const context=JSON.parse((request.messages[1] as any).content);
-    assert.deepEqual(context.readOnlyDecision,{outcome:'complete',evidenceEventIds:[43,42]});
+    assert.deepEqual(context.readOnlyDecision,{outcome:'complete',conditionMet:true,remaining:'',evidenceEventIds:[43,42]});
     const schema=(request.tools[0] as any).function.parameters;
     assert.equal(schema.properties.outcome,undefined);assert.equal(schema.properties.evidenceEventIds,undefined);
     assert.equal(schema.required.includes('outcome'),false);assert.equal(schema.additionalProperties,false);
@@ -217,7 +219,7 @@ test('a continued review can compact without inventing citations mentioned in pr
   const next=await planDecision({...base(),plan:current,async complete(){plannerCalls++;return answer('review_plan',draft);},async compact(request){
     compactorCalls++;
     const context=JSON.parse((request.messages[1] as any).content);
-    assert.deepEqual(context.readOnlyDecision,{outcome:'continue'});
+    assert.deepEqual(context.readOnlyDecision,{outcome:'continue',conditionMet:false,remaining:'The task condition remains unmet.'});
     assert.equal(Object.hasOwn(context.draft,'outcome'),false);
     assert.equal(Object.hasOwn(context.draft,'evidenceEventIds'),false);
     return answer('submit_compacted_plan',{...context.draft,explanation:'The pickup failed at eventId 665.'});
@@ -260,4 +262,107 @@ test('unavailable planning waits cancellably without inventing a goal',async()=>
   const controller=new AbortController();let attempts=0,saves=0;
   await assert.rejects(planDecision({...base(),signal:controller.signal,save(){saves++;},waiting(){if(++attempts===3)controller.abort();},async complete(){throw new Error('Offline');}}),{name:'AbortError'});
   assert.equal(saves,0);assert.equal(attempts,3);
+});
+
+test('new tasks merge only explicit project updates and preserve the authored identity',async()=>{
+  const previous:AgentPlan={...plan,version:4,...structuredClone(projectFields),status:'completed',steps:[{task:'An earlier observation.',status:'completed'}],taskAssessment:{conditionMet:true,remaining:''}};
+  const before=structuredClone(previous);let calls=0;
+  const next=await planDecision({...base(),plan:previous,async complete(request){
+    const schema=(request.tools[0] as any).function.parameters;
+    assert.deepEqual(schema.required,['goal','successCondition','suggestedActions','explanation']);
+    assert.deepEqual(schema.properties.project.required,[]);
+    if(++calls===1)return rawAnswer('set_plan',{...authored,project:{progress:'One change was observed.',openQuestions:[]}});
+    assert.match(JSON.parse((request.messages[1] as any).content).correction,/suggestedActions/);
+    return rawAnswer('set_plan',{...authored,project:{progress:'One change was observed.',openQuestions:[]},suggestedActions:['Turn if the other side is not visible.']});
+  }});
+  assert.equal(calls,2);assert.deepEqual(previous,before);
+  assert.equal(next.identity,previous.identity);assert.equal(next.direction,previous.direction);
+  assert.deepEqual(next.project,{...previous.project,progress:'One change was observed.',openQuestions:[]});
+  assert.equal(next.taskAssessment,undefined);assert.notEqual(next.project,previous.project);
+});
+
+test('a partial review preserves project fields and methods without rewriting them',async()=>{
+  const previous:AgentPlan={...plan,version:4,...structuredClone(projectFields),steps:[{task:authored.successCondition,status:'pending'}]};
+  const before=structuredClone(previous);
+  const next=await planDecision({...base(),plan:previous,async complete(){return rawAnswer('review_plan',{outcome:'continue',conditionMet:false,remaining:'Observe the second side.',explanation:'Only one side is known.',project:{progress:'I observed the first side.'}});}});
+  assert.deepEqual(previous,before);assert.equal(next.identity,previous.identity);
+  assert.deepEqual(next.project,{...previous.project,progress:'I observed the first side.'});
+  assert.deepEqual(next.suggestedActions,previous.suggestedActions);
+  assert.deepEqual(next.taskAssessment,{conditionMet:false,remaining:'Observe the second side.'});
+});
+
+test('task assessments reject contradictory outcomes while an unfinished parent project survives closure',async()=>{
+  const previous:AgentPlan={...plan,version:4,...structuredClone(projectFields),steps:[{task:authored.successCondition,status:'pending'}]};
+  const saved:AgentPlan[]=[];let calls=0;
+  const next=await planDecision({...base(),plan:previous,actions:[recorded('turn',{},42)],save(value){saved.push(value);},async complete(request){
+    calls++;
+    if(calls===1)return rawAnswer('review_plan',{outcome:'continue',conditionMet:true,remaining:'',explanation:'The task is done but the project continues.'});
+    if(calls===2){assert.equal(saved.length,0);assert.match(JSON.parse((request.messages[1] as any).content).correction,/complete this task even if its project continues/);return rawAnswer('review_plan',{outcome:'complete',conditionMet:false,remaining:'Another observation.',evidenceEventIds:[42],explanation:'One observation was enough.'});}
+    if(calls===3){assert.equal(saved.length,0);return rawAnswer('review_plan',{outcome:'complete',conditionMet:true,remaining:'',evidenceEventIds:[42],explanation:'The recorded observation satisfies my condition.'});}
+    return rawAnswer('set_plan',{...authored,suggestedActions:['Inspect another side.']});
+  }});
+  assert.equal(calls,4);assert.deepEqual(saved.map(item=>item.status),['completed','active']);
+  assert.deepEqual(next.project,previous.project);assert.equal(saved[0].steps[0].assessment,'agent');
+});
+
+test('text-only planning repairs the original valid draft without executing text or accepting a new decision',async()=>{
+  const draft={...structuredClone(projectFields),...authored};let calls=0,saves=0;
+  const next=await planDecision({...base(),save(){saves++;},async complete(request){
+    calls++;
+    if(calls===1)return {...answer('wait',{}),calls:[],content:JSON.stringify(draft)};
+    assert.equal(saves,0);assert.deepEqual(JSON.parse((request.messages[1] as any).content).previousAttempt,draft);
+    if(calls===2)return rawAnswer('set_plan',{...draft,goal:'An unrelated new task.'});
+    if(calls===3)return {...answer('wait',{}),calls:[],content:JSON.stringify({...draft,goal:'Another replacement.'})};
+    return rawAnswer('set_plan',draft);
+  }});
+  assert.equal(calls,4);assert.equal(saves,1);assert.equal(next.goal,draft.goal);
+});
+
+test('format repair accepts repeated inherited plan fields but rejects actual changes and explicit null',async()=>{
+  const previous:AgentPlan={...plan,version:4,...structuredClone(projectFields),status:'completed',steps:[{task:'Earlier task.',status:'completed'}]};
+  const draft={...authored,project:{progress:'One change was observed.',openQuestions:[]},suggestedActions:['Inspect another side.']};
+  const expanded={...draft,identity:previous.identity,direction:previous.direction,project:{...previous.project,...draft.project}};
+  const changes=[{...expanded,identity:null},{...expanded,goal:'An unrelated task.'},{...expanded,project:{...expanded.project,progress:'An invented result.'}}];
+  let calls=0,saves=0;
+  const next=await planDecision({...base(),plan:previous,save(){saves++;},async complete(request){
+    calls++;
+    if(calls===1)return {...answer('wait',{}),calls:[],content:JSON.stringify(draft)};
+    assert.equal(saves,0);assert.deepEqual(JSON.parse((request.messages[1] as any).content).previousAttempt,draft);
+    return rawAnswer('set_plan',changes[calls-2]??expanded);
+  }});
+  assert.equal(calls,5);assert.equal(saves,1);
+  assert.equal(next.identity,previous.identity);assert.equal(next.goal,draft.goal);assert.deepEqual(next.project,expanded.project);
+});
+
+test('review format repair preserves the outcome and citations while allowing unchanged inherited fields',async()=>{
+  const previous:AgentPlan={...plan,version:4,...structuredClone(projectFields),steps:[{task:authored.successCondition,status:'pending'}]};
+  const draft={outcome:'complete',conditionMet:true,remaining:'',explanation:'I compared both observed sides.',evidenceEventIds:[42]};
+  const expanded={...draft,...structuredClone(projectFields)};
+  const saved:AgentPlan[]=[];let calls=0;
+  await planDecision({...base(),plan:previous,actions:[recorded('turn',{},42),recorded('turn',{},43)],save(value){saved.push(value);},async complete(){
+    calls++;
+    if(calls===1)return {...answer('wait',{}),calls:[],content:JSON.stringify(draft)};
+    if(calls<=4)assert.equal(saved.length,0);
+    if(calls===2)return rawAnswer('review_plan',{...expanded,outcome:'abandon',conditionMet:false,remaining:'I still need to observe.'});
+    if(calls===3)return rawAnswer('review_plan',{...expanded,evidenceEventIds:[43]});
+    if(calls===4)return rawAnswer('review_plan',expanded);
+    return rawAnswer('set_plan',{...authored,suggestedActions:['Inspect another side.']});
+  }});
+  assert.equal(calls,5);assert.equal(saved[0].status,'completed');
+  assert.deepEqual(saved[0].steps[0].evidenceEventIds,[42]);
+});
+
+test('compaction changes only the oversized array entry and preserves all other fields',async()=>{
+  const draft={...structuredClone(projectFields),...authored,suggestedActions:['Keep this exact suggestion.','Inspect carefully. '.repeat(30)]};
+  const before=structuredClone(draft);let calls=0;
+  const next=await planDecision({...base(),async complete(){return rawAnswer('set_plan',draft);},async compact(request){
+    calls++;
+    const schema=(request.tools[0] as any).function.parameters;
+    assert.deepEqual(Object.keys(schema.properties),['suggestedActions.1']);
+    assert.deepEqual(JSON.parse((request.messages[1] as any).content).draft,{'suggestedActions.1':draft.suggestedActions[1]});
+    if(calls===1)return rawAnswer('submit_compacted_plan',{'suggestedActions.1':'Inspect carefully.','suggestedActions.0':'Changed without permission.'});
+    return rawAnswer('submit_compacted_plan',{'suggestedActions.1':'Inspect carefully.'});
+  }});
+  assert.equal(calls,2);assert.deepEqual(draft,before);
+  assert.deepEqual(next.suggestedActions,['Keep this exact suggestion.','Inspect carefully.']);assert.equal(next.identity,draft.identity);
 });

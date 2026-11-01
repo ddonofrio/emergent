@@ -5,6 +5,7 @@ export interface Stack { kind: string; count: number; contents?: string; water?:
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; itemId?: string; }
 export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'approach'|'communicate'|'shape'; subject?:string; entityId?:string; }
+export interface TaskAssessment { conditionMet:boolean; remaining:string; }
 export interface AgentPlan {
   version?: 2 | 3 | 4;
   identity?: string;
@@ -22,6 +23,7 @@ export interface AgentPlan {
   inventoryBaseline?: Record<string,number>;
   reviewedEventId?: number;
   intention?: string;
+  taskAssessment?: TaskAssessment;
 }
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander'; position: Vec3; yaw: number;

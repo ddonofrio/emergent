@@ -33,8 +33,8 @@ test('journal and goal reasons accept 500 characters and reject excess with prec
   assert.equal((await journal.invoke({note:'a'.repeat(500)}) as {ok:boolean}).ok,true);
   const rejected=await journal.invoke({note:'b'.repeat(501)}) as {ok:boolean;message:string};
   assert.equal(rejected.ok,false);assert.match(rejected.message,/501 characters; maximum 500/);assert.equal(memory.notes.length,1);
-  assert.equal((finish.invoke({outcome:'blocked',reason:'c'.repeat(501)}) as {ok:boolean}).ok,false);assert.equal(closed,false);
-  assert.equal((finish.invoke({outcome:'blocked',reason:'c'.repeat(500)}) as {ok:boolean}).ok,true);assert.equal(closed,true);
+  assert.equal((finish.invoke({outcome:'blocked',conditionMet:false,remaining:'The task is blocked.',reason:'c'.repeat(501)}) as {ok:boolean}).ok,false);assert.equal(closed,false);
+  assert.equal((finish.invoke({outcome:'blocked',conditionMet:false,remaining:'The task is blocked.',reason:'c'.repeat(500)}) as {ok:boolean}).ok,true);assert.equal(closed,true);
   assert.throws(()=>assertSupportedJsonSchema({type:'number',maxLength:500}));
   assert.throws(()=>assertSupportedJsonSchema({type:'string',minLength:2,maxLength:1}));
   assert.throws(()=>assertSupportedJsonSchema({type:'string',maxLength:-1}));

@@ -9,10 +9,10 @@ import { ExperienceMemory } from '../server/agents/experience';
 import { compactResult, decisionView, relevantKnowledge } from '../server/agents/context';
 import { experienceReviewReason, planDecision } from '../server/agents/planning';
 import { goalEvidence, taskEvidenceView } from '../server/agents/milestones';
-import { projectFields } from './agent-fixtures';
+import { projectFields, projectReply } from './agent-fixtures';
 import type { CompletionResult } from '../server/agents/providers';
 
-const answer=(name:string,args:unknown):CompletionResult=>({provider:'test',providerName:'Test',model:'test',content:null,calls:[{id:'call',type:'function',function:{name,arguments:JSON.stringify(args)}}]});
+const answer=(name:string,args:unknown):CompletionResult=>({provider:'test',providerName:'Test',model:'test',content:null,calls:[{id:'call',type:'function',function:{name,arguments:JSON.stringify(projectReply(name,args))}}]});
 const plan = ():AgentPlan=>({version:4,...structuredClone(projectFields),goal:'Compare what different strikes do.',steps:[{task:'I have observed two different tested inputs.',status:'pending'}],status:'active',explanation:'Compare exact results.',createdTurn:1,reviewedTurn:1,startedAtSecond:0,reviewedEventId:0});
 function fixture(){
   const blocks:Block[]=[];
@@ -107,8 +107,8 @@ test('planner sees accumulated experience and learned recipes while holding a di
       assert.equal(context.plan.direction,projectFields.direction);
       assert.equal(context.plan.project,projectFields.project.goal);
       assert.equal(context.plan.projectSuccessCondition,projectFields.project.successCondition);
-      assert.equal(context.plan.projectProgress,undefined);
-      assert.equal(context.plan.openQuestions,undefined);
+      assert.equal(context.plan.projectProgress,projectFields.project.progress);
+      assert.deepEqual(context.plan.openQuestions,projectFields.project.openQuestions);
       assert.deepEqual(context.plan.suggestedActions,projectFields.suggestedActions);
       assert.equal(context.plan.methodAgeDecisions,0);
       assert.equal(context.plan.reviewInDecisions,undefined);

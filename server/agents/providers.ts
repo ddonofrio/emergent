@@ -92,6 +92,7 @@ export interface CompletionResult {
   model: string;
   content: string | null;
   calls: ToolCall[];
+  normalization?: import('./tool-normalization').ToolNormalization;
   usage?: unknown;
 }
 export interface ProviderModel { id:string; label:string; }
@@ -525,7 +526,8 @@ export class ProviderChain {
     if(payload.choices?.[0]?.finish_reason==='length'||(generated.reasoning!==undefined&&generated.reasoning>reasoningLimit)||(generated.output!==undefined&&generated.output>outputLimit)){
       throw new OutputTokenLimitError(provider.name,outputLimit,reasoningLimit,generated);
     }
-    const content = typeof answer.content === 'string' ? answer.content.slice(0, 5000) : null;
+    // Preserve the whole response: clipping can hide trailing prose during JSON normalization.
+    const content = typeof answer.content === 'string' ? answer.content : null;
     if (content && detectTokenLoop(tokenizeLoopText(content))) throw new InvalidCompletionError(`${provider.name} returned repeating output.`);
     const calls = answer.tool_calls ?? [];
     return { provider: provider.id, providerName: provider.name, model: payload.model ?? provider.model, content, calls, ...(payload.usage === undefined ? {} : { usage: payload.usage }) };
@@ -571,7 +573,7 @@ export class ProviderChain {
     const budgets=bedrockBudgets(provider,request);
     if(response.stopReason==='max_tokens')throw new OutputTokenLimitError(provider.name,budgets.output,budgets.reasoning);
     const answer=response.output?.message?.content??[];
-    const content=answer.flatMap(block=>'text'in block&&typeof block.text==='string'?[block.text]:[]).join(' ').slice(0,5000)||null;
+    const content=answer.flatMap(block=>'text'in block&&typeof block.text==='string'?[block.text]:[]).join(' ')||null;
     const calls:ToolCall[]=answer.flatMap(block=>{
       if(!('toolUse'in block)||!block.toolUse?.name||!block.toolUse.toolUseId)return[];
       return[{id:block.toolUse.toolUseId,type:'function' as const,function:{name:block.toolUse.name,arguments:JSON.stringify(block.toolUse.input??{})}}];

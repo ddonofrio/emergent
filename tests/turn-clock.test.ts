@@ -218,7 +218,7 @@ test('multiple physical actions are rejected before one corrected action consume
     r.runtime.setInferenceConfig(r.runtime.config.providers,'fallback',{...DEFAULT_REASONING_SETTINGS,action:'maximum'});
     engine.setEntityEnabled('t2',false);engine.setEntityEnabled('duck',false);
     r.clock.pump();await until(()=>p.requests.length===1);
-    assert.equal(p.requests[0].body.max_tokens,10900);assert.equal(p.requests[0].body.max_completion_tokens,10900);assert.equal(p.requests[0].body.reasoning_effort,undefined);assert.match(p.requests[0].body.messages[0].content,/End this decision with exactly one physical action/i);
+    assert.equal(p.requests[0].body.max_tokens,10900);assert.equal(p.requests[0].body.max_completion_tokens,10900);assert.equal(p.requests[0].body.reasoning_effort,undefined);assert.match(p.requests[0].body.messages[0].content,/Choose one physical action, or a supporting tool first/i);
     respondActions(p.requests[0],[{action:'turn',angle:90},{action:'wait'}]);
     await until(()=>p.requests.length===2);
     assert.equal(engine.tick,0);assert.equal(engine.entity('t1').yaw,0);
@@ -270,7 +270,7 @@ test('looking sideways makes follow available for the newly seen entity without 
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);delete engine.entity('duck').motion;
-    r.clock.pump();await until(()=>p.requests.length===1);assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='follow').function.description,/No eligible creature/);
+    r.clock.pump();await until(()=>p.requests.length===1);assert.ok(!p.requests[0].body.tools.some((tool:any)=>tool.function.name==='follow'));assert.match(JSON.parse(p.requests[0].body.messages[1].content).unavailableCapabilities.find((item:any)=>item.name==='follow').requires,/eligible visible creature/);
     respondTool(p.requests[0],'look',{angle:90});await until(()=>p.requests.length===2);
     assert.equal(engine.tick,0);assert.equal(engine.entity('t1').yaw,0);assert.ok(p.requests[1].body.tools.find((tool:any)=>tool.function.name==='follow').function.parameters.properties.entityId.enum.includes('duck'));
     assert.ok(JSON.parse(p.requests[1].body.messages.at(-1).content).interactions.follow.some((target:any)=>target.id==='duck'));
@@ -306,7 +306,7 @@ test('following asks every world second; stopping stages a free normal action th
     respond(p.requests[0],{action:'follow',entityId:'duck'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.equal(engine.tick,20);assert.ok(engine.entity('t1').motion);
     r.clock.pump();await until(()=>p.requests.length===2);
-    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal']);
+    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal','finish_goal']);
     const prompt=JSON.parse(p.requests[1].body.messages.at(-1).content);assert.equal(prompt.following.entityId,'duck');assert.ok(Math.abs(prompt.following.metres-3)<.01);
     assert.equal(prompt.inventory,undefined);assert.equal(prompt.notes,undefined);assert.equal(prompt.hints,undefined);assert.equal(prompt.recent,undefined);
     const frozen=engine.state();r.advance(90000);assert.deepEqual(engine.state(),frozen);
@@ -334,7 +334,7 @@ test('a legacy goal-learning journal offer cannot interrupt execution after foll
     engine.act('t1',{action:'follow',entityId:'duck'});
     Object.assign(r.runtime.minds.get('t1')!,{journalOffer:'You completed a goal. What memorable fact did you learn about the world?'});
     r.clock.pump();await until(()=>p.requests.length===1);
-    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal']);
+    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal','finish_goal']);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/memorable fact/);
     respondTool(p.requests[0],'stop_follow',{});await until(()=>p.requests.length===2);
     assert.doesNotMatch(p.requests[1].body.messages[0].content,/memorable fact/);
@@ -356,7 +356,7 @@ test('execution foregrounds the assigned result and current matching targets wit
     mind.emptyHandMoves=10;mind.carriedMoves=10;mind.notes=['Explore the coast next.'];
     r.clock.pump();await until(()=>p.requests.length===1);
     const first=p.requests[0],prompt=JSON.parse(first.body.messages.at(-1).content);
-    assert.match(first.body.messages[0].content,/^CURRENT GOAL: Collect one wood/);
+    assert.doesNotMatch(first.body.messages[0].content,/Collect one wood/);assert.equal(prompt.plan.goal,'Collect one wood from the world.');
     assert.equal(Object.keys(prompt)[0],'plan');
     assert.deepEqual(prompt.plan.criterion,{kind:'collect',subject:'wood'});
     assert.equal(prompt.plan.matchingReachableChoices,undefined);
@@ -365,11 +365,11 @@ test('execution foregrounds the assigned result and current matching targets wit
     assert.equal(prompt.reminder,undefined);assert.equal(prompt.hints,undefined);
     assert.equal(prompt.plan.goalAchieved,false);
     respondTool(first,'look',{angle:180});await until(()=>p.requests.length===2);
-    assert.match(p.requests[1].body.messages[0].content,/^CURRENT GOAL: Collect one wood/);
-    assert.equal(JSON.parse(p.requests[1].body.messages.at(-1).content).plan.matchingReachableChoices,undefined);
+    assert.doesNotMatch(p.requests[1].body.messages[0].content,/Collect one wood/);assert.equal(JSON.parse(p.requests[1].body.messages[1].content).plan.goal,prompt.plan.goal);
+    assert.equal(JSON.parse(p.requests[1].body.messages.at(-1).content).plan,undefined,'Look does not repeat the task.');
     respondTool(p.requests[1],'finish_goal',{outcome:'abandoned',reason:'Choose a different activity.'});await until(()=>p.requests.length===3);
     const changed=p.requests[2];
-    assert.match(changed.body.messages[0].content,/^CURRENT GOAL: Inspect the surroundings/);
+    assert.match(JSON.parse(changed.body.messages[1].content).plan.goal,/^Inspect the surroundings/);
     assert.doesNotMatch(changed.body.messages[0].content,/Collect wood/);
     assert.equal(JSON.parse(changed.body.messages.at(-1).content).plan.elapsedTaskDecisions,0);
     respond(changed,{action:'wait'});
@@ -644,7 +644,8 @@ test('goal leads crack attention and the last result, and attention disappears a
     for(let index=0;index<2;index++){
       r.clock.pump();await until(()=>p.requests.length===index+1);
       const request=p.requests[index],context=JSON.parse(request.body.messages.at(-1).content);
-      assert.deepEqual(Object.keys(context).slice(0,3),['plan','lastResult','inventory']);
+      assert.ok(context.plan&&context.lastResult&&context.inventory);
+      assert.deepEqual(context.decisionState,{following:false,stopFollowingPending:false});
       assert.match(context.attention,/Cracks.*observed changes/);
       const hit=request.body.tools.find((tool:any)=>tool.function.name==='hit');
       assert.ok(hit.function.parameters.properties.target.examples.some((target:number[])=>target.join(',')==='0,1,1'));
@@ -655,7 +656,8 @@ test('goal leads crack attention and the last result, and attention disappears a
     r.clock.pump();await until(()=>p.requests.length===3);
     assert.equal(JSON.parse(p.requests[2].body.messages.at(-1).content).attention,undefined);
     const disabledHit=p.requests[2].body.tools.find((tool:any)=>tool.function.name==='hit');
-    assert.equal(disabledHit.function.description.includes('Disabled while you hold wood'),true);
+    assert.equal(disabledHit,undefined);
+    assert.match(JSON.parse(p.requests[2].body.messages[1].content).unavailableCapabilities.find((item:any)=>item.name==='hit').requires,/hold wood/);
     respond(p.requests[2],{action:'wait'});
   }finally{r.clock.close();store.close();p.close();}
 });

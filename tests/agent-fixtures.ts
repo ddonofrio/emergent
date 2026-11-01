@@ -8,6 +8,9 @@ export const projectFields={
 export function projectReply(name:string,args:unknown) {
   const value=args as Record<string,unknown>;
   if(name==='set_plan'&&value.goal&&value.successCondition)return{...structuredClone(projectFields),...value};
-  if(name==='review_plan'&&value.project)return{identity:projectFields.identity,...value};
+  if(name==='review_plan'||name==='finish_goal'){
+    const conditionMet=['complete','completed'].includes(String(value.outcome));
+    return{...(name==='review_plan'&&value.project?{identity:projectFields.identity}:{}),conditionMet,remaining:conditionMet?'':'The task condition remains unmet.',...value};
+  }
   return value;
 }

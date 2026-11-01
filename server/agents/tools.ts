@@ -1,6 +1,6 @@
 import { assertSupportedJsonSchema, validateJsonSchemaValue, type JsonSchemaNode } from '../../vendor/deepseek-harness/json-schema';
 import type { Engine } from '../../src/core/engine';
-import type { Action, ActionResult, MilestoneCriterion } from '../../src/core/types';
+import type { Action, ActionResult, MilestoneCriterion, TaskAssessment } from '../../src/core/types';
 import { knowledgeDescription } from '../../src/core/knowledge';
 import { PRIVATE_NOTE_LIMIT, SHORT_TEXT_LIMIT } from '../../src/core/memory';
 import { speechProblem } from '../../src/core/speech';
@@ -8,18 +8,20 @@ import { compactResult, compactView, decisionView } from './context';
 import { impactPoints } from '../../src/core/impact-points';
 import { validCompactedNotes } from './journal-compaction';
 import { journalEntries, setJournalNotes, type Memory } from './journal';
+import { taskAssessmentProblem, taskAssessmentProperties } from './task-assessment';
 export type { Memory } from './journal';
 export { impactPoints } from '../../src/core/impact-points';
 
 export interface WorldTool {
   name: string; description: string; parameters: JsonSchemaNode;
   physical: boolean;
+  unavailable?: string;
   validate?(args: unknown): string | undefined;
   output: { schema: JsonSchemaNode; render(args: unknown, value: unknown): { type: 'text'; text: string }[] };
   execute(args: unknown, exec?: { signal?: AbortSignal }): Promise<unknown>;
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
 }
-export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;capabilityPreview?:boolean;concise?:boolean;previewHand?:number|null;goalCriterion?:MilestoneCriterion;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned'|'blocked',reason:string,evidenceEventIds?:number[])=>unknown} = {}): WorldTool[] {
+export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;capabilityPreview?:boolean;concise?:boolean;previewHand?:number|null;goalCriterion?:MilestoneCriterion;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned'|'blocked',reason:string,evidenceEventIds?:number[],assessment?:TaskAssessment)=>unknown} = {}): WorldTool[] {
   const tool = (name: string, description: string, parameters: JsonSchemaNode, physical: boolean, run: (args: any) => unknown): WorldTool => {
     assertSupportedJsonSchema(parameters);
     return { name, description, parameters, physical, output: { schema: {}, render: (_args, value) => {
@@ -69,11 +71,17 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   const journal=tool('journal',`Preserve an important insight, uncertainty, commitment, useful location or unfinished work for your future self in one short sentence (at most 500 characters). Actions and discoveries are recorded automatically; save the interpretation or conditions you would otherwise lose. Include the conditions of a memorable fact learned about the world. Label hypotheses. Use replaceNoteIds for claims this note corrects or supersedes; keep unrelated notes. Omit it to append. ${PRIVATE_NOTE_LIMIT} notes; faithful compaction when full; no world time.`,object({note:shortSentence,replaceNoteIds:{type:'array',items:{type:'string'},description:'Optional stable IDs from notes for the specific claims this note corrects or supersedes. Never remove unrelated notes.'}},['note']),false,({note,replaceNoteIds}:{note:string;replaceNoteIds?:string[]})=>remember(note,replaceNoteIds));
   const say=action('say',`Say any phrase of one to three words this turn. Only creatures within clear hearing range (${engine.module.manifest.perception.range} metres, the same range as perception) hear it. If nobody hears you, the result says so. Speaking while following keeps you following.`,object({word:{type:'string',description:'One to three words of your choice, with optional punctuation.'}},['word']),'say');
   say.validate=args=>speechProblem((args as {word?:unknown}).word);
+  const finishGoal=options.onFinishGoal?tool('finish_goal','Return this immediate task to your planner; its parent project continues independently. completed: observed results satisfy every part of its condition; cite availableEvidence and explain the match. blocked: the method needs reconsideration. abandoned: you no longer want this task. Closing a task preserves following. Call alone before acting.',object({outcome:{type:'string',enum:['completed','abandoned','blocked'],description:'Outcome of the immediate task only, never the parent project.'},reason:{...shortSentence,description:'Match the cited results to the task condition, or explain why the task remains unfinished.'},...taskAssessmentProperties,evidenceEventIds:{type:'array',items:{type:'integer'},description:'For completed, cite 1..10 recorded event IDs from plan.availableEvidence.'}},['outcome','reason',...(!options.goalCriterion?['conditionMet','remaining']:[])]),false,({outcome,reason,evidenceEventIds,conditionMet,remaining})=>{
+    if(!reason.trim())return {ok:false,message:'Give a reason in one short sentence of 1..500 characters.'};
+    if(!options.goalCriterion){const problem=taskAssessmentProblem(outcome,{conditionMet,remaining});if(problem)return {ok:false,message:problem};}
+    return options.onFinishGoal!(outcome,reason.trim(),evidenceEventIds,typeof conditionMet==='boolean'?{conditionMet,remaining}:undefined);
+  }):undefined;
   if(options.following??!!entity.following)return [
     action('follow','Keep following, stopping one metre away.',noArgs,'follow'),
-    tool('stop_follow','Stop following without spending time; then inspect, finish_goal or choose a physical action.',noArgs,false,()=>({ok:true,message:'Following stopped for this decision. You may now finish_goal or choose another action.'})),
+    tool('stop_follow','Stop following without spending time; then inspect or choose another physical action. Task closure does not require stopping.',noArgs,false,()=>({ok:true,message:'Following stopped for this decision. Choose from the updated tools.'})),
     say,
     journal,
+    ...(finishGoal?[finishGoal]:[]),
   ];
   const view=availableOnly?engine.observeAt(id,options.viewAngle??0):undefined;
   const targets=view?.interactions;
@@ -90,10 +98,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
     action('walk','Walk using either distance and angle or target [x,y,z]. Y is always height. Walking follows terrain toward target x,z and stops before obstacles or unsafe terrain; it does not climb to target y automatically.',walkMovement,'walk'),
     action('turn','Turn your body and forward view.',object({angle:{type:'number',description:'Degrees (-360..360); negative left, positive right.'}},['angle']),'turn'),
   ];
-  if(options.onFinishGoal)tools.push(tool('finish_goal','Return this task to your planner. completed: observed results satisfy its condition; cite availableEvidence. blocked: the required test or action is unavailable, or your method needs reconsideration. abandoned: you no longer want this task. A task ending does not complete its parent project. Call alone before acting.',object({outcome:{type:'string',enum:['completed','abandoned','blocked']},reason:shortSentence,evidenceEventIds:{type:'array',items:{type:'integer'},description:'For completed, cite 1..10 recorded event IDs from plan.availableEvidence.'}},['outcome','reason']),false,({outcome,reason,evidenceEventIds})=>{
-    if(!reason.trim())return {ok:false,message:'Give a reason in one short sentence of 1..500 characters.'};
-    return options.onFinishGoal!(outcome,reason.trim(),evidenceEventIds);
-  }));
+  if(finishGoal)tools.push(finishGoal);
   const raw=held&&['dirt','grass','sand','stone','wood','leaves'].includes(held.kind);
   if(raw)tools.push(tool('run',`Disabled while you hold ${held!.kind}; store, place, or throw it before running.`,movement(24),false,()=>({ok:false,message:`Run is unavailable while you hold ${held!.kind}. Store, place, or throw it first.`})));
   else tools.push(action('run','Run across clear terrain at twice the speed of walking.',movement(24),'run'));
@@ -162,6 +167,16 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
       if(!Number.isFinite(metres)||metres>maximum||(movement.name==='jump'?metres<.75:metres<=0))return movement.name==='jump'?'Jump distance must be between 0.75 and 2.5 metres.':`Distance must be greater than zero and at most ${maximum} metres.`;
       return undefined;
     };
+  }
+  for(const entry of tools){
+    if(entry.description.startsWith('Disabled'))entry.unavailable=entry.name==='run'?`Run is unavailable while you hold ${held!.kind}. Store, place, or throw it first.`:entry.description.replace(/^Disabled while you hold [^.]+\. /,'');
+    if(!entry.unavailable&&availableOnly&&!capabilityPreview){
+      const targetKinds:Record<string,unknown[]|undefined>={hit:targets?.hit,dig:targets?.hit,pickup:targets?.pickup,place:targets?.place,fill:targets?.fill,empty:targets?.empty,follow:targets?.follow};
+      if(Object.hasOwn(targetKinds,entry.name)&&!targetKinds[entry.name]?.length)entry.unavailable=entry.name==='follow'
+        ?'Requires an eligible visible creature; look or approach a known sighting.'
+        :entry.name==='pickup'?'Requires a reachable usable loose item and inventory space; inspect or approach one.'
+        :'Requires a currently reachable target; look or move to inspect one.';
+    }
   }
   return tools;
 }

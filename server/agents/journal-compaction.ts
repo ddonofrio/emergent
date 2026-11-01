@@ -1,5 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { InferenceAuditError } from './audit';
+import { completionAttempt, FORMAT_REPAIR } from './response-repair';
 import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
 import { DEFAULT_REASONING_SETTINGS, type CompletionRequest, type CompletionResult, type ReasoningProfile } from './providers';
 
@@ -37,7 +38,7 @@ export async function compactJournal(options: {
         try { notes = JSON.parse(answer.calls[0].function.arguments).notes; } catch { /* Ask for valid output without changing memory. */ }
       }
       if (validCompactedNotes(notes) && !notes.some(note => note.trim() === options.incoming)) return notes.map(note => note.trim());
-      correction = 'The previous response was invalid. Call submit_journal once with at most nine distinct notes of 1..500 characters each. Merge redundancy, remove only clearly obsolete information, preserve useful meaning, and exclude the pending note.';
+      correction = JSON.stringify({previousAttempt:completionAttempt(answer),instruction:!answer.calls.length?FORMAT_REPAIR:'Call submit_journal once with at most nine distinct notes of 1..500 characters each; preserve useful meaning and exclude pendingNote.'});
       options.waiting('Waiting for a valid journal compaction; original notes are retained.');
     } catch (error) {
       signal.throwIfAborted();

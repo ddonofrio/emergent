@@ -10,6 +10,22 @@ const intercept=(chain:ProviderChain,handler:(config:ProviderConfig)=>Promise<Co
   (chain as unknown as {request:(config:ProviderConfig,request:CompletionRequest,signal:AbortSignal)=>Promise<CompletionResult>}).request=handler;
 };
 
+test('providers preserve complete text so clipping cannot hide trailing prose or truncate JSON',async t=>{
+  const json=JSON.stringify({tool:'say',parameters:{word:'Hi Pebble'}});
+  let content='';
+  t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({choices:[{finish_reason:'stop',message:{content,tool_calls:[]}}]})));
+  for(const bedrock of [false,true]){
+    const config={...provider('local'),...(bedrock?{type:'amazon-bedrock' as const}:{})};
+    const chain=new ProviderChain([config]);
+    if(bedrock)(chain as unknown as {bedrockClients:Map<string,unknown>}).bedrockClients.set('local:',{async send(){return {output:{message:{content:[{text:content}]}}};}});
+    for(const text of [' '.repeat(5001)+json,json.padEnd(5000,' ')+' trailing prose']){
+      content=text;
+      const answer=await chain.complete(request,AbortSignal.timeout(3000),()=>{});
+      assert.equal(answer.content,text);assert.deepEqual(answer.calls,[]);
+    }
+  }
+});
+
 test('reasoning settings default every phase except maximum planning and reject incomplete values',()=>{
   assert.deepEqual(normalizeReasoningSettings(undefined),{movement:'default',action:'default',planning:'maximum',planCompaction:'default',journalCompaction:'default'});
   assert.deepEqual(normalizeReasoningSettings({movement:'minimum',planning:'medium'}),{...DEFAULT_REASONING_SETTINGS,movement:'minimum',planning:'medium'});
