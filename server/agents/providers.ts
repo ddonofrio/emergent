@@ -131,18 +131,18 @@ interface ProviderAttempt {
 const RECOVERY_HTTP_STATUSES=new Set([502,503,504,522,523,524]);
 const DEFAULT_RECOVERY_COOLDOWN_MS=1000;
 
-function tokenLimitRetryLine(error:OutputTokenLimitError,retry:number) {
+function tokenLimitRetryLine(error:OutputTokenLimitError,retry:number,reasoning?:ReasoningProfile) {
   const generated=error.generated?.reasoning!==undefined||error.generated?.output!==undefined
     ? ` The previous attempt generated${error.generated.reasoning===undefined?'':` ${error.generated.reasoning} reasoning tokens`}${error.generated.reasoning!==undefined&&error.generated.output!==undefined?' and':''}${error.generated.output===undefined?'':` ${error.generated.output} output tokens`}.`
     : '';
-  const budget=error.reasoningLimit===0
+  const budget=reasoning==='minimum'||error.reasoningLimit===0
     ? `Reasoning is disabled for this request. Return the required tool call within ${error.outputLimit} output tokens without analysis prose.`
     : `Use no more than ${error.reasoningLimit} reasoning tokens and ${error.outputLimit} output tokens, then return the required tool call without extra prose.`;
   return `Limit token usage. Retry ${retry}: the previous attempt exceeded the generation budget.${generated} ${budget}`;
 }
 
 function addTokenLimitRetry(request:CompletionRequest,error:OutputTokenLimitError,retry:number):CompletionRequest {
-  const messages=[...request.messages],line=tokenLimitRetryLine(error,retry);
+  const messages=[...request.messages],line=tokenLimitRetryLine(error,retry,request.reasoning);
   let index=-1;
   for(let candidate=messages.length-1;candidate>=0;candidate--){
     const message=messages[candidate] as {role?:unknown;content?:unknown}|undefined;

@@ -1,5 +1,5 @@
 import { test } from 'node:test';
-import { projectReply } from './agent-fixtures';
+import { projectFields, projectReply } from './agent-fixtures';
 import assert from 'node:assert/strict';
 import { inflateSync } from 'node:zlib';
 import { Engine } from '../src/core/engine';
@@ -268,7 +268,7 @@ test('oversized intentions are corrected before commit and failed actions invali
   try{
     runtime.inference.complete=async(request)=>{
       if(++calls===1)return answer('hit',{target:[0,1,2],intention:'x'.repeat(201)});
-      assert.match((request.messages.at(-1) as {content:string}).content,/1\.\.200/);
+      assert.match((request.messages.at(-1) as {content:string}).content,/maximum 200|1\.\.200/);
       assert.equal(engine.tick,0);
       return answer('hit',{target:[0,1,2],intention:'Continue observing this wood block.'});
     };
@@ -326,12 +326,107 @@ test('a reached social goal can stop following and close before selecting the ne
     runtime.inference.complete=async(request)=>{
       if(++calls===1){assert.equal(context(request).plan.goalAchieved,true);assert.match(context(request).plan.instruction,/stop_follow/);return answer('stop_follow',{});}
       if(calls===2){assert.ok((request.tools as any[]).some(tool=>tool.function.name==='finish_goal'));return answer('finish_goal',{outcome:'completed',reason:'I can see Moss within two metres.'});}
-      if(calls===3){assert.equal((request.tools[0] as any).function.name,'set_plan');return answer('set_plan',{goal:'Inspect this place.',successCondition:'I have scanned this place.',explanation:'Inspect this place.'});}
+      if(calls===3){
+        assert.equal((request.tools[0] as any).function.name,'set_plan');
+        assert.equal(context(request).situation.following,undefined);
+        assert.ok(context(request).situation.capabilities.some((tool:{name:string})=>tool.name==='look'));
+        assert.ok(engine.entity('t1').following,'Stopping remains staged even when the planner sees the new mode.');
+        return answer('set_plan',{goal:'Inspect this place.',successCondition:'I have scanned this place.',explanation:'Inspect this place.'});
+      }
       assert.ok((request.tools as any[]).some(tool=>tool.function.name==='wait'));
       return answer('wait',{});
     };
     const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});commit(engine,store,runtime,turn);
     assert.equal(calls,4);assert.equal(engine.entity('t1').following,undefined);
     assert.ok(store.eventsAt(engine.tick,'t1',100).some(event=>event.type==='plan'&&(event.data as {plan:AgentPlan}).plan.status==='completed'));
+  }finally{store.close();}
+});
+
+test('following can edit its journal from local sightings, stage the edit and resume a ready decision',async()=>{
+  const {engine,store,runtime,plan}=fixture();
+  try{
+    engine.voxels.set([0,1,2],null);
+    engine.entity('t2').position=[.5,1,3.5];
+    engine.entity('t2').inventory={stacks:[{kind:'bucket',contents:'water',count:1},{kind:'wood',count:50}],selected:0,capacity:640};
+    engine.act('t1',{action:'follow',entityId:'t2'});
+    const mind=runtime.minds.get('t1')!;
+    mind.plan={...plan,version:4,...structuredClone(projectFields),steps:[{task:'I have observed what Moss is carrying.',status:'pending'}]};
+    mind.notes=['I am unsure what Moss is holding.'];
+    store.record(engine.frame(),engine.state(),runtime.persistence());
+    let calls=0;
+    runtime.inference.complete=async request=>{
+      const prompt=context(request);
+      assert.ok((request.tools as any[]).some(tool=>tool.function.name==='journal'));
+      assert.ok(!(request.tools as any[]).some(tool=>tool.function.name==='finish_goal'));
+      assert.match((request.messages[0] as {content:string}).content,/call stop_follow first/);
+      assert.equal(prompt.creatures.find((other:{id:string})=>other.id==='t2').holding,'bucket containing water');
+      assert.doesNotMatch(JSON.stringify(prompt.creatures),/stacks|capacity|50/);
+      assert.deepEqual(mind.notes,['I am unsure what Moss is holding.']);
+      if(++calls===1)return answer('journal',{note:'Moss carries water; I could ask about it.',replaceNoteIds:[prompt.notes[0].id]});
+      return answer('follow',{});
+    };
+    const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
+    assert.equal(engine.tick,0);assert.equal(calls,2);
+    assert.deepEqual(mind.notes,['I am unsure what Moss is holding.']);
+    assert.deepEqual(turn.decisions[0].mind.notes,['Moss carries water; I could ask about it.']);
+    const restored=new Engine(engine.module,store.stateAt(0));restored.nextEvent=store.maxEventId()+1;
+    const resumed=new AgentRuntime(restored,store,runtime.config);
+    resumed.inference.complete=async()=>{throw new Error('A ready decision must not repeat inference.');};
+    const cached=await resumed.prepareTurn(AbortSignal.timeout(3000),()=>{});
+    assert.deepEqual(cached.decisions[0].mind.notes,turn.decisions[0].mind.notes);
+    commit(restored,store,resumed,cached);
+    assert.deepEqual(store.memoryAt(restored.tick,'t1'),['Moss carries water; I could ask about it.']);
+    assert.equal(restored.entity('t1').following?.entityId,'t2');
+  }finally{store.close();}
+});
+
+test('following context never exposes an occluded target held object or private inventory',async()=>{
+  const {engine,store,runtime}=fixture();
+  try{
+    engine.entity('t2').position=[.5,1,3.5];
+    engine.entity('t2').inventory={stacks:[{kind:'bucket',count:1}],selected:0,capacity:640};
+    engine.entity('t1').following={entityId:'t2'};
+    engine.voxels.set([0,2,2],'wood');
+    assert.ok(!engine.observe('t1').entities.some(other=>other.id==='t2'));
+    runtime.inference.complete=async request=>{
+      assert.ok(!context(request).creatures.some((other:{id:string})=>other.id==='t2'));
+      assert.doesNotMatch(JSON.stringify(context(request).creatures),/bucket/);
+      return answer('follow',{});
+    };
+    await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
+    assert.equal(engine.tick,0);
+  }finally{store.close();}
+});
+
+test('text-only finish_goal is corrected as a tool-call error and can close the task before acting',async()=>{
+  const {engine,store,runtime,plan}=fixture();
+  try{
+    runtime.minds.get('t1')!.plan={...plan,version:4,...structuredClone(projectFields),steps:[{task:'I have observed the result of a scan.',status:'pending'}]};
+    runtime.inference.complete=async()=>answer('find_material',{});
+    commit(engine,store,runtime,await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{}));
+    let calls=0,evidenceId=0;
+    runtime.inference.complete=async request=>{
+      if(++calls===1){
+        const evidence=context(request).plan.availableEvidence;
+        evidenceId=evidence[0].eventId;
+        assert.equal(evidence[0].message,undefined);
+        assert.equal(evidence[0].result.actionStatus,'completed');
+        assert.ok(evidence[0].result.materials.length);
+        return {...answer('wait',{}),calls:[],content:'finish_goal({outcome: "completed"})'};
+      }
+      if(calls===2){
+        assert.match((request.messages.at(-1) as {content:string}).content,/No tool call was received.*actual available tool call.*finish_goal alone/);
+        assert.equal(engine.tick,20);
+        return answer('finish_goal',{outcome:'completed',reason:'The scan showed local materials.',evidenceEventIds:[evidenceId]});
+      }
+      if(calls===3)return answer('set_plan',{goal:'Consider what I saw.',successCondition:'I have chosen what interests me next.',explanation:'Reflect on the scan.'});
+      return answer('wait',{});
+    };
+    const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
+    assert.equal(calls,4);assert.equal(engine.tick,20);
+    assert.deepEqual(turn.decisions[0].planEvents!.map(item=>item.status),['completed','active']);
+    assert.deepEqual(turn.decisions[0].planEvents![0].steps[0].evidenceEventIds,[evidenceId]);
+    assert.deepEqual(turn.decisions[0].calls.map(call=>call.function.name),['wait']);
+    commit(engine,store,runtime,turn);assert.equal(engine.tick,40);
   }finally{store.close();}
 });

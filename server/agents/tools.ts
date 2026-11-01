@@ -66,12 +66,14 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
     return {ok:true,message:'Saved for your future self. These are your current journal notes.',notes};
   };
   const entity=engine.entity(id),held=options.previewHand===undefined?engine.held(entity):options.previewHand===null?undefined:entity.inventory?.stacks[options.previewHand];
+  const journal=tool('journal',`Preserve an important insight, uncertainty, commitment, useful location or unfinished work for your future self in one short sentence (at most 500 characters). Actions and discoveries are recorded automatically; save the interpretation or conditions you would otherwise lose. Include the conditions of a memorable fact learned about the world. Label hypotheses. Use replaceNoteIds for claims this note corrects or supersedes; keep unrelated notes. Omit it to append. ${PRIVATE_NOTE_LIMIT} notes; faithful compaction when full; no world time.`,object({note:shortSentence,replaceNoteIds:{type:'array',items:{type:'string'},description:'Optional stable IDs from notes for the specific claims this note corrects or supersedes. Never remove unrelated notes.'}},['note']),false,({note,replaceNoteIds}:{note:string;replaceNoteIds?:string[]})=>remember(note,replaceNoteIds));
   const say=action('say',`Say any phrase of one to three words this turn. Only creatures within clear hearing range (${engine.module.manifest.perception.range} metres, the same range as perception) hear it. If nobody hears you, the result says so. Speaking while following keeps you following.`,object({word:{type:'string',description:'One to three words of your choice, with optional punctuation.'}},['word']),'say');
   say.validate=args=>speechProblem((args as {word?:unknown}).word);
   if(options.following??!!entity.following)return [
     action('follow','Keep following, stopping one metre away.',noArgs,'follow'),
-    tool('stop_follow','Stop following and choose another action immediately.',noArgs,false,()=>({ok:true,message:'Choose another action now.'})),
+    tool('stop_follow','Stop following without spending time; then inspect, finish_goal or choose a physical action.',noArgs,false,()=>({ok:true,message:'Following stopped for this decision. You may now finish_goal or choose another action.'})),
     say,
+    journal,
   ];
   const view=availableOnly?engine.observeAt(id,options.viewAngle??0):undefined;
   const targets=view?.interactions;
@@ -144,7 +146,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   }
   tools.push(say);
   tools.push(action('wait','Wait and watch.',noArgs,'wait'));
-  tools.push(tool('journal',`Preserve an important insight, uncertainty, commitment, useful location or unfinished work for your future self in one short sentence (at most 500 characters). Your actions and discoveries are recorded automatically; your personal interpretation is not. Include the conditions of a memorable fact learned about the world. Label hypotheses and never generalize one unsuccessful test to every possible method. Use replaceNoteIds to name every old claim this note corrects, contradicts or supersedes. IDs are stable, not array indices; keep unrelated notes. Omit replaceNoteIds to append new information. ${PRIVATE_NOTE_LIMIT} notes; faithful compaction when full; no world time.`,object({note:shortSentence,replaceNoteIds:{type:'array',items:{type:'string'},description:'Optional stable IDs from notes for the specific claims this note corrects or supersedes. Never remove unrelated notes.'}},['note']),false,({note,replaceNoteIds}:{note:string;replaceNoteIds?:string[]})=>remember(note,replaceNoteIds)));
+  tools.push(journal);
   for(const movement of tools.filter(tool=>tool.physical&&['walk','run','jump','turn'].includes(tool.name))){
     movement.validate=(args:unknown)=>{
       const {distance,angle,target} = args as {distance?:number;angle?:number;target?:number[]};

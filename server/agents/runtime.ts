@@ -8,7 +8,7 @@ import { isObservedMaterialKnowledge } from '../../src/core/knowledge';
 import type { Store } from '../store';
 import { DEFAULT_REASONING, DEFAULT_REASONING_TOKENS, InvalidCompletionError, normalizeReasoningSettings, ProviderChain, retryTokenLimitedCompletion, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ReasoningSettings, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
-import { actionFeedback, bodyContext, compactResult, compactView, decisionView, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
+import { actionFeedback, bodyContext, compactResult, compactView, creatureContext, decisionView, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
 import { compactJournal } from './journal-compaction';
 import { journalEntries as journalContext } from './journal';
 import { experienceReviewReason, needsPlanReview, planDecision } from './planning';
@@ -192,7 +192,7 @@ export class AgentRuntime {
     const recent=recentActions(this.store.actionEventsAt(tick,id,PLAN_REVIEW_INTERVAL*2),PLAN_REVIEW_INTERVAL*2);
     return [...new Map([...memory.experimentActions(),...recent].map(entry=>[entry.eventId,entry])).values()].sort((a,b)=>a.eventId-b.eventId);
   }
-  private async preparePlan(id:string,mind:Mind,observation:Observation,signal:AbortSignal,report:Report,alreadyCounted=0) {
+  private async preparePlan(id:string,mind:Mind,observation:Observation,signal:AbortSignal,report:Report,alreadyCounted=0,following=!!observation.following) {
     type StagedPlan={plan:AgentPlan;events:AgentPlan[];modelCalls:number;acknowledged?:boolean};
     const actor=`plan:${id}`,cached=this.store.loadPending<StagedPlan>(observation.tick,actor,this.inference.cacheKey);
     const actions=this.actionHistory(id,observation.tick,mind.plan);
@@ -202,7 +202,7 @@ export class AgentRuntime {
     if(!cached&&!upgrade&&!reviewReason&&!needsPlanReview(mind.plan,mind.turns,actions))return [];
     const staged:StagedPlan=cached??{plan:mind.plan!,events:[],modelCalls:0};
     if(!cached||staged.plan.status!=='active'||![2,3,4].includes(staged.plan.version??0)){
-      const capabilities=worldTools(this.engine,id,mind,{following:!!observation.following})
+      const capabilities=worldTools(this.engine,id,mind,{following})
         .filter(tool=>!tool.description.startsWith('Disabled'))
         .map(tool=>({name:tool.name,description:tool.description,parameters:tool.parameters}));
       // Preview only capabilities of already owned items; never execute these tools or change hands.
@@ -213,10 +213,10 @@ export class AgentRuntime {
         const tools=worldTools(this.engine,id,mind,{following:false,availableOnly:false,capabilityPreview:true,previewHand:hand})
           .filter(tool=>!tool.description.startsWith('Disabled')&&!knownCapabilities.has(tool.name))
           .map(tool=>({name:tool.name,description:tool.description,parameters:tool.parameters}));
-        return tools.length?[{requires:{holding:stack?.kind??'empty',...(stack?.contents?{contents:stack.contents}:{}),...(observation.following?{stopFollowing:true}:{})},tools}]:[];
+        return tools.length?[{requires:{holding:stack?.kind??'empty',...(stack?.contents?{contents:stack.contents}:{}),...(following?{stopFollowing:true}:{})},tools}]:[];
       });
       const experience=this.experience.get(id)!.read(observation.tick,cached?.plan??mind.plan);
-      const context={...abstractPlanningContext(this.engine,observation,mind,capabilities,actions.slice(-PLAN_REVIEW_INTERVAL)),capabilitiesAfterChangingHands,experience};
+      const context={...abstractPlanningContext(this.engine,{...observation,following:following?observation.following:undefined},mind,capabilities,actions.slice(-PLAN_REVIEW_INTERVAL)),capabilitiesAfterChangingHands,experience};
       staged.plan=await planDecision({name:observation.self.name,planningInstructions:this.engine.module.manifest.planningInstructions,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,upgrade:!cached&&upgrade,reviewReason,context,actions,observation,signal,retryDelayMs:this.config.retryDelayMs,reasoning:this.reasoningSettings.planning,compactionReasoning:this.reasoningSettings.planCompaction,
         complete:async(request,abort)=>{
           report(id,{state:'planning',message:'Planning a goal and reviewing steps; world time is held.'});
@@ -267,17 +267,19 @@ export class AgentRuntime {
     const currentCriterion=()=>mind.plan?.steps.find(step=>step.status==='pending')?.criterion;
     const makeTools=()=>{
       const staged=this.store.loadPending<{acknowledged?:boolean}>(observation.tick,`plan:${id}`,this.inference.cacheKey);
-      return worldTools(this.engine,id,mind,{following,viewAngle,concise:true,goalCriterion:currentCriterion(),...journalOptions,...(staged?.acknowledged?{onFinishGoal:undefined}:{})}).map(tool=>tool.physical?{...tool,parameters:{...tool.parameters,properties:{...tool.parameters.properties,intention:{type:'string' as const}}}}:tool);
+      return worldTools(this.engine,id,mind,{following,viewAngle,concise:true,goalCriterion:currentCriterion(),...journalOptions,...(staged?.acknowledged?{onFinishGoal:undefined}:{})}).map(tool=>tool.physical?{...tool,parameters:{...tool.parameters,properties:{...tool.parameters.properties,intention:{type:'string' as const,minLength:1,maxLength:200,description:'Optional short reminder for the next decision, 1..200 characters; never an action queue. Omit when unnecessary.'}}}}:tool);
     };
     const system = ()=>[
       `CURRENT GOAL: ${mind.plan!.goal}\nSUCCESS CONDITION: ${mind.plan!.steps.find(step=>step.status==='pending')?.task??mind.plan!.goal}\n${(mind.plan!.version??0)>=3?'This is your intended task, not proof that its assumptions are true.':milestoneEvidence(mind.plan!,actions,observation).length?`STATUS: Achieved. ${following?'Use stop_follow, then ':''}Call finish_goal with completed now.`:'STATUS: Not yet achieved.'}`,
       this.engine.module.manifest.agentInstructions.replace('{name}', observation.self.name),
       mind.plan!.identity?`YOUR SELF-AUTHORED IDENTITY: ${mind.plan!.identity}`:undefined,
-      'End this decision with exactly one physical action; never batch two physical tools. You may use supporting tools first. Follow the suggested method only while current facts support it. If the task cannot be tested with available tools, call finish_goal alone with blocked and explain why; this asks your planner to reconsider without completing the project. Optional intention: a next-step reminder of 1..200 characters, never automatically executed. Past speech is historical, not current navigation.',
-      'Before choosing the physical action, check the current context for a relevant new finding that is absent from notes. If one exists, call journal now, then choose the physical action. Relevant findings include durable world knowledge, exact experiment results, useful locations, corrected beliefs, and unresolved work or uncertainty your future self needs. Routine movement, repeated scans with no new result, and already noted facts do not qualify. Actions and discoveries are recorded automatically; preserve the interpretation and conditions that would otherwise be lost. Do not turn an untested idea or a single failure into a universal fact. When a finding contradicts an old note, replace that specific claim. Treat the planner\'s journal suggestion as this standing condition, not as a physical action to postpone.',
+      'End this decision with exactly one physical action; never batch two physical tools. Supporting tools may come first and consume no world time. Use actual tool calls, not function syntax or analysis in text. Return tool calls without extra prose. Follow suggestedActions only while current facts support them; they describe an earlier situation, not actions to repeat after their purpose is fulfilled.',
+      following?`While following, you can ${tools.some(tool=>tool.name==='journal')?'journal, ':''}follow or say. To inspect or return the task to your planner, call stop_follow first; the full action menu and finish_goal then become available. Check your success condition when new observations or speech arrive; following alone is not evidence of learning.`:tools.some(tool=>tool.name==='finish_goal')?'If observed results satisfy your success condition, call finish_goal alone with completed and cite evidence. Use blocked if the test is unavailable or the method needs reconsideration, or abandoned if you no longer want the task. The planner then chooses your next task before a physical action.':'You already changed tasks in this decision. Choose a physical action before changing again.',
+      supportingCalls<MAX_SUPPORTING_CALLS?'Before acting, call journal only for a new interpretation, uncertainty, commitment or useful condition absent from your notes and automatic records. Routine actions, inventory snapshots and repeated speech need no new note. Use replaceNoteIds for a corrected claim. A journal suggestion is conditional, not a requirement on every turn.':undefined,
+      'Current observations and action results override old notes and plans. Preserve uncertainty: speech reports another creature\'s requests or beliefs, not verified material behavior. A failed or blocked attempt does not rule out other methods. Past speech and locations are historical.',
+      mind.notes.length?'Notes are past interpretations, oldest first; use stable note IDs when correcting them.':undefined,
       lookCalls>=2?'The look limit is exhausted for this decision. Choose from the current observation and available tools.':undefined,
-      supportingCalls>=MAX_SUPPORTING_CALLS?'The supporting-tool limit is exhausted for this decision. Choose one available physical action.':undefined,
-      !following&&mind.notes.length?'Notes are your past interpretations, oldest first. Check them against observed results; an old note or plan cannot override contradictory evidence.':undefined,
+      supportingCalls>=MAX_SUPPORTING_CALLS?'The look and journal limit is exhausted. You may still use available task-control tools before choosing one physical action.':undefined,
     ].filter(Boolean).join('\n');
     const notes=()=>mind.notes.length?{notes:journalContext(mind)}:{};
     const recent=historicalActions(actions),learned=relevantKnowledge(this.engine,observation,true);
@@ -290,19 +292,26 @@ export class AgentRuntime {
       const step=plan.steps.find(step=>step.status==='pending');
       const amounts=inventoryAmounts(observation.self.inventory);
       const inventoryChange=[...new Set([...Object.keys(amounts),...Object.keys(plan.inventoryBaseline??{})])].map(key=>({kind:JSON.parse(key)[0],contents:JSON.parse(key)[1],change:(amounts[key]??0)-(plan.inventoryBaseline?.[key]??0)})).filter(item=>item.change!==0);
-      return {identity:plan.identity,direction:plan.direction,goal:plan.goal,successCondition:step?.task,...(plan.project?{project:plan.project.goal,projectSuccessCondition:plan.project.successCondition,projectProgress:plan.project.progress,why:plan.explanation,suggestedActions:plan.suggestedActions,openQuestions:plan.project.openQuestions}:{}),...((plan.version??0)>=3?{assessment:'Completion is your assessment. Cite relevant availableEvidence in finish_goal; an accepted action alone does not establish success. A blocked test is not a negative experimental result.',availableEvidence:taskEvidenceView(plan,actions),inventoryChangeSinceGoal:inventoryChange}:{criterion:step?.criterion,goalAchieved:!!reached.length,...(step?.criterion?.kind==='collect'?{inventoryChangeSinceGoal:inventoryChange}:{})}),elapsedTaskDecisions:Math.max(0,mind.turns-plan.createdTurn),
+      return {direction:plan.direction,goal:plan.goal,successCondition:step?.task,...(plan.project?{project:plan.project.goal,projectSuccessCondition:plan.project.successCondition,why:plan.explanation,suggestedActions:plan.suggestedActions,methodAgeDecisions:Math.max(0,elapsed)}:{}),...((plan.version??0)>=3?{assessment:'Completion is your assessment. Cite relevant availableEvidence in finish_goal; an accepted action alone does not establish success.',availableEvidence:taskEvidenceView(plan,actions),inventoryChangeSinceGoal:inventoryChange}:{criterion:step?.criterion,goalAchieved:!!reached.length,...(step?.criterion?.kind==='collect'?{inventoryChangeSinceGoal:inventoryChange}:{})}),elapsedTaskDecisions:Math.max(0,mind.turns-plan.createdTurn),
         ...((plan.version??0)<3&&(plan.steps.length!==1||!plan.steps[0].criterion)?{legacyPlan:'This older plan has no verifiable completion criterion. Use finish_goal with abandoned to write your own new goal. Do not continue work whose prerequisite was abandoned.'}:{}),
         ...(reached.length?{milestoneReached:reached,instruction:following?'This milestone is achieved. Use stop_follow, then finish_goal with completed.':'This milestone is achieved. Call finish_goal with completed now.'}:{}),
         ...(elapsed>0&&elapsed%PLAN_REMINDER_INTERVAL===0?{reviewReminder:'Check your goal against recorded progress. Use finish_goal if achieved or no longer useful; otherwise continue. This reminder does not call the planner.'}:{}),
       };
     };
-    const selfContext=()=>({name:observation.self.name,kind:observation.self.kind,...(mind.plan?.identity?{identity:mind.plan.identity}:{})});
+    const selfContext=()=>({name:observation.self.name,kind:observation.self.kind});
     const terrainChanges=observation.terrainChanges.length?{terrainChanges:observation.terrainChanges.map(notice=>notice.message)}:{};
     const physicalImpacts=observation.impacts.length?{physicalImpacts:physicalImpactMessages(observation)}:{};
     const continuation=()=>mind.plan?.intention?{previousIntention:{text:mind.plan.intention,status:lastResult?.ok===false?'The action failed; reconsider this intention.':'Unverified reminder; check current facts before continuing.'}}:{};
-    const normalContext=()=>rounded({plan:planContext(),...continuation(),...(lastResult?{lastResult:{...(lastRecorded?{action:lastRecorded.action,args:lastRecorded.args}:{}),...actionFeedback(compactResult(lastResult,true))}}:{}),inventory:inventoryContext(observation),self:selfContext(),...heard,...terrainChanges,...physicalImpacts,...decisionView(this.engine.observeAt(id,viewAngle),currentCriterion()),...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),progress:progressContext(recent.filter(entry=>entry.atSecond>(mind.plan?.startedAtSecond??0))),...(learned.length?{learned}:{}),...notes(),...(priorActions.length?{recent:priorActions.map(entry=>({...entry,result:actionFeedback(entry.result)}))}:{})});
-    const initial=following?{self:selfContext(),plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges,...physicalImpacts}:normalContext();
-    const cycle:Message[]=[{role:'user',content:JSON.stringify(initial)}];
+    const resultContext=()=>lastResult?{lastResult:{...(lastRecorded?{eventId:lastRecorded.eventId,action:lastRecorded.action,args:lastRecorded.args}:{}),...actionFeedback(compactResult(lastResult,true))}}:{};
+    const progress=()=>progressContext(recent.filter(entry=>entry.atSecond>(mind.plan?.startedAtSecond??0)));
+    const normalContext=()=>{
+      const plan=planContext(),evidenceIds=new Set('availableEvidence' in plan?plan.availableEvidence.map(entry=>entry.eventId):[]);
+      const remainingRecent=priorActions.filter(entry=>!evidenceIds.has(entry.eventId));
+      return rounded({plan,...continuation(),...resultContext(),inventory:inventoryContext(observation),self:selfContext(),...heard,...terrainChanges,...physicalImpacts,...decisionView(this.engine.observeAt(id,viewAngle),currentCriterion()),...(observation.beingFollowed?.length?{beingFollowed:observation.beingFollowed.map(follower=>follower.message)}:{}),progress:progress(),...(learned.length?{learned}:{}),...notes(),...(remainingRecent.length?{recent:remainingRecent.map(entry=>({...entry,result:actionFeedback(entry.result)}))}:{})});
+    };
+    const followingContext=()=>rounded({plan:planContext(),self:selfContext(),...continuation(),following:observation.following,creatures:creatureContext(observation),...resultContext(),...heard,...terrainChanges,...physicalImpacts,progress:progress(),...(learned.length?{learned}:{}),...notes()});
+    const currentContext=()=>following?followingContext():normalContext();
+    const cycle:Message[]=[{role:'user',content:JSON.stringify(currentContext())}];
     let attempts=0,supportingCalls=0,lookCalls=0,correctionRounds=0,invalidCompletions=0,provider='unknown',model='unknown',usage:unknown,content:string|null=null,lastProviderError:string|undefined;
     let tools=makeTools();
     const refreshTools=()=>{
@@ -310,7 +319,7 @@ export class AgentRuntime {
     };
     const resetCorrectionContext=(reason:string)=>{
       correctionRounds=0;
-      cycle.splice(0,cycle.length,{role:'user',content:JSON.stringify(following?{plan:planContext(),...continuation(),following:observation.following,...heard,...terrainChanges,...physicalImpacts}:normalContext())});
+      cycle.splice(0,cycle.length,{role:'user',content:JSON.stringify(currentContext())});
       refreshTools();
       report(id,{state:'waiting',attempts,message:`${reason} Retrying with a fresh constrained prompt; world time is held.`});
     };
@@ -381,7 +390,7 @@ export class AgentRuntime {
         }
         cycle.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
         if(call.function.name==='finish_goal'&&(result as {ok?:boolean})?.ok){
-          planEvents.splice(0,planEvents.length,...await this.preparePlan(id,mind,observation,signal,report,(result as {planningCalls:number}).planningCalls));
+          planEvents.splice(0,planEvents.length,...await this.preparePlan(id,mind,observation,signal,report,(result as {planningCalls:number}).planningCalls,following));
           tools=makeTools();
           cycle.splice(0,cycle.length,{role:'user',content:JSON.stringify(normalContext())});
         }
@@ -408,7 +417,7 @@ export class AgentRuntime {
       const correction=invalidPhysical?'The model chose an invalid physical action.':physical.length>1?'The model chose more than one physical action.':rejectedCall||(!answer.calls.length?'The model returned no tool call.':'');
       if(correction&&++correctionRounds>=MAX_CORRECTION_ROUNDS){resetCorrectionContext(`${correction} The correction cycle reached ${MAX_CORRECTION_ROUNDS} responses.`);continue;}
       if(wasFollowing&&!following)cycle.push({role:'user',content:JSON.stringify(normalContext())});
-      else if(!answer.calls.length)cycle.push({role:'user',content:following?'Choose follow, say (one to three words), or stop_follow to choose another action.':'Choose exactly one available physical action.'});
+      else if(!answer.calls.length)cycle.push({role:'user',content:`No tool call was received. Use an actual available tool call with JSON arguments; writing its name or function syntax in text does not execute it. ${following?`Available tools: ${tools.map(tool=>tool.name).join(', ')}. Use stop_follow to inspect or finish the task.`:tools.some(tool=>tool.name==='finish_goal')?'If the task is complete, blocked or no longer wanted, call finish_goal alone. Otherwise use a supporting tool if needed, then one physical action.':'Use a supporting tool if needed, then one physical action.'} Return tool calls without extra prose.`});
     }
   }
   commit(turn: PreparedTurn) {

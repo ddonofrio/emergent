@@ -306,7 +306,7 @@ test('following asks every world second; stopping stages a free normal action th
     respond(p.requests[0],{action:'follow',entityId:'duck'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.equal(engine.tick,20);assert.ok(engine.entity('t1').motion);
     r.clock.pump();await until(()=>p.requests.length===2);
-    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say']);
+    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal']);
     const prompt=JSON.parse(p.requests[1].body.messages.at(-1).content);assert.equal(prompt.following.entityId,'duck');assert.ok(Math.abs(prompt.following.metres-3)<.01);
     assert.equal(prompt.inventory,undefined);assert.equal(prompt.notes,undefined);assert.equal(prompt.hints,undefined);assert.equal(prompt.recent,undefined);
     const frozen=engine.state();r.advance(90000);assert.deepEqual(engine.state(),frozen);
@@ -334,7 +334,7 @@ test('a legacy goal-learning journal offer cannot interrupt execution after foll
     engine.act('t1',{action:'follow',entityId:'duck'});
     Object.assign(r.runtime.minds.get('t1')!,{journalOffer:'You completed a goal. What memorable fact did you learn about the world?'});
     r.clock.pump();await until(()=>p.requests.length===1);
-    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say']);
+    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal']);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/memorable fact/);
     respondTool(p.requests[0],'stop_follow',{});await until(()=>p.requests.length===2);
     assert.doesNotMatch(p.requests[1].body.messages[0].content,/memorable fact/);
@@ -715,8 +715,7 @@ test('journal favors durable world knowledge and persists notes for future promp
     assert.doesNotMatch(p.planningRequests[0].body.messages[0].content,/Your mission is to complete/);
     assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='finish_goal').function.description,/completed: observed results/);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/choose_action/);
-    assert.match(p.requests[0].body.messages[0].content,/Before choosing the physical action.*call journal now/);
-    assert.ok(JSON.parse(p.requests[0].body.messages.at(-1).content).plan.suggestedActions.some((action:string)=>/\bjournal\b/i.test(action)));
+    assert.match(p.requests[0].body.messages[0].content,/call journal only for a new interpretation/);
     const firstContext=JSON.parse(p.requests[0].body.messages.at(-1).content);
     assert.equal(firstContext.plan.matchingReachableChoices,undefined);
     assert.equal(firstContext.plan.goalAchieved,undefined);

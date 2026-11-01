@@ -36,7 +36,7 @@ test('follow stays offered with only observed target IDs and validates its twent
   assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,false);
   engine.setEntityEnabled('t2',true);engine.entity('t2').kind='duck';engine.entity('t2').controller='wander';engine.entity('t2').height=.65;
   assert.equal(engine.act('t1',{action:'follow',entityId:'t2'}).ok,true);
-  assert.deepEqual(worldTools(engine,'t1',memory).map(tool=>tool.name),['follow','stop_follow','say']);
+  assert.deepEqual(worldTools(engine,'t1',memory).map(tool=>tool.name),['follow','stop_follow','say','journal']);
   assert.equal(engine.act('t1',{action:'walk',distance:1}).ok,false);
 });
 

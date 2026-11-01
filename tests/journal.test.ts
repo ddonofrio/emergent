@@ -49,7 +49,7 @@ test('compaction retries outages and invalid output without changing source note
       assert.equal(request.reasoning,'minimum');
       assert.deepEqual((request.tools as any[]).map(tool=>tool.function.name),['submit_journal']);
       const system=(request.messages[0] as any).content;
-      assert.match(system,/permanently forgotten/);assert.match(system,/Do not invent/);
+      assert.match(system,/interpretations will be forgotten/);assert.match(system,/Do not invent/);
       const context=JSON.parse((request.messages[1] as any).content);assert.deepEqual(context.journal,notes);
       if(++calls===1)throw new Error('Offline');
       if(calls===2)return response([...notes,'An eleventh entry.']);

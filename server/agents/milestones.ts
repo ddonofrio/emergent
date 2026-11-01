@@ -1,5 +1,5 @@
 import { distance, type Observation, type AgentPlan, type Inventory } from '../../src/core/types';
-import { historicalActions, type recentActions } from './context';
+import { actionFeedback, historicalActions, type recentActions } from './context';
 
 export function inventoryAmounts(inventory:Inventory|null) {
   const amounts:Record<string,number>={};
@@ -17,7 +17,11 @@ export function goalEvidence(plan:AgentPlan,actions:ReturnType<typeof recentActi
 export function taskEvidenceView(plan:AgentPlan,actions:ReturnType<typeof recentActions>) {
   const evidence=goalEvidence(plan,actions);
   const changes=evidence.filter(item=>item.result.collected||item.result.shaped||item.result.placed||item.result.heardBy?.length||item.result.inventoryDelta?.length).slice(-8);
-  return [...new Map([...changes,...evidence.slice(-6)].map(item=>[item.eventId,item])).values()].sort((a,b)=>a.eventId-b.eventId);
+  return evidenceContext([...new Map([...changes,...evidence.slice(-6)].map(item=>[item.eventId,item])).values()].sort((a,b)=>a.eventId-b.eventId));
+}
+// Presentation only: retain every selected ID and effect without repeating the message.
+export function evidenceContext(evidence:ReturnType<typeof goalEvidence>) {
+  return evidence.map(({message:_,result,...entry})=>({...entry,result:actionFeedback(result)}));
 }
 export function referencedGoalEvidence(plan:AgentPlan,actions:ReturnType<typeof recentActions>,ids:unknown) {
   if(!Array.isArray(ids)||!ids.length||ids.length>10||ids.some(id=>!Number.isInteger(id)))return undefined;

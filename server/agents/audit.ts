@@ -2,7 +2,7 @@ import type { Store } from '../store';
 import type { CompletionRequest, CompletionResult } from './providers';
 import { InvalidCompletionError, ProviderUnavailableError } from './providers';
 
-export const PROMPT_VERSION='self-authored-identity-v7';
+export const PROMPT_VERSION='focused-context-v8';
 export class InferenceAuditError extends Error {}
 
 function persist<T>(write:()=>T):T {

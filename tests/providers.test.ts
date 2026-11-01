@@ -243,17 +243,17 @@ test('token-limit retries replace the previous correction instead of growing the
   assert.match(String((candidates[2].messages.at(-1) as {content?:unknown}).content),/10000 reasoning tokens and 2200 output tokens/);
 });
 
-test('minimum reasoning retries describe disabled thinking without a zero-token instruction',async()=>{
+test('minimum reasoning retries request direct output even when transport reserves reasoning headroom',async()=>{
   const candidates:CompletionRequest[]=[];
   const original={...request,reasoning:'minimum' as const,messages:[{role:'user',content:'Choose an action.'}]};
   await retryTokenLimitedCompletion(original,AbortSignal.timeout(1000),async candidate=>{
     candidates.push(candidate);
-    if(candidates.length===1)throw new OutputTokenLimitError('local',900,0);
+    if(candidates.length===1)throw new OutputTokenLimitError('local',900,DEFAULT_REASONING_TOKENS);
     return result(provider('local'));
   });
   const correction=String((candidates[1].messages.at(-1) as {content?:unknown}).content);
   assert.match(correction,/Reasoning is disabled/);
-  assert.doesNotMatch(correction,/0 reasoning tokens/);
+  assert.doesNotMatch(correction,/reasoning tokens/);
 });
 
 test('reported reasoning and visible output usage are enforced separately',async t=>{

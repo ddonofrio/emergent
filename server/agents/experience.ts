@@ -53,7 +53,7 @@ export class ExperienceMemory {
       experiments,
       experimentCoverage:{retained:this.experiments.size,shown:experiments.length,note:'Distinct attempts are grouped by action, input conditions and result. These records do not establish outcomes for other inputs.'},
       visitedRegions:[...this.places.values()].slice(-32),
-      taskHistory:[...this.tasks.values()].slice(-16).map(({eventId,atSecond,plan})=>({eventId,atSecond,goal:plan.goal,successCondition:plan.steps[0]?.task,status:plan.status,assessment:plan.explanation,evidenceEventIds:plan.steps[0]?.evidenceEventIds??[],project:plan.project?.goal,projectProgress:plan.project?.progress})),
+      taskHistory:[...this.tasks.values()].slice(-16).map(({eventId,atSecond,plan})=>({eventId,atSecond,goal:plan.goal,successCondition:plan.steps[0]?.task,status:plan.status,assessment:plan.explanation,evidenceEventIds:plan.steps[0]?.evidenceEventIds??[],project:plan.project?.goal})),
       pastSpeech:[...this.speech.values()].slice(-12),
     });
   }

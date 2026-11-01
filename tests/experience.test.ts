@@ -47,6 +47,25 @@ test('experience retains exact older experiments, isolates actors and rebuilds a
   }finally{store.close();}
 });
 
+test('task history omits repeated project snapshots while retaining outcomes, citations and durable plans',()=>{
+  const {engine,store,record}=fixture();
+  try{
+    const completed:AgentPlan={...plan(),status:'completed',steps:[{task:'I have observed two different tested inputs.',status:'completed',evidenceEventIds:[42,43]}],explanation:'The two recorded tests had different outcomes.'};
+    engine.step();engine.event('t1','plan','Completed.',{plan:completed});record();
+    const next:AgentPlan={...plan(),createdTurn:2,startedAtSecond:engine.time,goal:'Inspect another input.'};
+    engine.step();engine.event('t1','plan','New task.',{plan:next});record();
+    const view=new ExperienceMemory(store,'t1').read(engine.tick,next);
+    assert.equal(view.taskHistory.length,2);
+    assert.deepEqual(view.taskHistory[0].evidenceEventIds,[42,43]);
+    assert.equal(view.taskHistory[0].assessment,completed.explanation);
+    assert.equal(view.taskHistory[0].successCondition,completed.steps[0].task);
+    assert.ok(view.taskHistory.every(task=>!Object.hasOwn(task,'projectProgress')));
+    const recordedPlan=(store.eventsAt(engine.tick,'t1').find(event=>event.type==='plan')!.data as {plan:AgentPlan}).plan;
+    assert.deepEqual(recordedPlan.project,completed.project);
+    assert.deepEqual(new ExperienceMemory(store,'t1').read(engine.tick,next),view);
+  }finally{store.close();}
+});
+
 test('planner sees accumulated experience and learned recipes while holding a different object',async()=>{
   const {engine,store,record,observe}=fixture();
   try{
@@ -82,14 +101,16 @@ test('planner sees accumulated experience and learned recipes while holding a di
       assert.match(system,/You are Flint, a curious, embodied Troglodyte/);
       assert.match(system,/same individual across decisions/);
       assert.match(system,/no observer access, external task, or score/);
-      assert.deepEqual(context.self,{name:'Flint',kind:'troglodyte',identity:projectFields.identity});
-      assert.equal(context.plan.identity,projectFields.identity);
+      assert.deepEqual(context.self,{name:'Flint',kind:'troglodyte'});
+      assert.equal(system.split(projectFields.identity).length-1,1);
+      assert.equal(context.plan.identity,undefined);
       assert.equal(context.plan.direction,projectFields.direction);
       assert.equal(context.plan.project,projectFields.project.goal);
       assert.equal(context.plan.projectSuccessCondition,projectFields.project.successCondition);
-      assert.equal(context.plan.projectProgress,projectFields.project.progress);
-      assert.deepEqual(context.plan.openQuestions,projectFields.project.openQuestions);
+      assert.equal(context.plan.projectProgress,undefined);
+      assert.equal(context.plan.openQuestions,undefined);
       assert.deepEqual(context.plan.suggestedActions,projectFields.suggestedActions);
+      assert.equal(context.plan.methodAgeDecisions,0);
       assert.equal(context.plan.reviewInDecisions,undefined);
       return answer('wait',{});
     };

@@ -26,7 +26,7 @@ test('planning runs initially and after thirty decisions, including legacy plans
   const current:AgentPlan={version:4,...structuredClone(projectFields),goal:authored.goal,status:'active',steps:[{task:authored.successCondition,status:'pending'}],explanation:authored.explanation,createdTurn:1,reviewedTurn:1,startedAtSecond:0};
   assert.equal(needsPlanReview(current,2),false);
   assert.equal(needsPlanReview({...current,identity:undefined},2),true,'Version 4 plans without a self-authored identity are refreshed immediately.');
-  assert.equal(needsPlanReview({...current,suggestedActions:['Inspect the surroundings.']},2),true,'Version 4 plans without the standing journal action are refreshed.');
+  assert.equal(needsPlanReview({...current,suggestedActions:['Inspect the surroundings.']},2),false,'An applicable method does not need a journal instruction.');
 });
 
 test('scanning, holding, cracking, and older successes cannot prove collection',()=>{
@@ -101,20 +101,16 @@ test('the planner authors goals outside any catalog and preserves its exact succ
   assert.equal(needsPlanReview(next,32),false,'A free-text goal needs no programmed criterion.');
 });
 
-test('the planner rejects a plan without a standing journal action',async()=>{
+test('the planner accepts an authored method without adding a standing journal action',async()=>{
   let calls=0;
+  const suggestedActions=['Inspect the current surroundings.'];
   const next=await planDecision({...base(),async complete(request){
-    if(++calls===1){
-      const schema=(request.tools[0] as any).function.parameters.properties.suggestedActions;
-      assert.match(schema.description,/call journal after a relevant new finding/);
-      return answer('set_plan',{...structuredClone(projectFields),suggestedActions:['Inspect the current surroundings.'],...authored});
-    }
-    const context=JSON.parse((request.messages[1] as any).content);
-    assert.match(context.correction,/call journal after a relevant new finding/);
-    return answer('set_plan',authored);
+    calls++;
+    return answer('set_plan',{...structuredClone(projectFields),suggestedActions,...authored});
   }});
-  assert.equal(calls,2);
-  assert.ok(next.suggestedActions!.some(action=>/\bjournal\b/i.test(action)));
+  assert.equal(calls,1);
+  assert.deepEqual(next.suggestedActions,suggestedActions);
+  assert.equal(needsPlanReview(next,32),false);
 });
 
 test('planning accepts a double-sized draft and compacts it without asking the planner again',async()=>{
