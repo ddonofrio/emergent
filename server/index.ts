@@ -7,7 +7,7 @@ import { Engine } from '../src/core/engine';
 import { loadModule } from '../src/modules';
 import { Store } from './store';
 import { AgentRuntime } from './agents/runtime';
-import { discoverProviderModels, enabledProviders, normalizeSavedProvider, ProviderChain, providersFromEnv, resolveProviderApiKey, resolveProviderVastToken, type ProviderConfig, type ProviderStrategy } from './agents/providers';
+import { discoverProviderModels, enabledProviders, isReasoningSettings, normalizeReasoningSettings, normalizeSavedProvider, ProviderChain, providersFromEnv, resolveProviderApiKey, resolveProviderVastToken, type ProviderConfig, type ProviderStrategy, type ReasoningSettings } from './agents/providers';
 import { TurnClock } from './turn-clock';
 import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
 
@@ -26,9 +26,10 @@ const optionalTurnLimit = (value: string | undefined) => {
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error('AGENT_MAX_TURNS must be an optional positive integer.');
   return parsed;
 };
-let providers = providersFromEnv(),providerStrategy:ProviderStrategy='fallback';
+let providers = providersFromEnv(),providerStrategy:ProviderStrategy='fallback',reasoningSettings=normalizeReasoningSettings(undefined);
 try{
-  const saved=JSON.parse(await readFile(llmConfigPath,'utf8')) as {providers?:ProviderConfig[];strategy?:ProviderStrategy|'single-model'};
+  const saved=JSON.parse(await readFile(llmConfigPath,'utf8')) as {providers?:ProviderConfig[];strategy?:ProviderStrategy|'single-model';reasoning?:unknown};
+  reasoningSettings=normalizeReasoningSettings(saved.reasoning);
   if(Array.isArray(saved.providers)&&saved.providers.every(provider=>provider&&typeof provider.id==='string'&&typeof provider.name==='string'&&typeof provider.apiKey==='string'&&typeof provider.baseUrl==='string'&&typeof provider.model==='string')){
     const normalized=saved.providers.map(normalizeSavedProvider),savedIds=new Set(normalized.map(provider=>provider.id));
     providers=[...normalized,...providers.filter(provider=>!savedIds.has(provider.id))];
@@ -39,8 +40,8 @@ if (enabledProviders(providers).some(provider => provider.modelDiscovery)) {
   try { await new ProviderChain(enabledProviders(providers)).refreshDiscoveredModels(AbortSignal.timeout(2000)); }
   catch { /* Discovery is retried whenever the local fallback is needed. */ }
 }
-const agents = new AgentRuntime(engine, store, { providers:enabledProviders(providers), maxTurns: optionalTurnLimit(process.env.AGENT_MAX_TURNS),scriptedDemo });
-agents.setInferenceConfig(enabledProviders(providers),providerStrategy);
+const agents = new AgentRuntime(engine, store, { providers:enabledProviders(providers), maxTurns: optionalTurnLimit(process.env.AGENT_MAX_TURNS),scriptedDemo,reasoning:reasoningSettings });
+agents.setInferenceConfig(enabledProviders(providers),providerStrategy,reasoningSettings);
 let autoPausedForMissingModel=agents.mode==='waiting';
 for(const event of store.eventsAt(engine.tick,'',500)){
   if(event.type!=='decision'&&event.type!=='movement-decision')continue;
@@ -54,6 +55,7 @@ const production = process.argv.includes('--production');
 const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
 const publicLlmConfig = () => ({
   strategy: agents.inference.providers.length < 2 ? 'first-only' : agents.inference.strategy,
+  reasoning:agents.reasoningSettings,
   currentStatus:agents.inference.currentStatus,
   providers: providers.map(({id,type,enabled,name,baseUrl,model,region,displayModel,apiKey,apiKeyRemoved,vastToken,vastTokenRemoved,vastContainerLabel,tokenless,maxOutputTokens,enableThinking})=>({id,type:type??'openai-compatible',enabled:enabled!==false,name,baseUrl,model,region,displayModel,maxOutputTokens,enableThinking,apiKeyConfigured:!!apiKey,apiKeyRemoved:apiKeyRemoved===true,vastTokenConfigured:!!vastToken,vastTokenRemoved:vastTokenRemoved===true,vastContainerLabel,tokenless:tokenless===true,health:enabled===false?{state:'unknown' as const,detail:'Disabled in settings.'}:agents.inference.healthFor(id)})),
 });
@@ -101,9 +103,11 @@ const server = createServer(async (req, res) => {
       }
       if(url.pathname==='/api/llm-config'&&req.method==='POST'){
         let body='';for await(const chunk of req){body+=chunk;if(body.length>16384){json(res,{error:'Configuration is too large.'},413);return;}}
-        const data=JSON.parse(body) as {providers?:unknown;strategy?:unknown};
+        const data=JSON.parse(body) as {providers?:unknown;strategy?:unknown;reasoning?:unknown};
         const strategies=new Set(['first-only','round-robin','fallback','master-slaves']);
         if(!Array.isArray(data.providers)||data.providers.length>12||!strategies.has(String(data.strategy))){json(res,{error:'Choose a supported strategy and up to 12 models.'},400);return;}
+        if(data.reasoning!==undefined&&!isReasoningSettings(data.reasoning)){json(res,{error:'Choose a supported reasoning level for every inference phase.'},400);return;}
+        const nextReasoning:ReasoningSettings=data.reasoning===undefined?agents.reasoningSettings:data.reasoning;
         const previousProviders=providers,previous=new Map(previousProviders.map(provider=>[provider.id,provider]));
         const ids=new Set<string>();const next:ProviderConfig[]=[];
         for(const value of data.providers){
@@ -144,9 +148,9 @@ const server = createServer(async (req, res) => {
           next.push({id,type:type as ProviderConfig['type'],enabled,name,apiKey,...(apiKeyRemoved?{apiKeyRemoved:true}:{}),...(vastToken?{vastToken}:{}),...(vastTokenRemoved?{vastTokenRemoved:true}:{}),...(vastContainerLabel?{vastContainerLabel}:{}),...(tokenless?{tokenless:true}:{}),baseUrl,model,...(region?{region}:{}),timeoutMs:old?.timeoutMs,...(maxOutputTokens===undefined?{}:{maxOutputTokens:Number(maxOutputTokens)}),...(enableThinking===undefined?{}:{enableThinking:enableThinking as boolean}),headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined});
         }
         const strategy=data.strategy as ProviderStrategy,tempPath=`${llmConfigPath}.tmp`;
-        await writeFile(tempPath,JSON.stringify({strategy,providers:next}),{encoding:'utf8',mode:0o600});await rename(tempPath,llmConfigPath);
+        await writeFile(tempPath,JSON.stringify({strategy,reasoning:nextReasoning,providers:next}),{encoding:'utf8',mode:0o600});await rename(tempPath,llmConfigPath);
         const resumeAfterModelConfiguration=autoPausedForMissingModel;
-        providers=next;agents.setInferenceConfig(enabledProviders(providers),strategy);
+        providers=next;reasoningSettings={...nextReasoning};agents.setInferenceConfig(enabledProviders(providers),strategy,reasoningSettings);
         if(agents.mode==='waiting'){autoPausedForMissingModel=true;turnClock.setEnabled(false);}
         else if(resumeAfterModelConfiguration&&!worldStartPaused){autoPausedForMissingModel=false;turnClock.setEnabled(true);}
         const config=publicLlmConfig();broadcast('llm-config',config);broadcast('settings',{parallelRequests:agents.parallelRequests});json(res,{...metadata(),llmConfig:config});return;

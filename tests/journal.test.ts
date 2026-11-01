@@ -43,9 +43,10 @@ test('journal and goal reasons accept 500 characters and reject excess with prec
 
 test('compaction retries outages and invalid output without changing source notes',async()=>{
   const source=[...notes],controller=new AbortController();let calls=0;
-  const result=await compactJournal({name:'Moss',notes:source,incoming:'Build a shelter.',signal:controller.signal,retryDelayMs:1,waiting(){},
+  const result=await compactJournal({name:'Moss',notes:source,incoming:'Build a shelter.',signal:controller.signal,retryDelayMs:1,reasoning:'minimum',waiting(){},
     async complete(request){
       assert.deepEqual(source,notes);
+      assert.equal(request.reasoning,'minimum');
       assert.deepEqual((request.tools as any[]).map(tool=>tool.function.name),['submit_journal']);
       const system=(request.messages[0] as any).content;
       assert.match(system,/permanently forgotten/);assert.match(system,/Do not invent/);

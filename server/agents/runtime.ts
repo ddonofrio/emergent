@@ -6,7 +6,7 @@ import { PLAN_REMINDER_INTERVAL, PLAN_REVIEW_INTERVAL, PRIVATE_NOTE_LIMIT } from
 import { TICKS_PER_SECOND, TURN_TICKS, type DecisionStatus } from '../../src/core/time';
 import { isObservedMaterialKnowledge } from '../../src/core/knowledge';
 import type { Store } from '../store';
-import { DEFAULT_REASONING, DEFAULT_REASONING_TOKENS, InvalidCompletionError, ProviderChain, retryTokenLimitedCompletion, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ToolCall } from './providers';
+import { DEFAULT_REASONING, DEFAULT_REASONING_TOKENS, InvalidCompletionError, normalizeReasoningSettings, ProviderChain, retryTokenLimitedCompletion, type CompletionRequest, type ProviderConfig, type ProviderStrategy, type ReasoningSettings, type ToolCall } from './providers';
 import { worldTools, type Memory } from './tools';
 import { actionFeedback, bodyContext, compactResult, compactView, decisionView, historicalActions, inventoryContext, planningActions, progressContext, recentActions, relevantKnowledge, rounded, speechContext } from './context';
 import { compactJournal } from './journal-compaction';
@@ -66,9 +66,11 @@ export class AgentRuntime {
   private readonly experience = new Map<string, ExperienceMemory>();
   inference: ProviderChain;
   parallelRequests: boolean;
+  reasoningSettings:ReasoningSettings;
   constructor(readonly engine: Engine, readonly store: Store, readonly config: {
-    providers: ProviderConfig[]; maxTurns: number | null; retryDelayMs?: number; scriptedDemo?: boolean;
+    providers: ProviderConfig[]; maxTurns: number | null; retryDelayMs?: number; scriptedDemo?: boolean;reasoning?:ReasoningSettings;
   }) {
+    this.reasoningSettings=normalizeReasoningSettings(config.reasoning);this.config.reasoning=this.reasoningSettings;
     this.parallelRequests=store.loadParallelRequests();
     this.inference = new ProviderChain(config.providers);
     for (const entity of engine.entities.filter(e => e.controller === 'agent')) {
@@ -92,8 +94,9 @@ export class AgentRuntime {
       auditedCompletion(this.store,this.engine.tick,id,phase,candidate,signal,()=>this.inference.complete(candidate,signal,onAttempt)));
   }
   setParallelRequests(enabled:boolean) { this.store.saveParallelRequests(enabled);this.parallelRequests=enabled; }
-  setInferenceConfig(providers:ProviderConfig[],strategy:ProviderStrategy){
+  setInferenceConfig(providers:ProviderConfig[],strategy:ProviderStrategy,reasoning:ReasoningSettings=this.reasoningSettings){
     this.config.providers=providers;
+    this.reasoningSettings=normalizeReasoningSettings(reasoning);this.config.reasoning=this.reasoningSettings;
     this.inference=new ProviderChain(providers,strategy);
   }
   async prepareMovementPrompts(signal:AbortSignal,report:Report):Promise<PreparedMovementPrompt[]> {
@@ -113,7 +116,7 @@ export class AgentRuntime {
       while(true){
         signal.throwIfAborted();attempts++;report(input.id,{state:attempts===1?'thinking':'waiting',attempts,message:'Considering speech heard during movement; world time is held.'});
         try{
-          const answer=await this.infer(input.id,'movement',{messages,tools,max_tokens:300},signal,(candidate,index)=>report(input.id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));
+          const answer=await this.infer(input.id,'movement',{messages,tools,max_tokens:300,reasoning:this.reasoningSettings.movement},signal,(candidate,index)=>report(input.id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}; world time is held.`}));
           input.mind.modelTurns++;provider=answer.provider;model=answer.model;usage=answer.usage;content=answer.content;
           const calls=answer.calls.filter(call=>call.function.name==='continue_moving'||call.function.name==='stop_moving');
           if(calls.length===1){
@@ -207,14 +210,14 @@ export class AgentRuntime {
       const hands=[null,...(observation.self.inventory?.stacks.map((_,index)=>index)??[])];
       const capabilitiesAfterChangingHands=hands.flatMap(hand=>{
         const stack=hand===null?undefined:observation.self.inventory!.stacks[hand];
-        const tools=worldTools(this.engine,id,mind,{following:false,availableOnly:false,previewHand:hand})
+        const tools=worldTools(this.engine,id,mind,{following:false,availableOnly:false,capabilityPreview:true,previewHand:hand})
           .filter(tool=>!tool.description.startsWith('Disabled')&&!knownCapabilities.has(tool.name))
           .map(tool=>({name:tool.name,description:tool.description,parameters:tool.parameters}));
         return tools.length?[{requires:{holding:stack?.kind??'empty',...(stack?.contents?{contents:stack.contents}:{}),...(observation.following?{stopFollowing:true}:{})},tools}]:[];
       });
       const experience=this.experience.get(id)!.read(observation.tick,cached?.plan??mind.plan);
       const context={...abstractPlanningContext(this.engine,observation,mind,capabilities,actions.slice(-PLAN_REVIEW_INTERVAL)),capabilitiesAfterChangingHands,experience};
-      staged.plan=await planDecision({name:observation.self.name,planningInstructions:this.engine.module.manifest.planningInstructions,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,upgrade:!cached&&upgrade,reviewReason,context,actions,observation,signal,retryDelayMs:this.config.retryDelayMs,
+      staged.plan=await planDecision({name:observation.self.name,planningInstructions:this.engine.module.manifest.planningInstructions,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,upgrade:!cached&&upgrade,reviewReason,context,actions,observation,signal,retryDelayMs:this.config.retryDelayMs,reasoning:this.reasoningSettings.planning,compactionReasoning:this.reasoningSettings.planCompaction,
         complete:async(request,abort)=>{
           report(id,{state:'planning',message:'Planning a goal and reviewing steps; world time is held.'});
           const answer=await this.infer(id,'planning',request,abort,(provider)=>report(id,{state:'planning',message:`Planning with ${provider.name}; world time is held.`}));
@@ -242,7 +245,7 @@ export class AgentRuntime {
     const journalEntries:string[]=[];
     const journalOptions={
       compactJournal:async(notes:readonly string[],incoming:string)=>{
-        const after=await compactJournal({name:observation.self.name,notes,incoming,signal,retryDelayMs:this.config.retryDelayMs,
+        const after=await compactJournal({name:observation.self.name,notes,incoming,signal,retryDelayMs:this.config.retryDelayMs,reasoning:this.reasoningSettings.journalCompaction,
           complete:async(request,abort)=>{const result=await this.infer(id,'journal',request,abort,(candidate)=>report(id,{state:'thinking',message:`Compacting journal with ${candidate.name}; world time is held.`}));mind.modelTurns++;return result;},
           waiting:message=>report(id,{state:'waiting',message})});
         journalCompactions.push({before:[...notes],after,incoming});return after;
@@ -315,7 +318,7 @@ export class AgentRuntime {
         signal.throwIfAborted();attempts++;
         report(id,{state:attempts===1?'thinking':'waiting',attempts,message:lastProviderError?`Model error: ${lastProviderError}. Retrying; world time is held.`:'Waiting for an inference provider; world time is held.'});
         try{
-          const answer=await this.infer(id,'action',{messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:'default'},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}${lastProviderError?`; previous model error: ${lastProviderError}`:''}; world time is held.`}));
+          const answer=await this.infer(id,'action',{messages:[{role:'system',content:system()},...cycle],tools:tools.map(({name,description,parameters})=>({type:'function',function:{name,description,parameters}})),max_tokens:900,reasoning:this.reasoningSettings.action},signal,(candidate,index)=>report(id,{state:index?'waiting':'thinking',attempts,message:`${index?'Falling back to':'Trying'} ${candidate.name}${lastProviderError?`; previous model error: ${lastProviderError}`:''}; world time is held.`}));
           lastProviderError=undefined;return answer;
         }
         catch(error){

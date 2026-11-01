@@ -66,6 +66,12 @@ test('planner sees accumulated experience and learned recipes while holding a di
         assert.ok(context.situation.experience.experiments.some((item:any)=>item.subject==='wood'&&item.parameters.point==='top_center'));
         assert.ok(context.situation.capabilities.some((tool:any)=>tool.name==='store'&&tool.description));
         assert.ok(context.situation.capabilities.some((tool:any)=>tool.name==='journal'&&tool.parameters.properties.note));
+        const previews=context.situation.capabilitiesAfterChangingHands as {requires:{holding:string};tools:{name:string;description:string}[]}[];
+        assert.ok(previews.every(option=>option.tools.every(tool=>tool.name!=='open'&&tool.name!=='close')));
+        assert.doesNotMatch(JSON.stringify(previews),/Open one reachable closed door|Close one reachable open door/);
+        const empty=previews.find(option=>option.requires.holding==='empty');
+        assert.match(empty!.tools.find(tool=>tool.name==='hit')!.description,/when one is available/);
+        assert.match(empty!.tools.find(tool=>tool.name==='pickup')!.description,/when one is available/);
         const wood=context.situation.capabilitiesAfterChangingHands.find((option:any)=>option.requires.holding==='wood');
         assert.ok(wood.tools.some((tool:any)=>tool.name==='strike_held'&&tool.parameters.properties.point.enum.includes('bottom_center')));
         assert.equal(engine.held(engine.entity('t1'))!.kind,'bucket','Previewing capabilities must not change the world.');

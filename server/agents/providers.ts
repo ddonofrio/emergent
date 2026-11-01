@@ -58,11 +58,33 @@ export function normalizeSavedProvider(provider: ProviderConfig): ProviderConfig
 }
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high';
 export type ReasoningProfile = 'default' | 'minimum' | 'medium' | 'maximum';
+export interface ReasoningSettings {
+  movement:ReasoningProfile;
+  action:ReasoningProfile;
+  planning:ReasoningProfile;
+  planCompaction:ReasoningProfile;
+  journalCompaction:ReasoningProfile;
+}
 export type ProviderStrategy = 'first-only' | 'round-robin' | 'fallback' | 'master-slaves';
 export interface ProviderHealth { state:'unknown'|'ok'|'bad'; detail:string; inFlight?:boolean; }
 export interface CompletionRequest { messages: unknown[]; tools: unknown[]; max_tokens: number; reasoning?: ReasoningProfile; reasoning_tokens?: number; }
 export const DEFAULT_REASONING:NonNullable<CompletionRequest['reasoning']>='maximum';
 export const DEFAULT_REASONING_TOKENS=10000;
+export const DEFAULT_REASONING_SETTINGS:ReasoningSettings={movement:'default',action:'default',planning:'maximum',planCompaction:'default',journalCompaction:'default'};
+const reasoningProfiles:ReasoningProfile[]=['default','minimum','medium','maximum'];
+export function isReasoningProfile(value:unknown):value is ReasoningProfile {
+  return typeof value==='string'&&reasoningProfiles.includes(value as ReasoningProfile);
+}
+export function isReasoningSettings(value:unknown):value is ReasoningSettings {
+  if(!value||typeof value!=='object')return false;
+  const settings=value as Record<keyof ReasoningSettings,unknown>,keys=Object.keys(DEFAULT_REASONING_SETTINGS);
+  return Object.keys(value).length===keys.length&&keys.every(key=>isReasoningProfile(settings[key as keyof ReasoningSettings]));
+}
+export function normalizeReasoningSettings(value:unknown):ReasoningSettings {
+  if(!value||typeof value!=='object')return{...DEFAULT_REASONING_SETTINGS};
+  const settings=value as Partial<Record<keyof ReasoningSettings,unknown>>;
+  return Object.fromEntries(Object.entries(DEFAULT_REASONING_SETTINGS).map(([key,fallback])=>[key,isReasoningProfile(settings[key as keyof ReasoningSettings])?settings[key as keyof ReasoningSettings]:fallback])) as unknown as ReasoningSettings;
+}
 export interface CompletionResult {
   provider: string;
   providerName: string;
@@ -375,7 +397,9 @@ export class ProviderChain {
     const {reasoning,reasoning_tokens,max_tokens,...completion}=request;
     const reasoningEffort=reasoning&&reasoning!=='default'&&provider.reasoningOptions?.length?selectReasoningEffort(provider.reasoningOptions,reasoning):undefined;
     const outputLimit=provider.maxOutputTokens??max_tokens;
-    const reasoningLimit=reasoning==='maximum'||reasoning==='medium'?(reasoning_tokens??DEFAULT_REASONING_TOKENS):0;
+    // Default leaves the effort selector to the provider, but it still needs room
+    // for reasoning tokens. Only minimum explicitly removes that reserved budget.
+    const reasoningLimit=reasoning==='minimum'?0:(reasoning_tokens??DEFAULT_REASONING_TOKENS);
     const generationLimit=outputLimit+reasoningLimit;
     try {
       response = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {

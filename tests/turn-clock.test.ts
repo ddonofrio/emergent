@@ -8,7 +8,7 @@ import { island } from '../src/modules/island';
 import type { Action, Block, Entity, Frame } from '../src/core/types';
 import { Store } from '../server/store';
 import { AgentRuntime } from '../server/agents/runtime';
-import { DEFAULT_REASONING_TOKENS, ProviderChain, providersFromEnv, type ProviderConfig } from '../server/agents/providers';
+import { DEFAULT_REASONING_SETTINGS, DEFAULT_REASONING_TOKENS, ProviderChain, providersFromEnv, type ProviderConfig } from '../server/agents/providers';
 import { TurnClock } from '../server/turn-clock';
 import { advancePlayback, fastScrubSpeed } from '../src/view/playback-clock';
 import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS } from '../src/core/time';
@@ -215,9 +215,10 @@ test('an accepted plan survives restart before the physical decision and becomes
 test('multiple physical actions are rejected before one corrected action consumes a world turn',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
+    r.runtime.setInferenceConfig(r.runtime.config.providers,'fallback',{...DEFAULT_REASONING_SETTINGS,action:'maximum'});
     engine.setEntityEnabled('t2',false);engine.setEntityEnabled('duck',false);
     r.clock.pump();await until(()=>p.requests.length===1);
-    assert.equal(p.requests[0].body.max_tokens,900);assert.equal(p.requests[0].body.max_completion_tokens,900);assert.equal(p.requests[0].body.reasoning_effort,undefined);assert.match(p.requests[0].body.messages[0].content,/End this decision with exactly one physical action/i);
+    assert.equal(p.requests[0].body.max_tokens,10900);assert.equal(p.requests[0].body.max_completion_tokens,10900);assert.equal(p.requests[0].body.reasoning_effort,undefined);assert.match(p.requests[0].body.messages[0].content,/End this decision with exactly one physical action/i);
     respondActions(p.requests[0],[{action:'turn',angle:90},{action:'wait'}]);
     await until(()=>p.requests.length===2);
     assert.equal(engine.tick,0);assert.equal(engine.entity('t1').yaw,0);
@@ -232,6 +233,7 @@ test('multiple physical actions are rejected before one corrected action consume
 test('speech wakes a moving agent with only continue or stop while world time remains frozen',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
+    r.runtime.setInferenceConfig(r.runtime.config.providers,'fallback',{...DEFAULT_REASONING_SETTINGS,movement:'medium'});
     engine.setEntityEnabled('duck',false);engine.entity('t1').yaw=90;engine.entity('t2').yaw=0;
     r.clock.pump();await until(()=>p.requests.length===2);
     const moss=p.requests.find(request=>request.id==='t1')!,flint=p.requests.find(request=>request.id==='t2')!;
@@ -242,6 +244,7 @@ test('speech wakes a moving agent with only continue or stop while world time re
     r.advance(50);await until(()=>p.requests.length===3);
     const interruption=p.requests[2];
     assert.equal(interruption.id,'t2');
+    assert.equal(interruption.body.max_tokens,10300);assert.equal(interruption.body.max_completion_tokens,10300);
     assert.deepEqual(interruption.body.tools.map((tool:any)=>tool.function.name),['continue_moving','stop_moving']);
     const prompt=JSON.parse(interruption.body.messages.at(-1).content);
     assert.equal(prompt.urgentSpeech[0].message,'I like you');

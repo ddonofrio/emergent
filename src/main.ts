@@ -10,7 +10,9 @@ interface ProviderHealth {state:'unknown'|'ok'|'bad';detail:string;inFlight?:boo
 interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm' | 'waiting'; model: string; providerStrategy:string; llmConfig?:LlmConfig; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
 interface LlmProvider {id:string;type:string;enabled:boolean;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKeyRemoved?:boolean;tokenless?:boolean;apiKeySource?:'own'|'provider';apiKeySavedType?:string;apiKeyCleared?:boolean;apiKey?:string;vastTokenConfigured?:boolean;vastTokenRemoved?:boolean;vastTokenCleared?:boolean;vastToken?:string;vastContainerLabel?:string;health?:ProviderHealth;}
-interface LlmConfig {strategy:string;currentStatus?:string;providers:LlmProvider[];}
+type ReasoningProfile='default'|'minimum'|'medium'|'maximum';
+interface ReasoningSettings {movement:ReasoningProfile;action:ReasoningProfile;planning:ReasoningProfile;planCompaction:ReasoningProfile;journalCompaction:ReasoningProfile;}
+interface LlmConfig {strategy:string;reasoning:ReasoningSettings;currentStatus?:string;providers:LlmProvider[];}
 interface ProviderModelOption {id:string;label:string;}
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -45,8 +47,15 @@ app.innerHTML = `
   <section id="llm-settings" class="settings-screen hidden" aria-labelledby="settings-title" aria-hidden="true">
     <header class="settings-header"><button id="settings-back" class="settings-back">Back</button><div><span class="eyebrow">EMERGENT / SETTINGS</span><h1 id="settings-title">Settings</h1></div></header>
     <div class="settings-content">
-      <section class="settings-section"><h2>Request settings</h2><label class="request-setting" title="Changes apply from the next turn."><input id="parallel-requests" type="checkbox" checked disabled>Parallel requests</label></section>
       <form id="llm-settings-form">
+        <section class="settings-section reasoning-section"><h2>Reasoning levels</h2><p>Choose the reasoning profile for each inference phase. Default leaves the effort to the provider.</p><div class="reasoning-grid">
+          <label class="reasoning-field">Movement<select id="reasoning-movement"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum">Maximum</option></select></label>
+          <label class="reasoning-field">Action<select id="reasoning-action"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum">Maximum</option></select></label>
+          <label class="reasoning-field">Planning<select id="reasoning-planning"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum" selected>Maximum</option></select></label>
+          <label class="reasoning-field">Plan compaction<select id="reasoning-plan-compaction"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum">Maximum</option></select></label>
+          <label class="reasoning-field">Journal compaction<select id="reasoning-journal-compaction"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum">Maximum</option></select></label>
+        </div></section>
+        <section class="settings-section"><h2>Request settings</h2><label class="request-setting" title="Changes apply from the next turn."><input id="parallel-requests" type="checkbox" checked disabled>Parallel requests</label></section>
         <section class="settings-section"><div class="settings-section-heading"><div><h2>LLM configuration</h2><p>Choose one or more providers and models for agent requests.</p></div><button id="add-model" class="secondary-button" type="button">Add model</button></div><div id="model-list" class="model-list"></div><p class="settings-note">Amazon Bedrock uses an API key and AWS region. Anthropic's native adapter is not connected yet.</p></section>
         <section class="settings-section algorithm-section"><label for="settings-strategy"><h2>Selection algorithm</h2></label><select id="settings-strategy"><option value="first-only">Single model</option><option value="round-robin">Round robin</option><option value="fallback">Fallback</option><option value="master-slaves">Master / slaves</option></select><p id="strategy-description" class="settings-note">Use only the first active model in the list.</p></section>
         <div class="settings-actions"><span id="settings-status" role="status"></span><button class="save-button" type="submit">Save configuration</button></div>
@@ -69,8 +78,12 @@ let dayCount = 0,detailsSignature='';
 let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[]}|undefined;
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
-let llmConfig:LlmConfig={strategy:'first-only',providers:[]};
+const defaultReasoning:ReasoningSettings={movement:'default',action:'default',planning:'maximum',planCompaction:'default',journalCompaction:'default'};
+let llmConfig:LlmConfig={strategy:'first-only',reasoning:{...defaultReasoning},providers:[]};
 const modelOptionsCache=new Map<string,ProviderModelOption[]>();
+const reasoningControlIds:Record<keyof ReasoningSettings,string>={movement:'reasoning-movement',action:'reasoning-action',planning:'reasoning-planning',planCompaction:'reasoning-plan-compaction',journalCompaction:'reasoning-journal-compaction'};
+function applyReasoningSettings(settings:ReasoningSettings=defaultReasoning){for(const [key,id] of Object.entries(reasoningControlIds))$<HTMLSelectElement>(id).value=settings[key as keyof ReasoningSettings]??defaultReasoning[key as keyof ReasoningSettings];}
+function readReasoningSettings(){return Object.fromEntries(Object.entries(reasoningControlIds).map(([key,id])=>[key,$<HTMLSelectElement>(id).value])) as unknown as ReasoningSettings;}
 function settingField(parent:HTMLElement,title:string,field:string,value:string,type='text',placeholder=''){
   const label=document.createElement('label');label.className='model-field';label.textContent=title;
   const input=document.createElement('input');input.type=type;input.dataset.field=field;input.value=value;input.placeholder=placeholder;input.autocomplete=type==='password'?'new-password':'off';label.append(input);parent.append(label);return input;
@@ -233,7 +246,7 @@ async function loadLlmSettings(){
   $('settings-status').textContent='Loading current configuration…';
   try{
     const response=await fetch('/api/llm-config');if(!response.ok)throw new Error();
-    llmConfig=await response.json() as LlmConfig;$<HTMLSelectElement>('settings-strategy').value=llmConfig.strategy;renderProviderStatus(llmConfig);
+    llmConfig=await response.json() as LlmConfig;$<HTMLSelectElement>('settings-strategy').value=llmConfig.strategy;applyReasoningSettings(llmConfig.reasoning);renderProviderStatus(llmConfig);
     renderModelRows(llmConfig.providers);if(meta)$<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
     $('settings-status').textContent='';
   }catch{$('settings-status').textContent='Could not load LLM configuration.';}
@@ -288,7 +301,7 @@ stream.addEventListener('settings',event=>{
 });
 stream.addEventListener('llm-config',event=>{
   if(!meta)return;
-  meta.llmConfig=JSON.parse((event as MessageEvent).data) as LlmConfig;meta.providerStrategy=meta.llmConfig.strategy;renderProviderStatus();
+  meta.llmConfig=JSON.parse((event as MessageEvent).data) as LlmConfig;meta.providerStrategy=meta.llmConfig.strategy;llmConfig=meta.llmConfig;applyReasoningSettings(llmConfig.reasoning);renderProviderStatus();
 });
 stream.addEventListener('status', event => {
   if (!meta) return;
@@ -538,15 +551,15 @@ $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
     const vastTokenInput=card.querySelector('[data-field="vastToken"]') as HTMLInputElement,vastToken=vastTokenInput.value.trim();
     return{id:(card as HTMLElement).dataset.id,type:field('type'),enabled,tokenless,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),vastContainerLabel:field('vastContainerLabel'),clearApiKey:apiKeyInput.dataset.clear==='true',clearVastToken:vastTokenInput.dataset.clear==='true',...(apiKey?{apiKey}:{}),...(vastToken?{vastToken}:{})};
   });
-  const requestedStrategy=$<HTMLSelectElement>('settings-strategy').value;
+  const requestedStrategy=$<HTMLSelectElement>('settings-strategy').value,reasoning=readReasoningSettings();
   try{
-    const response=await fetch('/api/llm-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({providers,strategy:requestedStrategy})});
+    const response=await fetch('/api/llm-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({providers,strategy:requestedStrategy,reasoning})});
     const data=await response.json() as Metadata&{llmConfig?:LlmConfig;error?:string};
     if(!response.ok)throw new Error(data.error??'Could not save configuration.');
     if(meta){meta.mode=data.mode;meta.model=data.model;meta.providerStrategy=data.providerStrategy;}
     if(data.llmConfig)llmConfig=data.llmConfig;
     if(data.llmConfig){if(meta)meta.llmConfig=data.llmConfig;renderProviderStatus(data.llmConfig);}
-    renderModelRows(llmConfig.providers);$<HTMLSelectElement>('settings-strategy').value=llmConfig.strategy;
+    renderModelRows(llmConfig.providers);$<HTMLSelectElement>('settings-strategy').value=llmConfig.strategy;applyReasoningSettings(llmConfig.reasoning);
     const incomplete=llmConfig.providers.filter(provider=>!provider.model.trim()).map(provider=>provider.name);
     status.textContent=incomplete.length?`Configuration saved. ${incomplete.join(', ')} will remain inactive until a model is selected.`:'Configuration saved.';
   }catch(error){status.textContent=error instanceof Error?error.message:'Could not save configuration.';}

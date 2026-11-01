@@ -37,6 +37,10 @@ main{height:100dvh}
 .settings-section .request-setting{margin-top:16px}
 .settings-section #turn-status{margin-top:9px}
 .settings-section-heading{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:16px}
+.reasoning-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:16px}
+.reasoning-field{display:flex;flex-direction:column;gap:6px;color:#91a08f;font-size:10px}
+.reasoning-field select{width:100%;min-width:0;padding:9px 10px;border:1px solid #344338;border-radius:3px;background:#101a14;color:#dce5d7;font:11px var(--mono)}
+.reasoning-field select:focus{border-color:#b5d28b;outline:1px solid #b5d28b}
 .secondary-button,.remove-model{border:1px solid #3a4b3d;border-radius:3px;padding:8px 11px;color:#c1d1b5;font-size:11px;white-space:nowrap}
 .secondary-button:hover,.remove-model:hover{background:#253329;border-color:#667a52}
 .model-list{display:grid;gap:12px}
@@ -70,7 +74,7 @@ main{height:100dvh}
 #settings-status{font-size:11px;color:#a8ba98}
 .save-button{padding:10px 15px;border-radius:3px;background:#d5edaa;color:#243428;font-size:11px;font-weight:600}
 .save-button:hover{background:#e5f4c9;color:#243428}
-@media(max-width:700px){.settings-header{gap:16px;padding:15px 16px}.settings-header h1{font-size:19px}.settings-content{width:calc(100% - 32px);margin-top:12px}.model-fields{grid-template-columns:1fr}.settings-section-heading{align-items:flex-start}.algorithm-section{grid-template-columns:1fr}.algorithm-section>label{grid-row:auto}}
+@media(max-width:700px){.settings-header{gap:16px;padding:15px 16px}.settings-header h1{font-size:19px}.settings-content{width:calc(100% - 32px);margin-top:12px}.reasoning-grid{grid-template-columns:1fr 1fr}.model-fields{grid-template-columns:1fr}.settings-section-heading{align-items:flex-start}.algorithm-section{grid-template-columns:1fr}.algorithm-section>label{grid-row:auto}}
 .experiment-heading .seed{margin:0}
 .experiment-collapse-mark{font:16px var(--mono);color:var(--muted)}
 .experiment-content{margin-top:14px}

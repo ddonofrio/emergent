@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { JsonSchemaNode } from '../../vendor/deepseek-harness/json-schema';
-import type { CompletionRequest, CompletionResult } from './providers';
+import { DEFAULT_REASONING_SETTINGS, type CompletionRequest, type CompletionResult, type ReasoningProfile } from './providers';
 import { InferenceAuditError } from './audit';
 
 export const PLAN_COMPACTION_PROMPT = `You compact a planning draft written by a creature exploring a physical world. You are editing the draft, not making a new planning decision.
@@ -13,7 +13,7 @@ export async function compactPlanDraft<T>(options:{
   name:string;mode:'set_plan'|'review_plan';draft:unknown;parameters:JsonSchemaNode;signal:AbortSignal;
   validate(value:unknown):string[];
   complete(request:CompletionRequest,signal:AbortSignal):Promise<CompletionResult>;
-  waiting(message:string):void;retryDelayMs?:number;
+  waiting(message:string):void;retryDelayMs?:number;reasoning?:ReasoningProfile;
 }):Promise<T> {
   const messages:CompletionRequest['messages']=[
     {role:'system',content:PLAN_COMPACTION_PROMPT},
@@ -25,7 +25,7 @@ export async function compactPlanDraft<T>(options:{
     try{
       const answer=await options.complete({messages:[...messages,...(correction?[{role:'user',content:correction}]:[])],tools:[{type:'function',function:{
         name:'submit_compacted_plan',description:'Return the same planning decision with redundant and superseded wording compacted.',parameters:options.parameters,
-      }}],max_tokens:2200,reasoning:'maximum'},options.signal);
+      }}],max_tokens:2200,reasoning:options.reasoning??DEFAULT_REASONING_SETTINGS.planCompaction},options.signal);
       options.signal.throwIfAborted();
       let value:unknown;
       if(answer.calls.length===1&&answer.calls[0].function.name==='submit_compacted_plan'){

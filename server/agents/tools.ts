@@ -19,7 +19,7 @@ export interface WorldTool {
   execute(args: unknown, exec?: { signal?: AbortSignal }): Promise<unknown>;
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
 }
-export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;concise?:boolean;previewHand?:number|null;goalCriterion?:MilestoneCriterion;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned'|'blocked',reason:string,evidenceEventIds?:number[])=>unknown} = {}): WorldTool[] {
+export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;capabilityPreview?:boolean;concise?:boolean;previewHand?:number|null;goalCriterion?:MilestoneCriterion;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned'|'blocked',reason:string,evidenceEventIds?:number[])=>unknown} = {}): WorldTool[] {
   const tool = (name: string, description: string, parameters: JsonSchemaNode, physical: boolean, run: (args: any) => unknown): WorldTool => {
     assertSupportedJsonSchema(parameters);
     return { name, description, parameters, physical, output: { schema: {}, render: (_args, value) => {
@@ -40,7 +40,8 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   const object=(properties:Record<string,JsonSchemaNode>={},required:string[]=[]):JsonSchemaNode=>({type:'object',properties,required,additionalProperties:false});
   const noArgs=object();
   const availableOnly=options.availableOnly!==false;
-  const choice=(values:(string|number)[],type:'string'|'integer'='string'):JsonSchemaNode=>({type,...(availableOnly&&values.length?{enum:values}:{})});
+  const capabilityPreview=options.capabilityPreview===true;
+  const choice=(values:(string|number)[],type:'string'|'integer'='string'):JsonSchemaNode=>({type,...((availableOnly||capabilityPreview)&&values.length?{enum:values}:{})});
   const shortSentence:JsonSchemaNode={type:'string',minLength:1,maxLength:SHORT_TEXT_LIMIT,description:'Write one short sentence, at most 500 characters.'};
   const remember=async(note:string,replaceNoteIds:string[]=[] )=>{
     if(!note.trim()||[...note].length>SHORT_TEXT_LIMIT)return {ok:false,message:'Write one short sentence of 1..500 characters.'};
@@ -96,14 +97,16 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   else tools.push(action('run','Run across clear terrain at twice the speed of walking.',movement(24),'run'));
   tools.push(action('jump','Jump up one block or across a gap; unsafe landings are refused.',object({distance:{type:'number',description:'Metres from here: 0.75..2.5, default 2; use the checked jump when given.'},angle:{type:'number',description:'Body-relative degrees (-90..90).'}}),'jump'));
   const openDoors=targets?.open??[],closeDoors=targets?.close??[];
-  if(!availableOnly||openDoors.length)tools.push(action('open',`Open one reachable closed door inward by exactly 90 degrees.${availableOnly&&!openDoors.length?' No closed door is currently within reach.':''}`,doorTarget(openDoors),'open'));
-  if(!availableOnly||closeDoors.length)tools.push(action('close',`Close one reachable open door to 0 degrees.${availableOnly&&!closeDoors.length?' No open door is currently within reach.':''}`,doorTarget(closeDoors),'close'));
+  // Changing hands cannot create a door interaction. Door tools belong only to the
+  // current observation, never to the inventory capability preview.
+  if(!capabilityPreview&&(!availableOnly||openDoors.length))tools.push(action('open',`Open one reachable closed door inward by exactly 90 degrees.${availableOnly&&!openDoors.length?' No closed door is currently within reach.':''}`,doorTarget(openDoors),'open'));
+  if(!capabilityPreview&&(!availableOnly||closeDoors.length))tools.push(action('close',`Close one reachable open door to 0 degrees.${availableOnly&&!closeDoors.length?' No open door is currently within reach.':''}`,doorTarget(closeDoors),'close'));
   if(!held){
-    tools.push(action('hit',`Strike one currently reachable block using its exact target coordinates.${availableOnly&&!hitTargets.length?' No reachable block is visible now; inspect another direction or approach one.':''}`,target(hitTargets,hitDetails),'hit'));
+    tools.push(action('hit',capabilityPreview?'With empty hands, strike a reachable block when one is available; exact target coordinates come from the current observation.':`Strike one currently reachable block using its exact target coordinates.${availableOnly&&!hitTargets.length?' No reachable block is visible now; inspect another direction or approach one.':''}`,target(hitTargets,hitDetails),'hit'));
     {
       const items=targets?.pickup??[];
       const details=items.map(item=>{const body=view?.items.find(candidate=>candidate.id===item.itemId);return `${item.itemId}: ${item.kind}${body?` at [${body.position.map(value=>Math.round(value*100)/100).join(',')}]`:''}, ${item.metres} m away`;});
-      tools.push(action('pickup',`Take one currently reachable loose item using its exact ID.${availableOnly&&!items.length?' No usable pickup target now; approach a visible loose item with free hands and enough inventory space.':''}`,object({itemId:{...choice(items.map(item=>item.itemId)),description:details.length?`Current reachable items: ${details.join('; ')}.`:'Loose item ID.'}},['itemId']),'pickup'));
+      tools.push(action('pickup',capabilityPreview?'With empty hands, take a reachable loose item when one is available and usable; its exact ID comes from the current observation.':`Take one currently reachable loose item using its exact ID.${availableOnly&&!items.length?' No usable pickup target now; approach a visible loose item with free hands and enough inventory space.':''}`,object({itemId:{...choice(items.map(item=>item.itemId)),description:details.length?`Current reachable items: ${details.join('; ')}.`:'Loose item ID.'}},['itemId']),'pickup'));
     }
   }else{
     const heldLabel=`${held.kind}${held.contents?` containing ${held.contents}`:''}`;
@@ -113,7 +116,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
     tools.push(tool('hit',`Disabled while you hold ${heldLabel}. ${hitMessage}`,target(hitTargets,hitDetails),false,()=>({ok:false,message:hitMessage})));
     const pickupMessage=`Pickup is unavailable while you hold ${heldLabel}. Store, place, or throw it to free your hands first.`;
     tools.push(tool('pickup',`Disabled while you hold ${heldLabel}. ${pickupMessage}`,object({itemId:{type:'string',description:'Loose item ID; unavailable until your hands are free.'}},['itemId']),false,()=>({ok:false,message:pickupMessage})));
-    tools.push(action('place','Set one held item at one currently reachable empty supported cell; if none is in reach, inspect another direction or move.',target(targets?.place),'place'));
+    tools.push(action('place',capabilityPreview?'Set the held item at a reachable empty supported cell when one is available; exact targets come from the current observation.':'Set one held item at one currently reachable empty supported cell; if none is in reach, inspect another direction or move.',target(targets?.place),'place'));
     tools.push(action('throw','Throw one held item forward.',object({force:{type:'number',description:'Strength 1..12, default 7.'}}),'throw'));
     if(held.kind==='wood'){
       const strike=tool('strike_held','Strike a surface point on the wood in your hands.',object({point:{type:'string',enum:Object.keys(impactPoints)},orientation:{type:'string',enum:['up','down'],description:'Required for front_edge; otherwise unused.'}},['point']),true,({point,orientation}:{point:string;orientation?:'up'|'down'})=>engine.act(id,{action:'strike_held',impact:impactPoints[point],...(orientation?{orientation}:{})}));
@@ -121,22 +124,23 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
       tools.push(strike);
     }
     if(held.kind==='bucket'){
-      if(held.contents){tools.push(action('empty','Empty one held bucket at one currently reachable target; hold the empty bucket. Matching contents stack together. If no target is available, inspect another direction or move.',target(targets?.empty),'empty'));}
-      else tools.push(action('fill','Fill one held bucket from a currently reachable source. If no fill target is available, inspect another direction or move.',target(targets?.fill),'fill'));
+      if(held.contents){tools.push(action('empty',capabilityPreview?'Empty the held bucket at a reachable target when one is available; exact targets come from the current observation. The empty bucket remains held. Matching contents stack together.':'Empty one held bucket at one currently reachable target; hold the empty bucket. Matching contents stack together. If no target is available, inspect another direction or move.',target(targets?.empty),'empty'));}
+      else tools.push(action('fill',capabilityPreview?'Fill the held bucket from a reachable source when one is available; exact targets come from the current observation.':'Fill one held bucket from a currently reachable source. If no fill target is available, inspect another direction or move.',target(targets?.fill),'fill'));
     }
     tools.push(action('store','Free your hands. Item quantities stay unchanged; this does not collect anything.',noArgs,'store'));
   }
-  if(held?.kind==='shovel')tools.push(action('dig','Dig one currently reachable block with the shovel. If no target is available, inspect another direction or move.',target(hitTargets,hitDetails),'dig'));
+  if(held?.kind==='shovel')tools.push(action('dig',capabilityPreview?'Dig a reachable block with the held shovel when one is available; exact targets come from the current observation.':'Dig one currently reachable block with the shovel. If no target is available, inspect another direction or move.',target(hitTargets,hitDetails),'dig'));
   if(entity.inventory?.stacks.some(stack=>stack.kind==='door_half_up'&&stack.count>0)&&entity.inventory.stacks.some(stack=>stack.kind==='door_half_down'&&stack.count>0))
     tools.push(action('join','Join one upper and one lower wooden half and observe the result.',noArgs,'join'));
-  const stacks=entity.inventory?.stacks.flatMap((_,index)=>index!==entity.inventory!.selected?[index]:[])??[];
+  const selectedHand=options.previewHand===undefined?entity.inventory?.selected:options.previewHand;
+  const stacks=entity.inventory?.stacks.flatMap((_,index)=>index!==selectedHand?[index]:[])??[];
   if(stacks.length||(!availableOnly&&entity.inventory?.stacks.length)){
     const details=stacks.map(index=>{const stack=entity.inventory!.stacks[index];return `${index}: ${stack.kind}${stack.contents?` containing ${stack.contents}`:''} (${stack.count})`;});
     tools.push(action('hold','Take one already owned inventory stack into your hands. This does not collect anything.',object({stack:{...choice(stacks,'integer'),description:details.length?`Available inventory stacks: ${details.join('; ')}.`:'Inventory stack index.'}},['stack']),'hold'));
   }
   if(!engine.followersOf(entity).length){
     const followers=targets?.follow??[],details=followers.map(other=>`${other.id}: ${other.name}, ${other.metres} m away`);
-    tools.push(tool('follow',`Start following one currently visible creature within 20 metres and stay one metre away. You can speak while following; stop_follow lets you choose other actions.${availableOnly&&!followers.length?' No eligible creature is visible now; look around or approach a known sighting.':''}`,object({entityId:{...choice(followers.map(other=>other.id)),description:details.length?`Current visible creatures: ${details.join('; ')}.`:'Creature ID.'}},['entityId']),true,({entityId}:{entityId:string})=>engine.act(id,{action:'follow',entityId,angle:options.viewAngle??0})));
+    tools.push(tool('follow',capabilityPreview?'Start following an eligible creature once it is visible within 20 metres, then stay one metre away. You can speak while following; stop_follow lets you choose other actions.':`Start following one currently visible creature within 20 metres and stay one metre away. You can speak while following; stop_follow lets you choose other actions.${availableOnly&&!followers.length?' No eligible creature is visible now; look around or approach a known sighting.':''}`,object({entityId:{...choice(followers.map(other=>other.id)),description:details.length?`Current visible creatures: ${details.join('; ')}.`:'Creature ID.'}},['entityId']),true,({entityId}:{entityId:string})=>engine.act(id,{action:'follow',entityId,angle:options.viewAngle??0})));
   }
   tools.push(say);
   tools.push(action('wait','Wait and watch.',noArgs,'wait'));

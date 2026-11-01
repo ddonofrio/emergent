@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { InferenceAuditError } from './audit';
 import { PRIVATE_NOTE_LIMIT } from '../../src/core/memory';
-import type { CompletionRequest, CompletionResult } from './providers';
+import { DEFAULT_REASONING_SETTINGS, type CompletionRequest, type CompletionResult, type ReasoningProfile } from './providers';
 
 const TARGET = PRIVATE_NOTE_LIMIT - 1;
 export const JOURNAL_COMPACTION_PROMPT = `You maintain the private journal of a creature exploring a physical world. Its journal provides continuity between decisions; it has no access to forgotten notes. You are editing memory, not choosing actions.
@@ -18,7 +18,7 @@ export function validCompactedNotes(value: unknown, maximum = TARGET): value is 
 export async function compactJournal(options: {
   name: string; notes: readonly string[]; incoming: string; signal: AbortSignal;
   complete: (request: CompletionRequest, signal: AbortSignal) => Promise<CompletionResult>;
-  waiting: (message: string) => void; retryDelayMs?: number;
+  waiting: (message: string) => void; retryDelayMs?: number;reasoning?:ReasoningProfile;
 }): Promise<string[]> {
   const { signal } = options;
   const messages: CompletionRequest['messages'] = [
@@ -31,7 +31,7 @@ export async function compactJournal(options: {
     try {
       const answer = await options.complete({ messages: [...messages, ...(correction ? [{ role: 'user', content: correction }] : [])],
         tools: [{ type: 'function', function: { name: 'submit_journal', description: 'Merge redundant information into at most nine faithful notes, oldest to newest. Use fewer whenever possible.',
-          parameters: { type: 'object', properties: { notes: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 500 }, maxItems: TARGET } }, required: ['notes'], additionalProperties: false } } }], max_tokens: 2000, reasoning:'maximum' }, signal);
+          parameters: { type: 'object', properties: { notes: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 500 }, maxItems: TARGET } }, required: ['notes'], additionalProperties: false } } }], max_tokens: 2000, reasoning:options.reasoning??DEFAULT_REASONING_SETTINGS.journalCompaction }, signal);
       signal.throwIfAborted();
       let notes: unknown;
       if (answer.calls.length === 1 && answer.calls[0].function.name === 'submit_journal') {

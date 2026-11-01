@@ -78,6 +78,21 @@ test('generic tools remain visible without targets and do not disclose hidden ma
   assert.doesNotMatch(JSON.stringify(fill),/sand|dirt|water/);
 });
 
+test('inventory capability previews exclude world-only doors and do not claim absent targets are current',()=>{
+  const engine=fixture(),actor=engine.entity('t1');
+  actor.inventory={stacks:[{kind:'wood',count:1},{kind:'bucket',count:1},{kind:'shovel',count:1}],selected:1,capacity:640};
+  const previews=[null,0,1,2].map(previewHand=>worldTools(engine,'t1',{notes:[]},{availableOnly:false,capabilityPreview:true,previewHand}));
+  for(const tools of previews){
+    assert.ok(!tools.some(tool=>tool.name==='open'||tool.name==='close'));
+    assert.doesNotMatch(JSON.stringify(tools),/Open one reachable closed door|Close one reachable open door/);
+  }
+  const empty=previews[0],hit=empty.find(tool=>tool.name==='hit')!,pickup=empty.find(tool=>tool.name==='pickup')!;
+  assert.match(hit.description,/when one is available/);assert.doesNotMatch(hit.description,/currently reachable/);
+  assert.match(pickup.description,/when one is available/);assert.doesNotMatch(pickup.description,/currently reachable/);
+  assert.deepEqual(empty.find(tool=>tool.name==='hold')!.parameters.properties!.stack.enum,[0,1,2]);
+  assert.equal(actor.inventory.selected,1,'Capability previews must not change the actual hand.');
+});
+
 test('the duck stops and faces the speaker before quacking, including on a wandering tick and in replay',()=>{
   const engine=fixture(true),duck=engine.entity('t2');
   duck.kind='duck';duck.controller='wander';duck.height=.65;duck.yaw=30;

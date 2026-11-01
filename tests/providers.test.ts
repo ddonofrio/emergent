@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BedrockClient, ListFoundationModelsCommand, ListInferenceProfilesCommand } from '@aws-sdk/client-bedrock';
-import { bedrockInferenceModelId, bedrockThinkingConfig, DEFAULT_REASONING_TOKENS, discoverProviderModels, enabledProviders, InvalidCompletionError, normalizeSavedProvider, OutputTokenLimitError, ProviderChain, providerHeaders, providersFromEnv, resolveProviderApiKey, resolveProviderVastToken, retryTokenLimitedCompletion, savedApiKeyForProvider, type CompletionRequest, type CompletionResult, type ProviderConfig } from '../server/agents/providers';
+import { bedrockInferenceModelId, bedrockThinkingConfig, DEFAULT_REASONING_SETTINGS, DEFAULT_REASONING_TOKENS, discoverProviderModels, enabledProviders, InvalidCompletionError, isReasoningSettings, normalizeReasoningSettings, normalizeSavedProvider, OutputTokenLimitError, ProviderChain, providerHeaders, providersFromEnv, resolveProviderApiKey, resolveProviderVastToken, retryTokenLimitedCompletion, savedApiKeyForProvider, type CompletionRequest, type CompletionResult, type ProviderConfig } from '../server/agents/providers';
 
 const request:CompletionRequest={messages:[],tools:[],max_tokens:32};
 const provider=(id:string):ProviderConfig=>({id,name:id,apiKey:'test-key',baseUrl:'http://localhost/v1',model:`model-${id}`});
@@ -9,6 +9,14 @@ const result=(config:ProviderConfig):CompletionResult=>({provider:config.id,prov
 const intercept=(chain:ProviderChain,handler:(config:ProviderConfig)=>Promise<CompletionResult>)=>{
   (chain as unknown as {request:(config:ProviderConfig,request:CompletionRequest,signal:AbortSignal)=>Promise<CompletionResult>}).request=handler;
 };
+
+test('reasoning settings default every phase except maximum planning and reject incomplete values',()=>{
+  assert.deepEqual(normalizeReasoningSettings(undefined),{movement:'default',action:'default',planning:'maximum',planCompaction:'default',journalCompaction:'default'});
+  assert.deepEqual(normalizeReasoningSettings({movement:'minimum',planning:'medium'}),{...DEFAULT_REASONING_SETTINGS,movement:'minimum',planning:'medium'});
+  assert.equal(isReasoningSettings(DEFAULT_REASONING_SETTINGS),true);
+  assert.equal(isReasoningSettings({movement:'default'}),false);
+  assert.equal(isReasoningSettings({...DEFAULT_REASONING_SETTINGS,action:'extreme'}),false);
+});
 
 test('saved provider keys default by provider while existing entries keep their own key',()=>{
   const providers:ProviderConfig[]=[
@@ -212,6 +220,18 @@ test('reported reasoning and visible output usage are enforced separately',async
     assert.deepEqual(error.generated,{reasoning:10001,output:10});
     return true;
   });
+});
+
+test('provider-default effort keeps the ten-thousand-token reasoning allowance',async t=>{
+  let body:Record<string,unknown>={};
+  t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{
+    body=JSON.parse(String(init.body));
+    return new Response(JSON.stringify({choices:[{finish_reason:'stop',message:{content:null,tool_calls:[{id:'wait',type:'function',function:{name:'wait',arguments:'{}'}}]}}]}));
+  });
+  await new ProviderChain([provider('local')]).complete({...request,reasoning:'default'},AbortSignal.timeout(1000),()=>{});
+  assert.equal(body.reasoning_effort,undefined);
+  assert.equal(body.max_tokens,request.max_tokens+DEFAULT_REASONING_TOKENS);
+  assert.equal(body.max_completion_tokens,request.max_tokens+DEFAULT_REASONING_TOKENS);
 });
 
 test('provider HTTP diagnostics retain the cause and redact its credential',async t=>{

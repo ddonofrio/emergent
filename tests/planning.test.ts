@@ -117,16 +117,16 @@ test('the planner rejects a plan without a standing journal action',async()=>{
 test('planning accepts a double-sized draft and compacts it without asking the planner again',async()=>{
   let plannerCalls=0,compactorCalls=0;
   const expanded={...structuredClone(projectFields),...authored,explanation:'Useful reason. '.repeat(50),project:{...structuredClone(projectFields.project),progress:'Observed detail. '.repeat(100)}};
-  const next=await planDecision({...base(),async complete(request){
+  const next=await planDecision({...base(),reasoning:'minimum',compactionReasoning:'medium',async complete(request){
     plannerCalls++;
     const schema=(request.tools[0] as any).function.parameters;
-    assert.equal(request.max_tokens,4400);assert.equal(request.reasoning,'medium');
+    assert.equal(request.max_tokens,4400);assert.equal(request.reasoning,'minimum');
     assert.match((request.messages[0] as any).content,/within 2200 output tokens/);
     assert.equal(schema.properties.explanation.maxLength,500);assert.equal(schema.properties.project.properties.progress.maxLength,1200);
     return answer('set_plan',expanded);
   },async compact(request){
     compactorCalls++;
-    assert.equal(request.reasoning,'maximum');assert.equal(request.max_tokens,2200);
+    assert.equal(request.reasoning,'medium');assert.equal(request.max_tokens,2200);
     assert.match((request.messages[0] as any).content,/Merge redundant or overlapping wording/);
     const context=JSON.parse((request.messages[1] as any).content);assert.deepEqual(context.draft,expanded);
     const schema=(request.tools[0] as any).function.parameters;
