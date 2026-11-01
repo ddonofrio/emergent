@@ -28,7 +28,7 @@ test('stable note IDs correct multiple claims without renumbering unrelated memo
 
 test('journal and goal reasons accept 500 characters and reject excess with precise feedback',async()=>{
   const engine=new Engine(island),memory:Memory={notes:[]};let closed=false;
-  const tools=worldTools(engine,'t1',memory,{onFinishGoal:()=>{closed=true;return {ok:true};}});
+  const tools=worldTools(engine,'t1',memory,{goalCriterion:{kind:'scan'},onFinishGoal:()=>{closed=true;return {ok:true};}});
   const journal=tools.find(tool=>tool.name==='journal')!,finish=tools.find(tool=>tool.name==='finish_goal')!;
   assert.equal((await journal.invoke({note:'a'.repeat(500)}) as {ok:boolean}).ok,true);
   const rejected=await journal.invoke({note:'b'.repeat(501)}) as {ok:boolean;message:string};

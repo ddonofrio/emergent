@@ -267,10 +267,10 @@ test('oversized intentions are corrected before commit and failed actions invali
   const {engine,store,runtime}=fixture();let calls=0;
   try{
     runtime.inference.complete=async(request)=>{
-      if(++calls===1)return answer('hit',{target:[0,1,2],intention:'x'.repeat(201)});
+      if(++calls===1)return answer('hit',{targetId:'hit:0,1,2',intention:'x'.repeat(201)});
       assert.match((request.messages.at(-1) as {content:string}).content,/maximum 200|1\.\.200/);
       assert.equal(engine.tick,0);
-      return answer('hit',{target:[0,1,2],intention:'Continue observing this wood block.'});
+      return answer('hit',{targetId:'hit:0,1,2',intention:'Continue observing this wood block.'});
     };
     const turn=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
     engine.voxels.set([0,1,2],null);commit(engine,store,runtime,turn);
@@ -357,9 +357,9 @@ test('closing a task while following preserves the next plan, local context and 
       calls++;
       assert.equal(engine.tick,20);assert.equal(engine.entity('t1').following?.entityId,'t2');
       if(calls===1){
-        assert.ok(request.tools.some((tool:any)=>tool.function.name==='finish_goal'));
+        assert.ok(request.tools.some((tool:any)=>tool.function.name==='complete_task'));
         assert.match((request.messages[0] as {content:string}).content,/close a task without stopping/);
-        return answer('finish_goal',{outcome:'completed',reason:'Following Moss has started.',evidenceEventIds:[context(request).plan.availableEvidence[0].eventId]});
+        return answer('complete_task',{reason:'Following Moss has started.',evidenceEventIds:[context(request).plan.availableEvidence[0].eventId]});
       }
       if(calls===2){
         assert.equal((request.tools[0] as any).function.name,'set_plan');
@@ -390,6 +390,35 @@ test('closing a task while following preserves the next plan, local context and 
   }finally{store.close();}
 });
 
+test('project replacement records its assessment and survives staged restart and replay without inference',async()=>{
+  const {engine,store,runtime,plan}=fixture();let calls=0,evidenceEventIds:number[]=[];
+  try{
+    runtime.minds.get('t1')!.plan={...plan,version:4,...structuredClone(projectFields),goal:'Follow Moss.',steps:[{task:'Following Moss has started.',status:'pending'}]};
+    runtime.inference.complete=async()=>answer('follow',{entityId:'t2'});
+    commit(engine,store,runtime,await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{}));
+    runtime.inference.complete=async request=>{
+      if(++calls===1){evidenceEventIds=[context(request).plan.availableEvidence[0].eventId];return answer('complete_task',{reason:'I started following.',evidenceEventIds});}
+      if(calls===2)return answer('set_plan',{
+        projectOutcome:{status:'completed',reason:'I observed a change in my relationship to Moss.',evidenceEventIds},
+        project:{goal:'Understand Moss movements.',successCondition:'Describe a change of direction.',progress:'Following Moss is a starting point.',openQuestions:['Where will Moss go?']},
+        goal:'Watch Moss move.',successCondition:'Observe a change in direction.',explanation:'A new interest.'});
+      if(calls>3)throw new Error('Unexpected project transition retry.');
+      return answer('follow',{});
+    };
+    const prepared=await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
+    assert.equal(calls,3);assert.equal(runtime.minds.get('t1')!.plan!.projectHistory,undefined);
+    const archived=prepared.decisions[0].mind.plan!.projectHistory![0];
+    assert.equal(archived.status,'completed');assert.deepEqual(archived.evidenceEventIds,evidenceEventIds);
+    assert.equal(archived.goal,projectFields.project.goal);
+    const restored=new Engine(engine.module,store.stateAt(20));restored.nextEvent=store.maxEventId()+1;
+    const resumed=new AgentRuntime(restored,store,runtime.config);
+    resumed.inference.complete=async()=>{throw new Error('Replay and ready decisions must not infer.');};
+    commit(restored,store,resumed,await resumed.prepareTurn(AbortSignal.timeout(3000),()=>{}));
+    assert.deepEqual(store.stateAt(40).entities.find(entity=>entity.id==='t1')!.plan!.projectHistory,[archived]);
+    assert.ok(store.eventsAt(40,'t1').some(event=>event.type==='plan'&&(event.data as {plan:AgentPlan}).plan.projectHistory?.[0].status==='completed'));
+  }finally{store.close();}
+});
+
 test('an interrupted task closure resumes planning while following and can explicitly choose to stop',async()=>{
   const {engine,store,runtime,plan}=fixture();const controller=new AbortController();let calls=0;
   try{
@@ -398,7 +427,7 @@ test('an interrupted task closure resumes planning while following and can expli
     runtime.inference.complete=async()=>answer('follow',{entityId:'t2'});
     commit(engine,store,runtime,await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{}));
     runtime.inference.complete=async request=>{
-      if(++calls===1)return answer('finish_goal',{outcome:'completed',reason:'Following Moss has started.',evidenceEventIds:[context(request).plan.availableEvidence[0].eventId]});
+      if(++calls===1)return answer('complete_task',{reason:'Following Moss has started.',evidenceEventIds:[context(request).plan.availableEvidence[0].eventId]});
       controller.abort();throw controller.signal.reason;
     };
     await assert.rejects(runtime.prepareTurn(controller.signal,()=>{}),{name:'AbortError'});
@@ -441,7 +470,7 @@ test('following can edit its journal from local sightings, stage the edit and re
     runtime.inference.complete=async request=>{
       const prompt=context(request);
       assert.ok((request.tools as any[]).some(tool=>tool.function.name==='journal'));
-      assert.ok((request.tools as any[]).some(tool=>tool.function.name==='finish_goal'));
+      assert.ok((request.tools as any[]).some(tool=>tool.function.name==='complete_task'));
       assert.match((request.messages[0] as {content:string}).content,/close a task without stopping/);
       assert.equal(prompt.creatures.find((other:{id:string})=>other.id==='t2').holding,'bucket containing water');
       assert.doesNotMatch(JSON.stringify(prompt.creatures),/stacks|capacity|50/);
@@ -555,7 +584,7 @@ test('repeated unrecognizable text resets correction context and remains cancell
   }finally{store.close();}
 });
 
-test('text-only finish_goal is corrected as a tool-call error and can close the task before acting',async()=>{
+test('text-only task completion is corrected as a tool-call error and can close the task before acting',async()=>{
   const {engine,store,runtime,plan}=fixture();
   try{
     runtime.minds.get('t1')!.plan={...plan,version:4,...structuredClone(projectFields),steps:[{task:'I have observed the result of a scan.',status:'pending'}]};
@@ -569,12 +598,12 @@ test('text-only finish_goal is corrected as a tool-call error and can close the 
         assert.equal(evidence[0].message,undefined);
         assert.equal(evidence[0].result.actionStatus,'completed');
         assert.ok(evidence[0].result.materials.length);
-        return {...answer('wait',{}),calls:[],content:'finish_goal({outcome: "completed"})'};
+        return {...answer('wait',{}),calls:[],content:'complete_task({reason: "The scan completed."})'};
       }
       if(calls===2){
-        assert.match((request.messages.at(-1) as {content:string}).content,/No tool call was received.*actual available tool call.*finish_goal alone/);
+        assert.match((request.messages.at(-1) as {content:string}).content,/No tool call was received.*actual available tool call.*complete_task.*alone/);
         assert.equal(engine.tick,20);
-        return answer('finish_goal',{outcome:'completed',reason:'The scan showed local materials.',evidenceEventIds:[evidenceId]});
+        return answer('complete_task',{reason:'The scan showed local materials.',evidenceEventIds:[evidenceId]});
       }
       if(calls===3)return answer('set_plan',{goal:'Consider what I saw.',successCondition:'I have chosen what interests me next.',explanation:'Reflect on the scan.'});
       return answer('wait',{});
@@ -610,7 +639,7 @@ test('planning keeps clear routes, directions and distances from the same local 
       const visible=context(request),system=(request.messages[0] as any).content;
       assert.equal(system.includes(visible.plan.goal),false);
       assert.equal(system.includes(visible.plan.successCondition),false);
-      assert.equal(visible.plan.projectProgress,projectFields.project.progress);
+      assert.equal(visible.plan.projectMemory.progress,projectFields.project.progress);
       return answer('wait',{});
     };
     await runtime.prepareTurn(AbortSignal.timeout(3000),()=>{});
@@ -638,7 +667,7 @@ test('unavailable targets are explained outside the tool menu and looking can en
   }finally{store.close();}
 });
 
-test('task closure requires an internally consistent assessment before accepting cited evidence',async()=>{
+test('task completion rejects redundant assessment fields instead of accepting contradictory claims',async()=>{
   const {engine,store,runtime,plan}=fixture();
   try{
     runtime.minds.get('t1')!.plan={...plan,version:4,...structuredClone(projectFields),steps:[{task:'I have observed a scan.',status:'pending'}]};
@@ -646,8 +675,8 @@ test('task closure requires an internally consistent assessment before accepting
     let calls=0;
     runtime.inference.complete=async request=>{
       calls++;
-      if(calls===1){const id=context(request).plan.availableEvidence[0].eventId;return answer('finish_goal',{outcome:'completed',conditionMet:false,remaining:'I still need to observe the result.',reason:'The scan was requested.',evidenceEventIds:[id]});}
-      assert.match(JSON.stringify(request.messages),/Completion requires every part/);
+      if(calls===1){const id=context(request).plan.availableEvidence[0].eventId;return answer('complete_task',{conditionMet:false,remaining:'I still need to observe the result.',reason:'The scan was requested.',evidenceEventIds:[id]});}
+      assert.match(JSON.stringify(request.messages),/not a declared property/);
       assert.equal(context(request).plan.goal,plan.goal);
       return answer('wait',{});
     };

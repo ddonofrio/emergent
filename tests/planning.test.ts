@@ -86,7 +86,7 @@ test('the planner authors goals outside any catalog and preserves its exact succ
   let calls=0;
   const next=await planDecision({...base(),async complete(request){
     const schema=(request.tools[0] as any).function.parameters;
-    assert.deepEqual(Object.keys(schema.properties),['identity','direction','project','goal','successCondition','suggestedActions','explanation']);
+    assert.deepEqual(Object.keys(schema.properties),['identity','direction','project','projectOutcome','goal','successCondition','suggestedActions','explanation']);
     assert.match(schema.properties.identity.description,/stable first-person understanding of who you are/);
     assert.equal(schema.properties.goal.enum,undefined);
     assert.equal(schema.properties.successCondition.enum,undefined);

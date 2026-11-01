@@ -161,7 +161,7 @@ test('local interaction targets are actionable, exclude supporting blocks and re
   const engine=fixture([[0,1,2,'wood'],[0,2,2,'stone'],[0,3,2,'stone'],[0,1,4,'wood']]);
   engine.bodies.push({id:'near',kind:'arrow',position:[-.5,1.6,1.5],velocity:[0,0,0],resting:true},{id:'far',kind:'arrow',position:[4.5,1.6,6.5],velocity:[0,0,0],resting:true});
   const targets=engine.observe('t1').interactions;
-  assert.ok(targets.hit.length>0);assert.ok(targets.hit.length<=2);assert.equal(targets.hit[0].kind,'wood');
+  assert.ok(targets.hit.length>2);assert.equal(targets.hit[0].kind,'wood');
   for(const hit of targets.hit){
     assert.notDeepEqual(hit.target,[0,0,0]);assert.notDeepEqual(hit.target,[0,1,4]);
     const copy=new Engine(engine.module,engine.state());assert.equal(copy.act('t1',{action:'hit',target:hit.target}).ok,true);

@@ -34,7 +34,7 @@ export async function compactPlanDraft<T>(options:{
   const draft=Object.fromEntries(fields.map(field=>[field.path.join('.'),field.value]));
   const parameters:JsonSchemaNode={type:'object',properties:Object.fromEntries(fields.map(field=>[field.path.join('.'),field.schema])),required:Object.keys(draft),additionalProperties:false};
   const messages:CompletionRequest['messages']=[
-    {role:'system',content:PLAN_COMPACTION_PROMPT},
+    {role:'system',content:PLAN_COMPACTION_PROMPT+' Useful landmark coordinates and reusable methods are durable memory: retain them when they guide future action, including during retries. Remove transient personal position, inventory and bearings.'},
     {role:'user',content:JSON.stringify({creature:options.name,mode:options.mode,draft,readOnlyDecision,textErrors:options.textErrors})},
   ];
   let correction='',formatDraft:Record<string,unknown>|undefined;

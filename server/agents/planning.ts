@@ -10,6 +10,8 @@ import { compactPlanDraft } from './plan-compaction';
 import { isDeepStrictEqual } from 'node:util';
 import { taskAssessmentProblem, taskAssessmentProperties } from './task-assessment';
 import { completionAttempt, FORMAT_REPAIR, jsonTextDraft } from './response-repair';
+import { activeProject, projectOutcomeSchema, projectTransition, projectTransitionProblem } from './projects';
+import { previousPlanContext, suggestionBasis } from './plan-context';
 
 interface PlanTextLimits { text:number;progress:number }
 const COMPACT_LIMITS:PlanTextLimits={text:500,progress:1200};
@@ -19,14 +21,14 @@ const sentenceSchema=(maximum:number):JsonSchemaNode=>({type:'string',minLength:
 const shortList=(value:unknown,maximum:number,minimum=0,textMaximum=COMPACT_LIMITS.text):value is string[]=>Array.isArray(value)&&value.length>=minimum&&value.length<=maximum&&value.every(item=>text(item,textMaximum));
 const projectSchema=(limits:PlanTextLimits):JsonSchemaNode=>{const sentence=sentenceSchema(limits.text);return{type:'object',properties:{goal:{...sentence,description:`Your sustained project, 1..${limits.text} characters. Preserve it across tasks while it still matters.`},successCondition:{...sentence,description:`What you would observe if this project succeeded, 1..${limits.text} characters.`},progress:{type:'string',minLength:1,maxLength:limits.progress,description:`What has actually happened, what remains, and why. Up to ${limits.progress} characters. Separate hypotheses from observed facts.`},openQuestions:{type:'array',items:sentence,description:`Up to four untested questions or assumptions, each at most ${limits.text} characters.`}},required:['goal','successCondition','progress','openQuestions'],additionalProperties:false};};
 const validProject=(value:any,limits=COMPACT_LIMITS):value is NonNullable<AgentPlan['project']>=>value&&text(value.goal,limits.text)&&text(value.successCondition,limits.text)&&text(value.progress,limits.progress)&&shortList(value.openQuestions,4,0,limits.text);
-const approachSchema=(limits:PlanTextLimits):JsonSchemaNode=>({type:'array',items:sentenceSchema(limits.text),description:`One to three conditional next actions for the executor, at most ${limits.text} characters each. Use available capabilities and state when to reconsider the method. These are suggestions, not an automatic queue. Mention journal only for a specific insight or correction that needs preserving.`});
-function planningSchema(reviewing:boolean,strategic:boolean,free:boolean,outcomes:string[],limits:PlanTextLimits,reuse=false):JsonSchemaNode {
+const approachSchema=(limits:PlanTextLimits):JsonSchemaNode=>({type:'array',items:sentenceSchema(limits.text),description:`One to three conditional next actions, at most ${limits.text} characters each. They expire after movement, changed hands/following, failure, or eight decisions. Use current target IDs and explicit prerequisites. Keep reusable methods in project progress; retain useful landmark coordinates there, but never current inventory, position or bearings. Mention journal only for a specific insight or correction.`});
+function planningSchema(reviewing:boolean,strategic:boolean,free:boolean,outcomes:string[],limits:PlanTextLimits,reuse=false,reuseProject=reuse):JsonSchemaNode {
   const sentence=sentenceSchema(limits.text),project=projectSchema(limits),approach=approachSchema(limits),identity={...sentence,description:`Your stable first-person understanding of who you are: temperament, values, interests, or commitments that distinguish you from another creature. Do not summarize the current task or project. Preserve it across tasks and revise it only when experience changes your self-understanding. 1..${limits.text} characters.`};
-  if(reuse)project.required=[];
+  if(reuseProject)project.required=[];
   return reviewing?{
-    type:'object',properties:{outcome:{type:'string',enum:outcomes,description:'Outcome of this immediate task only. Complete a satisfied task even while its parent project continues.'},explanation:{...sentence,description:'Explain how the cited results satisfy the task condition, or why work remains.'},...(strategic?{identity,direction:sentence,project,suggestedActions:approach}:{}),...taskAssessmentProperties,...(free?{evidenceEventIds:{type:'array' as const,items:{type:'integer' as const},description:'For complete, cite recorded event IDs from availableEvidence that support your assessment.'}}:{})},required:['outcome','explanation',...(free?['conditionMet','remaining']:[])],additionalProperties:false,
+    type:'object',properties:{outcome:{type:'string',enum:outcomes,description:'Outcome of this immediate task only. Complete a satisfied task even while its parent project continues.'},explanation:{...sentence,description:'Explain how the cited results satisfy the task condition, or why work remains.'},...(strategic?{identity,direction:sentence,project,projectOutcome:projectOutcomeSchema,suggestedActions:approach}:{}),...taskAssessmentProperties,...(free?{evidenceEventIds:{type:'array' as const,items:{type:'integer' as const},description:'For complete, cite recorded event IDs from availableEvidence that support your assessment.'}}:{})},required:['outcome','explanation',...(free?['conditionMet','remaining']:[])],additionalProperties:false,
   }:{
-    type:'object',properties:{identity,direction:{...sentence,description:`Your longer-term interest or purpose, chosen by you. 1..${limits.text} characters.`},project,goal:{...sentence,description:`One immediate task that advances your project, 1..${limits.text} characters. Do not combine unrelated activities.`},successCondition:{...sentence,description:`One bounded observable result for this task. Avoid combining independent alternatives or milestones; an unexpected observed result can still complete a learning task.`},suggestedActions:approach,explanation:{...sentence,description:`Why this task now, or why the project changed. 1..${limits.text} characters.`}},required:[...(!reuse?['identity','direction','project']:[]),'goal','successCondition','suggestedActions','explanation'],additionalProperties:false,
+    type:'object',properties:{identity,direction:{...sentence,description:`Your longer-term interest or purpose, chosen by you. 1..${limits.text} characters.`},project,projectOutcome:projectOutcomeSchema,goal:{...sentence,description:`One immediate task that advances your project, 1..${limits.text} characters. Do not combine unrelated activities.`},successCondition:{...sentence,description:`One bounded observable result for this task. Avoid combining independent alternatives or milestones; an unexpected observed result can still complete a learning task.`},suggestedActions:approach,explanation:{...sentence,description:`Why this task now, or why the project changed. 1..${limits.text} characters.`}},required:[...(!reuse?['identity','direction']:[]),...(!reuseProject?['project']:[]),'goal','successCondition','suggestedActions','explanation'],additionalProperties:false,
   };
 }
 function argumentProblems(parameters:JsonSchemaNode,args:any,strategic:boolean,reviewing:boolean,limits=COMPACT_LIMITS,previous?:AgentPlan) {
@@ -89,26 +91,33 @@ export async function planDecision(options:{
     const legacy=reviewing&&(![2,3,4].includes(previous!.version??0)||previous!.steps.length!==1||(!free&&!previous!.steps[0].criterion)||previous!.startedAtSecond===undefined);
     const evidence=reviewing&&!legacy?milestoneEvidence(previous!,options.actions,options.observation):[];
     const availableEvidence=reviewing?evidenceContext(goalEvidence(previous!,options.actions)):[];
+    const projectActions=options.actions.filter(entry=>entry.result.collected||entry.result.placed||entry.result.shaped||entry.result.inventoryDelta?.length).slice(-24);
+    const projectEvidence=evidenceContext(goalEvidence({...previous,startedAtSecond:-1} as AgentPlan,[...new Map([...projectActions,...options.actions.slice(-8)].map(entry=>[entry.eventId,entry])).values()].sort((a,b)=>a.eventId-b.eventId)));
     const name=reviewing?'review_plan':'set_plan';
     const outcomes=legacy?['abandon']:free?['continue',...(availableEvidence.length?['complete']:[]),'blocked','abandon']:evidence.length?['complete','abandon']:(previous?.stalledReviews??0)>=1?['abandon']:['continue','abandon'];
     const reuse=previous?.version===4&&text(previous.identity,500)&&text(previous.direction,500)&&validProject(previous.project);
     const inherited=reuse?previous:undefined;
-    const parameters=planningSchema(reviewing,strategic,free,outcomes,COMPACT_LIMITS,reuse);
-    const acceptedParameters=planningSchema(reviewing,strategic,free,outcomes,EXPANDED_LIMITS,reuse);
+    const parameters=planningSchema(reviewing,strategic,free,outcomes,COMPACT_LIMITS,reuse,reuse&&activeProject(previous));
+    const acceptedParameters=planningSchema(reviewing,strategic,free,outcomes,EXPANDED_LIMITS,reuse,reuse&&activeProject(previous));
     const compactParameters=parameters;
     const instruction=reviewing
       ? !free?'Review verifiedProgress against the task condition. Choose an allowed outcome; older incompatible tasks must be abandoned. Explain the recorded progress.':'Assess the immediate task only. Explain how recorded results match its condition and what remains. When conditionMet is true, complete the task even if its project continues. Cite availableEvidence for complete. You may continue, block or abandon an unfinished task; a reminder does not force a change.'
       : 'Choose one immediate task and one bounded observable success condition, with one to three conditional suggestions. You author the task and project; no activity is assigned. A learning task can end with an unexpected observed result. A blocked task does not erase its project.';
+    const following=(options.context as {decisionState?:{following:boolean}})?.decisionState?.following;
+    const historicalPlan=previous?previousPlanContext(previous,options.observation,options.turn,following):undefined;
     let saving=false;
     try{
       const answer=await options.complete({messages:[
         {role:'system',content:`${options.planningInstructions?.replaceAll('{name}',options.name)??`You are ${options.name}, planning your life in a physical world.`} ${instruction} ${reuse?'Omit unchanged identity, direction and project fields; omitted fields retain their values. Project updates merge field by field. Review suggestions can be omitted; a new task needs its own suggestions.':'Write your stable identity, longer-term direction and sustained project.'} Current state and recorded results override old plans and notes. Distinguish facts from hypotheses; speech is another creature's belief. Compare exact experiment inputs; an unavailable tool is an untested possibility. Check conditional capabilities before declaring a test impossible. Paths describe individual directions, not a global blockage. Keep project progress durable; omit transient inventory and bearings. Suggest journal only for a specific insight or correction, using replaceNoteIds for obsolete claims. Write concise text fields of at most 500 characters; project.progress allows 1200. Keep the complete visible tool response within 2200 output tokens. Call only ${name}, using JSON objects and arrays, with no extra prose. Planning consumes no world time.`},
-        {role:'user',content:JSON.stringify({...(reviewing?{successCondition:previous!.steps.find(step=>step.status==='pending')?.task,...(free?{availableEvidence,assessment:'Judge progress against the task success condition; cite actual observed effects. Completing a task does not automatically complete the project.'}:{verifiedProgress:{complete:!!evidence.length,evidence,legacy}}),allowedOutcomes:outcomes,previousPlan:previous,elapsedDecisions:options.turn-previous!.createdTurn}:{...(previous?{previousPlan:previous}:{})}),...(options.upgrade?{transition:'Reframe your existing activity as a project and one immediate task. Keep useful progress and commitments, but question unsupported assumptions.'}:{}),...(options.reviewReason?{reviewReason:options.reviewReason}:{}),situation:options.context,...(correction?{correction,previousAttempt}:{})})},
+        {role:'user',content:JSON.stringify({...(reviewing?{successCondition:previous!.steps.find(step=>step.status==='pending')?.task,...(free?{availableEvidence,assessment:'Judge progress against the task success condition; cite actual observed effects. Completing a task does not automatically complete the project.'}:{verifiedProgress:{complete:!!evidence.length,evidence,legacy}}),allowedOutcomes:outcomes,previousPlan:historicalPlan,elapsedDecisions:options.turn-previous!.createdTurn}:{...(previous?{previousPlan:historicalPlan}:{})}),...(options.upgrade?{transition:'Reframe your existing activity as a project and one immediate task. Keep useful progress and commitments, but question unsupported assumptions.'}:{}),...(options.reviewReason?{reviewReason:options.reviewReason}:{}),situation:options.context,...(correction?{correction,previousAttempt}:{})})},
+        {role:'user',content:JSON.stringify({projectLifecycle:'Assess whether your existing project still matters. Use projectOutcome to complete, suspend or abandon it before replacing its goal or success condition. Closing a task alone keeps its project. A closed project needs a new, fully specified project before another task. Keep the choice and success assessment your own.',projectEvidence})},
       ],tools:[{type:'function',function:{name,description:reviewing?'Review your task, update project progress and adjust the suggested method using observed results.':'Write your own direction, project, immediate task and suggested actions.',parameters}}],max_tokens:4400,reasoning:options.reasoning??DEFAULT_REASONING_SETTINGS.planning},options.signal);
       options.signal.throwIfAborted();
       let args:any;
       if(answer.calls.length===1&&answer.calls[0].function.name===name){try{args=JSON.parse(answer.calls[0].function.arguments);}catch{}}
+      const authoredSuggestions=!!args&&Object.hasOwn(args,'suggestedActions');
       let problems=args?argumentProblems(acceptedParameters,args,strategic,reviewing,EXPANDED_LIMITS,inherited):[`Call ${name} exactly once with valid JSON arguments.`];
+      if(args&&!problems.length){const problem=projectTransitionProblem(previous,args,reviewing,projectEvidence.map(entry=>entry.eventId));if(problem)problems.push(problem);}
       if(formatDraft&&args&&!problems.length&&!isDeepStrictEqual(effectivePlanArguments(args,inherited),effectivePlanArguments(formatDraft,inherited)))problems.push('Format repair must preserve the effective values of previousAttempt; unchanged inherited fields may be omitted or repeated.');
       if(reviewing&&free&&args){const problem=taskAssessmentProblem(args.outcome,args);if(problem)problems.push(problem);}
       // A compactor may shorten a decision, but cannot repair its missing or invalid citations.
@@ -124,7 +133,10 @@ export async function planDecision(options:{
           problems=argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS,inherited);
         }
       }
-      if(args&&!problems.length)args=effectivePlanArguments(args,inherited);
+      if(args&&!problems.length){
+        const projectState=strategic||!reviewing?projectTransition(previous,args,reviewing):undefined;
+        args={...effectivePlanArguments(args,inherited),...projectState};
+      }
       let next:AgentPlan|undefined;
       if(args&&!problems.length){
         if(!reviewing){
@@ -137,6 +149,8 @@ export async function planDecision(options:{
         }
       }
       if(next){
+        if(options.observation&&(!reviewing||authoredSuggestions))next.suggestionBasis=suggestionBasis(options.observation,options.turn,following);
+        if(args.projectHistory)next.projectHistory=args.projectHistory;
         if(next.intention===undefined)delete next.intention;
         saving=true;options.save(next);saving=false;
         if(next.status==='active')return next;
@@ -146,6 +160,7 @@ export async function planDecision(options:{
         const draft=jsonTextDraft(answer);
         // Freeze only a valid decision. Invalid drafts still need semantic correction.
         if(!formatDraft&&draft&&!argumentProblems(acceptedParameters,draft,strategic,reviewing,EXPANDED_LIMITS,inherited).length
+          &&!projectTransitionProblem(previous,draft,reviewing,projectEvidence.map(entry=>entry.eventId))
           &&(!reviewing||!free||(!taskAssessmentProblem(String(draft.outcome),draft)&&
             (draft.outcome!=='complete'||!!referencedGoalEvidence(previous!,options.actions,draft.evidenceEventIds)))))formatDraft=draft;
       }

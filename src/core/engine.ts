@@ -208,7 +208,7 @@ export class Engine {
       if(!held.contents&&(((fluid&&distance(eye,point)<=3&&this.visible(e,point))||((kind==='sand'||kind==='dirt')&&!this.standingOn(target)&&this.blockInReach(e,target)&&this.blockSurfaces(target,eye).some(p=>this.visible(e,p))))&&canChangeContents(kind)))fill.push(target);
       if(held.contents&&clear&&(held.contents==='water'||(!this.cellOccupied(target)&&this.hasSupport(target)))&&canChangeContents())empty.push(target);
     }
-    const nearest=(targets:Vec3[])=>targets.sort((a,b)=>distance(eye,center(a))-distance(eye,center(b))).slice(0,3);
+    const nearest=(targets:Vec3[])=>targets.sort((a,b)=>distance(eye,center(a))-distance(eye,center(b)));
     return {place:nearest(place),fill:nearest(fill),empty:nearest(empty)};
   }
   observe(id: string): Observation {
@@ -241,9 +241,9 @@ export class Engine {
         const target=block.slice(0,3) as Vec3;
         return !this.module.manifest.materials[block[3]]?.fluid&&this.blockInReach(e,target)&&!this.standingOn(target)&&(!hasShovel||['sand','dirt','grass'].includes(block[3]));
       }).sort((a,b)=>(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0)||Number(obstacles.has(key(b.slice(0,3) as Vec3)))-Number(obstacles.has(key(a.slice(0,3) as Vec3)))||Number(b[3]==='wood')-Number(a[3]==='wood'))
-        .slice(0,2).map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
+        .map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
       pickup: emptyHands ? items.filter(item=>(!item.door||item.door.angle===0)&&distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
-        .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).slice(0,3).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
+        .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
       speak: entities.filter(other=>this.canSpeakTo(e,this.entity(other.id))).map(({id,name})=>({id,name})),
       follow: followCandidates.filter(other=>this.canFollow(e,this.entity(other.id))).map(({id,name,position})=>({id,name,metres:Math.round(distance(e.position,position)*10)/10})),
       ...this.containerTargets(e),
@@ -513,6 +513,14 @@ export class Engine {
     const other=this.collidingEntity(e,landing);
     if(other)return {issue:{kind:'entity',entity:other.name,entityId:other.id,message:`${other.name} occupies the landing point.`},message:`${other.name} occupies the landing point.`};
     return {landing};
+  }
+  inspectJump(id:string,angle:number,jumpDistance:number,viewAngles:readonly number[]=[0]) {
+    const e=this.entity(id);
+    if(!Number.isFinite(angle)||Math.abs(angle)>90||!Number.isFinite(jumpDistance)||jumpDistance<.75||jumpDistance>2.5)return {checked:false as const,message:'Use an angle from -90 to 90 and a distance from 0.75 to 2.5 metres.'};
+    const {landing}=this.planJump(e,e.yaw+angle,jumpDistance);
+    // An omitted option is unknown, never evidence about terrain hidden from this actor.
+    if(!landing||!viewAngles.some(viewAngle=>this.visible({...e,yaw:e.yaw+viewAngle},[landing[0],landing[1]+.02,landing[2]])))return {checked:false as const,message:'No locally visible safe landing was confirmed for this attempt. Inspect another direction or a different destination; this does not rule out other jumps.'};
+    return {checked:true as const,angle,distance:jumpDistance,landing:clone(landing),heightChange:landing[1]-e.position[1]};
   }
   private movementResponses(e:Entity,issue?:MovementIssue,clearance=0,yaw=e.yaw){
     const options:string[]=[],angle=((yaw-e.yaw+540)%360)-180;

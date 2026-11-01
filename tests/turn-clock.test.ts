@@ -54,6 +54,9 @@ function respond(request: Request, action: Action) {
   respondTool(request,name,argumentsValue);
 }
 function respondTool(request:Request,name:string,argumentsValue:unknown){
+  const fields=request.body.tools.find((tool:any)=>tool.function.name===name)?.function.parameters.properties;
+  const args=argumentsValue as Record<string,any>;
+  if(fields?.targetId&&args.target){const {target,...rest}=args;argumentsValue={...rest,targetId:`${name}:${target.join(',')}`};}
   argumentsValue=projectReply(name,argumentsValue);
   if(name==='review_plan'&&request.body.tools[0].function.parameters.properties.project){
     const previous=JSON.parse(request.body.messages[1].content).previousPlan;
@@ -143,11 +146,11 @@ test('early goal acknowledgment requires evidence, survives restart and resets t
   try{
     engine.setEntityEnabled('t2',false);engine.setEntityEnabled('duck',false);
     store.record(engine.frame(),engine.state(),r.runtime.persistence());r.clock.pump();
-    respondTool(await next(),'finish_goal',{outcome:'completed',reason:'I intend to scan.'});
+    respondTool(await next(),'complete_task',{reason:'I intend to scan.',evidenceEventIds:[]});
     const rejected=await next();assert.match(rejected.body.messages.at(-1).content,/No recorded evidence/);assert.equal(p.planningRequests.length,1);
     respond(rejected,{action:'find_material'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);r.clock.pump();
     const achieved=await next();const evidence=JSON.parse(achieved.body.messages.at(-1).content).plan.availableEvidence;assert.ok(evidence.length);
-    respondTool(achieved,'finish_goal',{outcome:'completed',reason:'The scan finished.',evidenceEventIds:[evidence[0].eventId]});
+    respondTool(achieved,'complete_task',{reason:'The scan finished.',evidenceEventIds:[evidence[0].eventId]});
     const replacement=await next();assert.equal(p.planningRequests.length,2);assert.equal(engine.tick,20);
     assert.equal(JSON.parse(replacement.body.messages.at(-1).content).plan.elapsedTaskDecisions,0);
     assert.equal(store.stateAt(20).entities.find(item=>item.id==='t1')!.plan!.reviewedTurn,1);
@@ -155,7 +158,7 @@ test('early goal acknowledgment requires evidence, survives restart and resets t
     resumed=run(restored,store,p.url,null);resumed.clock.pump();
     const afterRestart=await next();assert.equal(p.planningRequests.length,2,'The staged replacement must be reused.');
     assert.equal(JSON.parse(afterRestart.body.messages.at(-1).content).plan.elapsedTaskDecisions,0);
-    assert.equal(afterRestart.body.tools.some((tool:any)=>tool.function.name==='finish_goal'),false,'A second goal change is not offered in the same decision.');
+    assert.equal(afterRestart.body.tools.some((tool:any)=>tool.function.name==='complete_task'||tool.function.name==='replan_task'),false,'A second goal change is not offered in the same decision.');
     respond(afterRestart,{action:'wait'});await until(()=>resumed!.clock.status().phase==='advancing');resumed.advance(1000);
     assert.equal(restored.entity('t1').plan!.reviewedTurn,2);
     assert.deepEqual(store.eventsAt(40,'t1').filter(event=>event.type==='plan').map(event=>(event.data as any).plan.status),['active','completed','active']);
@@ -177,7 +180,7 @@ test('direct target arguments persist and revalidate at the shared commit',async
     engine.setEntityEnabled('t2',false);engine.setEntityEnabled('duck',false);
     engine.entity('t1').inventory={stacks:[{kind:'leaves',count:2}],selected:0,capacity:640};
     store.record(engine.frame(),engine.state(),r.runtime.persistence());r.clock.pump();await until(()=>p.requests.length===1);
-    const place=p.requests[0].body.tools.find((tool:any)=>tool.function.name==='place'),target=place.function.parameters.properties.target.examples[0];assert.ok(target);
+    const place=p.requests[0].body.tools.find((tool:any)=>tool.function.name==='place'),target=place.function.parameters.properties.targetId.enum[0].split(':')[1].split(',').map(Number);assert.ok(target);
     respondTool(p.requests[0],'place',{target});await until(()=>r.clock.status().phase==='advancing');
     const pending=store.loadPending<any>(0,'t1',r.runtime.inference.cacheKey);
     assert.equal(pending.calls[0].function.name,'place');assert.deepEqual(JSON.parse(pending.calls[0].function.arguments).target,target);
@@ -306,7 +309,7 @@ test('following asks every world second; stopping stages a free normal action th
     respond(p.requests[0],{action:'follow',entityId:'duck'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.equal(engine.tick,20);assert.ok(engine.entity('t1').motion);
     r.clock.pump();await until(()=>p.requests.length===2);
-    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal','finish_goal']);
+    assert.deepEqual(p.requests[1].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal','complete_task','replan_task']);
     const prompt=JSON.parse(p.requests[1].body.messages.at(-1).content);assert.equal(prompt.following.entityId,'duck');assert.ok(Math.abs(prompt.following.metres-3)<.01);
     assert.equal(prompt.inventory,undefined);assert.equal(prompt.notes,undefined);assert.equal(prompt.hints,undefined);assert.equal(prompt.recent,undefined);
     const frozen=engine.state();r.advance(90000);assert.deepEqual(engine.state(),frozen);
@@ -315,12 +318,14 @@ test('following asks every world second; stopping stages a free normal action th
     r.clock.pump();await until(()=>p.requests.length===3);respondTool(p.requests[2],'stop_follow',{});await until(()=>p.requests.length===4);
     assert.equal(engine.tick,40);assert.ok(engine.entity('t1').following,'Stopping must not mutate the shared observation instant.');
     assert.ok(p.requests[3].body.tools.some((tool:any)=>tool.function.name==='place'));
-    respond(p.requests[3],{action:'place',target:[-1,1,3]});await until(()=>r.clock.status().phase==='advancing');
+    const placement=p.requests[3].body.tools.find((tool:any)=>tool.function.name==='place').function.parameters.properties.targetId.enum[0];
+    const placedTarget=placement.split(':')[1].split(',').map(Number) as [number,number,number];
+    respondTool(p.requests[3],'place',{targetId:placement});await until(()=>r.clock.status().phase==='advancing');
     assert.ok(engine.entity('t1').following);r.clock.close();
     const restored=new Engine(engine.module,store.stateAt(40));restored.nextEvent=store.maxEventId()+1;
     resumed=run(restored,store,p.url,null);resumed.clock.pump();await until(()=>resumed!.clock.status().phase==='advancing');
     assert.equal(p.requests.length,4,'A ready stop-and-act decision must not call the model again.');
-    resumed.advance(1000);assert.equal(restored.tick,60);assert.equal(restored.entity('t1').following,undefined);assert.equal(restored.voxels.get([-1,1,3]),'wood');
+    resumed.advance(1000);assert.equal(restored.tick,60);assert.equal(restored.entity('t1').following,undefined);assert.equal(restored.voxels.get(placedTarget),'wood');
     assert.equal(resumed.runtime.minds.get('t1')!.turns,3);
     const actions=store.eventsAt(60,'t1').filter(event=>event.type==='action'&&event.tick===41).map(event=>(event.data as any).action.action);
     assert.deepEqual(actions,['stop_follow','place']);assert.deepEqual(resumed.failures,[]);
@@ -334,7 +339,7 @@ test('a legacy goal-learning journal offer cannot interrupt execution after foll
     engine.act('t1',{action:'follow',entityId:'duck'});
     Object.assign(r.runtime.minds.get('t1')!,{journalOffer:'You completed a goal. What memorable fact did you learn about the world?'});
     r.clock.pump();await until(()=>p.requests.length===1);
-    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal','finish_goal']);
+    assert.deepEqual(p.requests[0].body.tools.map((tool:any)=>tool.function.name),['follow','stop_follow','say','journal','complete_task','replan_task']);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/memorable fact/);
     respondTool(p.requests[0],'stop_follow',{});await until(()=>p.requests.length===2);
     assert.doesNotMatch(p.requests[1].body.messages[0].content,/memorable fact/);
@@ -361,7 +366,7 @@ test('execution foregrounds the assigned result and current matching targets wit
     assert.deepEqual(prompt.plan.criterion,{kind:'collect',subject:'wood'});
     assert.equal(prompt.plan.matchingReachableChoices,undefined);
     const hit=first.body.tools.find((tool:any)=>tool.function.name==='hit');
-    assert.ok(hit.function.parameters.properties.target.examples.some((target:number[])=>target.join(',')==='0,1,2'));
+    assert.ok(hit.function.parameters.properties.targetId.enum.includes('hit:0,1,2'));
     assert.equal(prompt.reminder,undefined);assert.equal(prompt.hints,undefined);
     assert.equal(prompt.plan.goalAchieved,false);
     respondTool(first,'look',{angle:180});await until(()=>p.requests.length===2);
@@ -588,14 +593,14 @@ test('a ready agent is retained while another exhausts look and corrects a remov
   }finally{r.clock.close();store.close();p.close();}
 });
 
-test('an out-of-range jump is corrected during inference without consuming a world turn',async()=>{
+test('an unoffered jump ID is corrected during inference without consuming a world turn',async()=>{
   const p=await provider(),engine=world(),store=new Store(':memory:',engine.module.manifest),r=run(engine,store,p.url,null);
   try{
     engine.setEntityEnabled('t2',false);r.clock.pump();await until(()=>p.requests.length===1);
-    respond(p.requests[0],{action:'jump',angle:-161,distance:1});await until(()=>p.requests.length===2);
+    respondTool(p.requests[0],'jump',{targetId:'jump:-161:1'});await until(()=>p.requests.length===2);
     assert.equal(engine.tick,0);assert.equal(engine.entity('t1').motion,undefined);
     const correction=JSON.parse(p.requests[1].body.messages.at(-1).content);
-    assert.equal(correction.ok,false);assert.match(correction.message,/Turn first/);
+    assert.equal(correction.ok,false);assert.match(correction.message,/targetId.*must be one of/);
     respond(p.requests[1],{action:'wait'});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     assert.equal(engine.tick,20);assert.equal(store.eventsAt(20,'t1').filter(event=>event.type==='rejected').length,0);
   }finally{r.clock.close();store.close();p.close();}
@@ -648,8 +653,8 @@ test('goal leads crack attention and the last result, and attention disappears a
       assert.deepEqual(context.decisionState,{following:false,stopFollowingPending:false});
       assert.match(context.attention,/Cracks.*observed changes/);
       const hit=request.body.tools.find((tool:any)=>tool.function.name==='hit');
-      assert.ok(hit.function.parameters.properties.target.examples.some((target:number[])=>target.join(',')==='0,1,1'));
-      assert.match(hit.function.parameters.properties.target.description,/cracks/);
+      assert.ok(hit.function.parameters.properties.targetId.enum.includes('hit:0,1,1'));
+      assert.match(hit.function.parameters.properties.targetId.description,/cracks/);
       respond(request,{action:'hit',target:[0,1,1]});await until(()=>r.clock.status().phase==='advancing');r.advance(1000);
     }
     assert.ok(store.eventsAt(engine.tick,'t1').some(event=>event.type==='observation'&&(event.data as any).attention?.includes('same block')));
@@ -715,7 +720,7 @@ test('journal favors durable world knowledge and persists notes for future promp
     assert.match(p.planningRequests[0].body.messages[0].content,/You are t1, a curious Troglodyte/);
     assert.match(p.planningRequests[0].body.messages[0].content,/Decide for yourself what you want to do/);
     assert.doesNotMatch(p.planningRequests[0].body.messages[0].content,/Your mission is to complete/);
-    assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='finish_goal').function.description,/completed: observed results/);
+    assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='complete_task').function.description,/observed results satisfy/);
     assert.doesNotMatch(p.requests[0].body.messages[0].content,/choose_action/);
     assert.match(p.requests[0].body.messages[0].content,/call journal only for a new interpretation/);
     const firstContext=JSON.parse(p.requests[0].body.messages.at(-1).content);

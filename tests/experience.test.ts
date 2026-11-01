@@ -107,10 +107,10 @@ test('planner sees accumulated experience and learned recipes while holding a di
       assert.equal(context.plan.direction,projectFields.direction);
       assert.equal(context.plan.project,projectFields.project.goal);
       assert.equal(context.plan.projectSuccessCondition,projectFields.project.successCondition);
-      assert.equal(context.plan.projectProgress,projectFields.project.progress);
-      assert.deepEqual(context.plan.openQuestions,projectFields.project.openQuestions);
+      assert.equal(context.plan.projectMemory.progress,projectFields.project.progress);
+      assert.deepEqual(context.plan.projectMemory.openQuestions,projectFields.project.openQuestions);
       assert.deepEqual(context.plan.suggestedActions,projectFields.suggestedActions);
-      assert.equal(context.plan.methodAgeDecisions,0);
+      assert.match(context.plan.suggestionStatus,/Conditional/);
       assert.equal(context.plan.reviewInDecisions,undefined);
       return answer('wait',{});
     };
@@ -129,7 +129,7 @@ test('unavailable task can return to its project without a false completion or w
     const runtime=new AgentRuntime(engine,store,{providers:[{id:'test',name:'Test',baseUrl:'http://unused.invalid',apiKey:'test',model:'test'}],maxTurns:null,retryDelayMs:1});
     runtime.minds.get('t1')!.plan=plan();record();let calls=0;
     runtime.inference.complete=async request=>{
-      if(++calls===1)return answer('finish_goal',{outcome:'blocked',reason:'The needed interaction is unavailable. I have not tested its result.'});
+      if(++calls===1)return answer('replan_task',{outcome:'blocked',reason:'The needed interaction is unavailable. I have not tested its result.',remaining:'Test another method.'});
       if(calls===2){
         const context=JSON.parse((request.messages[1] as any).content);
         assert.equal(context.previousPlan.status,'blocked');assert.equal(context.previousPlan.project.goal,projectFields.project.goal);

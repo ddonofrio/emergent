@@ -1,6 +1,6 @@
 import { assertSupportedJsonSchema, validateJsonSchemaValue, type JsonSchemaNode } from '../../vendor/deepseek-harness/json-schema';
 import type { Engine } from '../../src/core/engine';
-import type { Action, ActionResult, MilestoneCriterion, TaskAssessment } from '../../src/core/types';
+import type { Action, ActionResult, InteractionTargets, MilestoneCriterion, TaskAssessment } from '../../src/core/types';
 import { knowledgeDescription } from '../../src/core/knowledge';
 import { PRIVATE_NOTE_LIMIT, SHORT_TEXT_LIMIT } from '../../src/core/memory';
 import { speechProblem } from '../../src/core/speech';
@@ -17,11 +17,12 @@ export interface WorldTool {
   physical: boolean;
   unavailable?: string;
   validate?(args: unknown): string | undefined;
+  prepare?(args: Record<string,unknown>): Record<string,unknown>;
   output: { schema: JsonSchemaNode; render(args: unknown, value: unknown): { type: 'text'; text: string }[] };
   execute(args: unknown, exec?: { signal?: AbortSignal }): Promise<unknown>;
   invoke(args: unknown, exec?: { signal?: AbortSignal }): unknown;
 }
-export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;availableOnly?:boolean;capabilityPreview?:boolean;concise?:boolean;previewHand?:number|null;goalCriterion?:MilestoneCriterion;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned'|'blocked',reason:string,evidenceEventIds?:number[],assessment?:TaskAssessment)=>unknown} = {}): WorldTool[] {
+export function worldTools(engine: Engine, id: string, memory: Memory, options: {following?:boolean;viewAngle?:number;viewAngles?:number[];lookBudget?:number;referenceTargets?:boolean;inspectedJumps?:{angle:number;distance:number}[];onInspectJump?:(jump:{angle:number;distance:number})=>void;availableOnly?:boolean;capabilityPreview?:boolean;concise?:boolean;previewHand?:number|null;goalCriterion?:MilestoneCriterion;compactJournal?:(notes:readonly string[],incoming:string)=>Promise<string[]>;onJournalEntry?:(note:string)=>void;onFinishGoal?:(outcome:'completed'|'abandoned'|'blocked',reason:string,evidenceEventIds?:number[],assessment?:TaskAssessment)=>unknown} = {}): WorldTool[] {
   const tool = (name: string, description: string, parameters: JsonSchemaNode, physical: boolean, run: (args: any) => unknown): WorldTool => {
     assertSupportedJsonSchema(parameters);
     return { name, description, parameters, physical, output: { schema: {}, render: (_args, value) => {
@@ -32,10 +33,10 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
       async execute(args, exec) { return this.invoke(args, exec); },
       invoke(args, exec) {
         exec?.signal?.throwIfAborted();
-        const errors = validateJsonSchemaValue(parameters, args);
+        const errors = validateJsonSchemaValue(this.parameters, args);
         if (errors.length) return { ok: false, message: errors.join('; ') };
         const problem=this.validate?.(args);if(problem)return {ok:false,message:problem};
-        return run(args);
+        return run(this.prepare?this.prepare(args as Record<string,unknown>):args);
       } };
   };
   const action = (name:string,description:string,parameters:JsonSchemaNode,actionName:Action['action']) => tool(name,description,parameters,true,(args:Action)=>engine.act(id,{...args,action:actionName}));
@@ -76,15 +77,27 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
     if(!options.goalCriterion){const problem=taskAssessmentProblem(outcome,{conditionMet,remaining});if(problem)return {ok:false,message:problem};}
     return options.onFinishGoal!(outcome,reason.trim(),evidenceEventIds,typeof conditionMet==='boolean'?{conditionMet,remaining}:undefined);
   }):undefined;
+  const closureReason:JsonSchemaNode={type:'string',minLength:1,maxLength:1000,description:'Explain the result in one concise sentence, aiming for 500 characters or fewer. Up to 1000 is accepted without rewriting the decision.'};
+  const taskTools:WorldTool[]=!options.onFinishGoal?[]:options.goalCriterion?[finishGoal!]:[
+    tool('complete_task','Close your immediate task when observed results satisfy its full success condition. Cite recorded evidence and explain the match. Your project continues until you assess it separately. Call alone; following is preserved.',object({reason:closureReason,evidenceEventIds:{type:'array',items:{type:'integer'},description:'Cite 1..10 IDs from plan.availableEvidence.'}},['reason','evidenceEventIds']),false,({reason,evidenceEventIds})=>{
+      if(!reason.trim())return {ok:false,message:'Explain why the task condition is met.'};
+      return options.onFinishGoal!('completed',reason.trim(),evidenceEventIds,{conditionMet:true,remaining:''});
+    }),
+    tool('replan_task','Return an unfinished immediate task to your planner: blocked when the method needs reconsideration, abandoned when you no longer want it. Call alone; following and the parent project are preserved.',object({outcome:{type:'string',enum:['blocked','abandoned']},reason:closureReason,remaining:{type:'string',minLength:1,maxLength:500,description:'What remains unmet in this task.'}},['outcome','reason','remaining']),false,({outcome,reason,remaining})=>{
+      if(!reason.trim()||!remaining.trim())return {ok:false,message:'Explain why the task is unfinished and what remains.'};
+      return options.onFinishGoal!(outcome,reason.trim(),undefined,{conditionMet:false,remaining:remaining.trim()});
+    }),
+  ];
   if(options.following??!!entity.following)return [
     action('follow','Keep following, stopping one metre away.',noArgs,'follow'),
     tool('stop_follow','Stop following without spending time; then inspect or choose another physical action. Task closure does not require stopping.',noArgs,false,()=>({ok:true,message:'Following stopped for this decision. Choose from the updated tools.'})),
     say,
     journal,
-    ...(finishGoal?[finishGoal]:[]),
+    ...taskTools,
   ];
-  const view=availableOnly?engine.observeAt(id,options.viewAngle??0):undefined;
-  const targets=view?.interactions;
+  const views=availableOnly?[...new Set(options.viewAngles??[options.viewAngle??0])].map(angle=>engine.observeAt(id,angle)):[];
+  const view=views.find(view=>view.viewAngle===(options.viewAngle??0))??views.at(-1);
+  const targets=view?Object.fromEntries(Object.keys(view.interactions).map(name=>[name,[...new Map(views.flatMap(view=>(view.interactions as any)[name] as unknown[]).map(value=>[JSON.stringify(value),value])).values()]])) as unknown as InteractionTargets:undefined;
   const target=(values:readonly number[][]=[],details:readonly string[]=[])=>object({target:{type:'array',items:{type:'integer'},description:values.length?`Use one currently reachable [x,y,z] target: ${details.length?details.join('; '):values.map(value=>`[${value.join(',')}]`).join('; ')}.`:'Block coordinates [x,y,z].',...(values.length?{examples:values.map(value=>[...value])}:{})}},['target']);
   const doorTarget=(values:{itemId:string;metres:number;outsideYaw:number}[])=>object({itemId:{...choice(values.map(value=>value.itemId)),description:values.length?`Current reachable doors: ${values.map(value=>`${value.itemId}, ${value.metres} m away, outside yaw ${value.outsideYaw}, inside yaw ${(value.outsideYaw+180)%360}, left hinge viewed from outside, opens inward`).join('; ')}.`:'Installed door item ID.'}},['itemId']);
   const hitTargets=targets?.hit.map(block=>block.target)??[];
@@ -92,13 +105,24 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   const movement=(maximum:number)=>object({distance:{type:'number',description:`Metres: greater than 0, at most ${maximum}.`},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right.'}},['distance']);
   const walkMovement=object({distance:{type:'number',description:'Relative travel distance in metres: greater than 0, at most 32. Use with optional angle, or omit when using target.'},angle:{type:'number',description:'Body-relative degrees (-180..180); negative left, positive right. Use only with distance.'},target:{type:'array',items:{type:'number'},description:'Absolute observed position [x,y,z], using the same axes as observations: y is height, x and z are horizontal. Walk toward x,z; actual foot height follows terrain, so arrival does not guarantee reaching the requested height.'}});
   const tools:WorldTool[]=[
-    tool('look','Look without turning your body or spending time.',object({angle:{type:'number',description:'Body-relative viewing angle (-180..180 degrees).'}}),false,({angle=0}:{angle?:number})=>(options.concise?decisionView:compactView)(engine.observeAt(id,Math.max(-180,Math.min(180,angle))),options.goalCriterion)),
+    tool('look',`Inspect up to ${options.lookBudget??2} directions without turning your body or spending time. Use angles to inspect both in one call. Each view retains the normal field of view, range and occlusion. The initial forward view is already provided; repeating it adds no information unless a different view is needed.`,object({angle:{type:'number',description:'One body-relative angle (-180..180). Omit when supplying angles.'},angles:{type:'array',items:{type:'number'},description:`One or two body-relative viewing angles (-180..180), within the remaining budget of ${options.lookBudget??2}.`}}),false,({angle=0,angles}:{angle?:number;angles?:number[]})=>{
+      const inspectedAngles=angles??[angle];
+      const results=inspectedAngles.map(angle=>(options.concise?decisionView:compactView)(engine.observeAt(id,angle),options.goalCriterion));
+      return results.length===1?{...results[0],inspectedAngles}:{views:results,viewAngle:inspectedAngles.at(-1),inspectedAngles};
+    }),
     action('find_material','Scan 360 degrees for visible materials. Returns the nearest block target, distance to its centre and body-relative angle per material; one world second.',noArgs,'find_material'),
     action('find_entity','Scan 360 degrees for visible living beings within 18 metres. Returns each ID, name, kind, distance and body-relative angle; one world second.',noArgs,'find_entity'),
     action('walk','Walk using either distance and angle or target [x,y,z]. Y is always height. Walking follows terrain toward target x,z and stops before obstacles or unsafe terrain; it does not climb to target y automatically.',walkMovement,'walk'),
     action('turn','Turn your body and forward view.',object({angle:{type:'number',description:'Degrees (-360..360); negative left, positive right.'}},['angle']),'turn'),
   ];
-  if(finishGoal)tools.push(finishGoal);
+  tools[0].validate=args=>{
+    const {angle,angles}=args as {angle?:number;angles?:number[]};
+    if(angle!==undefined&&angles!==undefined)return 'Use angle or angles, not both.';
+    const values=angles??[angle??0];
+    if(!values.length||values.length>(options.lookBudget??2))return `Inspect at most ${options.lookBudget??2} remaining directions before acting.`;
+    if(new Set(values).size!==values.length||values.some(value=>!Number.isFinite(value)||Math.abs(value)>180))return 'Use distinct viewing angles from -180 to 180 degrees.';
+  };
+  tools.push(...taskTools);
   const raw=held&&['dirt','grass','sand','stone','wood','leaves'].includes(held.kind);
   if(raw)tools.push(tool('run',`Disabled while you hold ${held!.kind}; store, place, or throw it before running.`,movement(24),false,()=>({ok:false,message:`Run is unavailable while you hold ${held!.kind}. Store, place, or throw it first.`})));
   else tools.push(action('run','Run across clear terrain at twice the speed of walking.',movement(24),'run'));
@@ -112,7 +136,7 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
     tools.push(action('hit',capabilityPreview?'With empty hands, strike a reachable block when one is available; exact target coordinates come from the current observation.':`Strike one currently reachable block using its exact target coordinates.${availableOnly&&!hitTargets.length?' No reachable block is visible now; inspect another direction or approach one.':''}`,target(hitTargets,hitDetails),'hit'));
     {
       const items=targets?.pickup??[];
-      const details=items.map(item=>{const body=view?.items.find(candidate=>candidate.id===item.itemId);return `${item.itemId}: ${item.kind}${body?` at [${body.position.map(value=>Math.round(value*100)/100).join(',')}]`:''}, ${item.metres} m away`;});
+      const details=items.map(item=>{const body=views.flatMap(view=>view.items).find(candidate=>candidate.id===item.itemId);return `${item.itemId}: ${item.kind}${body?` at [${body.position.map(value=>Math.round(value*100)/100).join(',')}]`:''}, ${item.metres} m away`;});
       tools.push(action('pickup',capabilityPreview?'With empty hands, take a reachable loose item when one is available and usable; its exact ID comes from the current observation.':`Take one currently reachable loose item using its exact ID.${availableOnly&&!items.length?' No usable pickup target now; approach a visible loose item with free hands and enough inventory space.':''}`,object({itemId:{...choice(items.map(item=>item.itemId)),description:details.length?`Current reachable items: ${details.join('; ')}.`:'Loose item ID.'}},['itemId']),'pickup'));
     }
   }else{
@@ -147,7 +171,9 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
   }
   if(!engine.followersOf(entity).length){
     const followers=targets?.follow??[],details=followers.map(other=>`${other.id}: ${other.name}, ${other.metres} m away`);
-    tools.push(tool('follow',capabilityPreview?'Start following an eligible creature once it is visible within 20 metres, then stay one metre away. You can speak while following; stop_follow lets you choose other actions.':`Start following one currently visible creature within 20 metres and stay one metre away. You can speak while following; stop_follow lets you choose other actions.${availableOnly&&!followers.length?' No eligible creature is visible now; look around or approach a known sighting.':''}`,object({entityId:{...choice(followers.map(other=>other.id)),description:details.length?`Current visible creatures: ${details.join('; ')}.`:'Creature ID.'}},['entityId']),true,({entityId}:{entityId:string})=>engine.act(id,{action:'follow',entityId,angle:options.viewAngle??0})));
+    const follow=tool('follow',capabilityPreview?'Start following an eligible creature once it is visible within 20 metres, then stay one metre away. You can speak while following; stop_follow lets you choose other actions.':`Start following one currently visible creature within 20 metres and stay one metre away. You can speak while following; stop_follow lets you choose other actions.${availableOnly&&!followers.length?' No eligible creature is visible now; look around or approach a known sighting.':''}`,object({entityId:{...choice(followers.map(other=>other.id)),description:details.length?`Current visible creatures: ${details.join('; ')}.`:'Creature ID.'},...(!availableOnly?{angle:{type:'number' as const}}:{})},['entityId']),true,({entityId,angle=options.viewAngle??0}:{entityId:string;angle?:number})=>engine.act(id,{action:'follow',entityId,angle}));
+    if(availableOnly&&options.viewAngles)follow.prepare=args=>({...args,angle:views.find(view=>view.interactions.follow.some(other=>other.id===args.entityId))?.viewAngle??options.viewAngle??0});
+    tools.push(follow);
   }
   tools.push(say);
   tools.push(action('wait','Wait and watch.',noArgs,'wait'));
@@ -177,6 +203,43 @@ export function worldTools(engine: Engine, id: string, memory: Memory, options: 
         :entry.name==='pickup'?'Requires a reachable usable loose item and inventory space; inspect or approach one.'
         :'Requires a currently reachable target; look or move to inspect one.';
     }
+  }
+  if(options.referenceTargets&&availableOnly&&!capabilityPreview){
+    for(const entry of tools.filter(tool=>tool.physical&&tool.parameters.properties?.target&&tool.name!=='walk')){
+      const original=entry.parameters.properties!.target;
+      const values=(original.examples??[]) as number[][];
+      const references=new Map(values.map(target=>[`${entry.name}:${target.join(',')}`,target]));
+      entry.description=entry.description.replace('exact target coordinates','target ID');
+      entry.parameters=object({targetId:{type:'string',...(references.size?{enum:[...references.keys()]}:{}),description:`Choose an observed target ID. ${original.description}`}},['targetId']);
+      entry.prepare=({targetId,...args})=>{
+        const target=references.get(String(targetId));
+        if(!target)throw new Error('Unknown target ID in this observation.');
+        return {...args,target:[...target]};
+      };
+    }
+    const viewAngles=options.viewAngles??[options.viewAngle??0];
+    const candidates=[...(options.inspectedJumps??[])];
+    for(const angle of [...new Set(viewAngles.flatMap(view=>[-45,0,45].map(offset=>view+offset)).filter(angle=>Math.abs(angle)<=90))]){
+      const jump=[2,1,1.5,2.5,.75].map(distance=>engine.inspectJump(id,angle,distance,viewAngles)).find(jump=>jump.checked);
+      if(jump?.checked)candidates.push({angle:jump.angle,distance:jump.distance});
+    }
+    const checked=[...new Map(candidates.map(jump=>[`${jump.angle}:${jump.distance}`,engine.inspectJump(id,jump.angle,jump.distance,viewAngles)])).values()].filter(jump=>jump.checked);
+    const jumps=new Map(checked.map(jump=>[`jump:${jump.angle}:${jump.distance}`,jump]));
+    const jump=tools.find(tool=>tool.name==='jump')!;
+    jump.parameters=object({targetId:{type:'string',...(jumps.size?{enum:[...jumps.keys()]}:{}),description:`Checked landings: ${[...jumps].map(([ref,value])=>`${ref} -> feet [${value.landing.map(n=>Math.round(n*100)/100)}], height change ${value.heightChange}`).join('; ')}. Use inspect_jump to check another angle and distance.`}},['targetId']);
+    jump.validate=undefined;
+    jump.prepare=({targetId,...args})=>{
+      const value=jumps.get(String(targetId));
+      if(!value)throw new Error('Unknown jump ID in this observation.');
+      return {...args,angle:value.angle,distance:value.distance};
+    };
+    jump.description='Jump to one checked local landing. The same destination is revalidated at shared commit; other creatures may have moved.';
+    if(!jumps.size)jump.unavailable='No checked landing in the inspected directions. Use inspect_jump or look; other destinations are untested.';
+    tools.push(tool('inspect_jump','Check a specific jump using only locally visible terrain, without moving or spending world time. A confirmed landing becomes a jump target ID. An unconfirmed attempt does not rule out other jumps.',object({angle:{type:'number',description:'Body-relative degrees from -90 to 90.'},distance:{type:'number',description:'Distance in metres from 0.75 to 2.5.'}},['angle','distance']),false,({angle,distance})=>{
+      const result=engine.inspectJump(id,angle,distance,viewAngles);
+      if(result.checked)options.onInspectJump?.({angle,distance});
+      return {...result,...(result.checked?{targetId:`jump:${angle}:${distance}`}:{})};
+    }));
   }
   return tools;
 }

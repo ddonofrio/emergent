@@ -6,12 +6,19 @@ export interface Inventory { stacks: Stack[]; selected: number | null; capacity:
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; itemId?: string; }
 export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'approach'|'communicate'|'shape'; subject?:string; entityId?:string; }
 export interface TaskAssessment { conditionMet:boolean; remaining:string; }
+export interface AgentProject {
+  goal:string; successCondition:string; progress:string; openQuestions:string[];
+  status?:'active'|'completed'|'suspended'|'abandoned';
+  assessment?:string; evidenceEventIds?:number[];
+}
 export interface AgentPlan {
   version?: 2 | 3 | 4;
   identity?: string;
   direction?: string;
-  project?: { goal: string; successCondition: string; progress: string; openQuestions: string[] };
+  project?: AgentProject;
+  projectHistory?: AgentProject[];
   suggestedActions?: string[];
+  suggestionBasis?: { turn:number; tick:number; position:Vec3; yaw:number; holding:string; following:boolean; invalidated?:boolean };
   goal: string;
   status: 'active' | 'completed' | 'abandoned' | 'blocked';
   steps: { task: string; status: 'pending' | 'completed' | 'abandoned' | 'blocked'; evidence?: string; criterion?:MilestoneCriterion; evidenceEventIds?:number[]; assessment?:'agent' }[];

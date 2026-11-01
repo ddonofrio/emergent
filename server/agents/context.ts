@@ -173,7 +173,7 @@ export function progressContext(actions:ReturnType<typeof historicalActions>) {
     collected:window.filter(entry=>entry.result.collected).map(entry=>({eventId:entry.eventId,kind:entry.result.collected})),
     placed:window.filter(entry=>entry.result.ok&&entry.result.placed).map(entry=>({eventId:entry.eventId,kind:entry.result.placed,target:entry.args.target})),
     inventoryChanges:window.flatMap(entry=>(entry.result.inventoryDelta??[]).map(change=>({eventId:entry.eventId,...change}))),
-    ...(noMovement?{blockage:'At least three movement attempts failed or stopped early, with less than one metre of net progress. Use a checked jump, inspect another direction, or clear a reachable obstruction. You can use finish_goal to abandon an unhelpful goal before its scheduled review.'}:{}),
+    ...(noMovement?{blockage:'At least three movement attempts failed or stopped early, with less than one metre of net progress. Use a checked jump, inspect another direction, or clear a reachable obstruction. You can return an unhelpful task to the planner before its scheduled review.'}:{}),
     ...(repeatedScans?{scanReminder:'Repeated scans only locate things. They do not collect or place anything.'}:{}),
   };
 }

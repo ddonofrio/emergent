@@ -464,7 +464,7 @@ function renderDetails() {
       if(e.plan.identity){const identity=document.createElement('p');identity.className='plan-goal';identity.textContent=`Identity: ${e.plan.identity}`;section.append(identity);}
       if(e.plan.direction){const direction=document.createElement('p');direction.className='muted';direction.textContent=`Direction: ${e.plan.direction}`;section.append(direction);}
       if(e.plan.project){
-        const project=document.createElement('p');project.className='plan-goal';project.textContent=`Project: ${e.plan.project.goal}`;
+        const project=document.createElement('p');project.className='plan-goal';project.textContent=`Project (${e.plan.project.status??'active'}): ${e.plan.project.goal}`;
         const progress=document.createElement('p');progress.textContent=`Agent's progress assessment: ${e.plan.project.progress}`;
         const success=document.createElement('p');success.className='muted';success.textContent=`Project success condition: ${e.plan.project.successCondition}`;section.append(project,progress,success);
         if(e.plan.project.openQuestions.length){const questions=document.createElement('p');questions.className='muted';questions.textContent=`Open questions: ${e.plan.project.openQuestions.join(' ')}`;section.append(questions);}
@@ -479,7 +479,8 @@ function renderDetails() {
         steps.append(item);
       }
       section.append(steps);
-      if(e.plan.suggestedActions?.length){const approach=document.createElement('p');approach.className='muted';approach.textContent=`Suggested next actions: ${e.plan.suggestedActions.join(' Then, if still applicable: ')}`;section.append(approach);}
+      if(e.plan.projectHistory?.length){const history=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Earlier project assessments';history.append(summary);for(const project of e.plan.projectHistory){const item=document.createElement('p');item.textContent=`${project.status}: ${project.goal} ${project.assessment??''}`;history.append(item);}section.append(history);}
+      if(e.plan.suggestedActions?.length){const approach=document.createElement('p');approach.className='muted';approach.textContent=`Conditional suggestions${e.plan.suggestionBasis?` recorded at decision ${e.plan.suggestionBasis.turn}`:' from an earlier plan'} (may be stale): ${e.plan.suggestedActions.join(' Then, if still applicable: ')}`;section.append(approach);}
       const explanation=document.createElement('p');explanation.textContent=`Agent explanation: ${e.plan.explanation}`;section.append(explanation);
       const review=document.createElement('p');review.className='muted';review.textContent=`${e.plan.status} · Reviewed at decision ${e.plan.reviewedTurn} · Review by decision ${e.plan.reviewedTurn+PLAN_REVIEW_INTERVAL}, or earlier after new evidence or obstacles`;section.append(review);
     }else{const empty=document.createElement('p');empty.className='muted';empty.textContent='No plan recorded yet.';section.append(empty);}
