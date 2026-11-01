@@ -461,6 +461,7 @@ function renderDetails() {
     const section=document.createElement('section');section.className='agent-plan';section.setAttribute('aria-label','Recorded goal and steps');
     const planLabel=document.createElement('h4');planLabel.textContent='PROJECT AND TASK IN THIS RECORD';section.append(planLabel);
     if(e.plan){
+      if(e.plan.identity){const identity=document.createElement('p');identity.className='plan-goal';identity.textContent=`Identity: ${e.plan.identity}`;section.append(identity);}
       if(e.plan.direction){const direction=document.createElement('p');direction.className='muted';direction.textContent=`Direction: ${e.plan.direction}`;section.append(direction);}
       if(e.plan.project){
         const project=document.createElement('p');project.className='plan-goal';project.textContent=`Project: ${e.plan.project.goal}`;

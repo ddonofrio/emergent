@@ -1,8 +1,8 @@
 import type { Store } from '../store';
 import type { CompletionRequest, CompletionResult } from './providers';
-import { InvalidCompletionError } from './providers';
+import { InvalidCompletionError, ProviderUnavailableError } from './providers';
 
-export const PROMPT_VERSION='projects-and-experience-v4';
+export const PROMPT_VERSION='self-authored-identity-v6';
 export class InferenceAuditError extends Error {}
 
 function persist<T>(write:()=>T):T {
@@ -16,7 +16,7 @@ export async function auditedCompletion(store:Store,tick:number,actor:string,pha
   let answer:CompletionResult;
   try{answer=await complete();}
   catch(error){
-    persist(()=>store.finishInference(audit,{message:signal.aborted?'Request cancelled.':error instanceof InvalidCompletionError?error.message:'Inference did not return a valid response.'},signal.aborted?'cancelled':'failed'));
+    persist(()=>store.finishInference(audit,{message:signal.aborted?'Request cancelled.':error instanceof InvalidCompletionError||error instanceof ProviderUnavailableError?error.message:'Inference did not return a valid response.'},signal.aborted?'cancelled':'failed'));
     throw error;
   }
   persist(()=>store.finishInference(audit,answer,'completed'));

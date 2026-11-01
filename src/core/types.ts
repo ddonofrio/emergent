@@ -7,6 +7,7 @@ export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang'
 export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'approach'|'communicate'|'shape'; subject?:string; entityId?:string; }
 export interface AgentPlan {
   version?: 2 | 3 | 4;
+  identity?: string;
   direction?: string;
   project?: { goal: string; successCondition: string; progress: string; openQuestions: string[] };
   suggestedActions?: string[];

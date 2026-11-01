@@ -119,6 +119,9 @@ export class Store {
   finishInference(id:number|bigint,response:unknown,status:'completed'|'failed'|'cancelled') {
     this.db.prepare('UPDATE inference_audit SET response = ?, status = ? WHERE id = ?').run(pack(response),status,id);
   }
+  cancelInterruptedInferences() {
+    return this.db.prepare("UPDATE inference_audit SET response = ?, status = 'cancelled' WHERE status = 'pending'").run(pack({message:'Request cancelled by server restart.'})).changes;
+  }
   loadParallelRequests() { return (this.db.prepare('SELECT value FROM meta WHERE key = ?').get('parallelRequests') as {value:string}|undefined)?.value !== 'false'; }
   saveParallelRequests(enabled:boolean) { this.db.prepare('INSERT OR REPLACE INTO meta VALUES (?, ?)').run('parallelRequests',String(enabled)); }
   close() { this.db.close(); }

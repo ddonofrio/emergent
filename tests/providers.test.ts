@@ -132,6 +132,34 @@ test('cancelling an in-flight request stops the provider pulse without changing 
   assert.deepEqual(chain.healthFor(config.id),{state:'unknown',detail:'No inference result recorded yet.'});
 });
 
+test('HTTP 524 aborts peer requests and probes recovery serially on a fresh connection',async t=>{
+  interface PendingFetch {init:RequestInit;settled:boolean;resolve(response:Response):void;}
+  const pending:PendingFetch[]=[];
+  t.mock.method(globalThis,'fetch',(_url:unknown,init:RequestInit)=>new Promise<Response>((resolve,reject)=>{
+    const signal=init.signal as AbortSignal,record:PendingFetch={init,settled:false,resolve(response){if(record.settled)return;record.settled=true;signal.removeEventListener('abort',abort);resolve(response);}};
+    const abort=()=>{if(record.settled)return;record.settled=true;reject(signal.reason);};
+    signal.addEventListener('abort',abort,{once:true});pending.push(record);
+  }));
+  const until=async(condition:()=>boolean)=>{for(let index=0;index<100&&!condition();index++)await new Promise(resolve=>setTimeout(resolve,1));assert.equal(condition(),true);};
+  const config={...provider('vast'),type:'vast-ai' as const},chain=new ProviderChain([config],'first-only',5);
+  const first=chain.complete(request,AbortSignal.timeout(1000),()=>{}),peer=chain.complete(request,AbortSignal.timeout(1000),()=>{});
+  await until(()=>pending.length===2);
+  const firstRejection=assert.rejects(first,/HTTP 524/),peerRejection=assert.rejects(peer,/cancelled an in-flight request to recover/);
+  pending[0].resolve(new Response('',{status:524}));
+  await Promise.all([firstRejection,peerRejection]);
+
+  const recovered=chain.complete(request,AbortSignal.timeout(1000),()=>{}),queued=chain.complete(request,AbortSignal.timeout(1000),()=>{});
+  await until(()=>pending.length===3);
+  assert.equal((pending[2].init.headers as Record<string,string>).Connection,'close');
+  const success=()=>new Response(JSON.stringify({model:config.model,choices:[{message:{content:'ok',tool_calls:[]}}]}));
+  pending[2].resolve(success());
+  await recovered;
+  await until(()=>pending.length===4);
+  pending[3].resolve(success());
+  await queued;
+  assert.deepEqual(chain.healthFor(config.id),{state:'ok',detail:'Last inference request succeeded.'});
+});
+
 test('provider failure retains its exact health detail after fallback succeeds',async()=>{
   const providers=[provider('bedrock'),provider('local')],chain=new ProviderChain(providers,'round-robin');
   intercept(chain,async config=>{
@@ -196,7 +224,7 @@ test('token-limit responses are explicit invalid completions instead of empty su
   await assert.rejects(chain.complete(request,AbortSignal.timeout(1000),()=>{}),error=>error instanceof OutputTokenLimitError&&/token limit for generation \(10000 reasoning tokens \+ 32 output tokens\)/.test(error.message));
 });
 
-test('token-limit retries add one cumulative instruction line per failure',async()=>{
+test('token-limit retries replace the previous correction instead of growing the prompt',async()=>{
   const candidates:CompletionRequest[]=[];
   const original={...request,messages:[{role:'user',content:'Choose an action.'}]};
   const answer=await retryTokenLimitedCompletion(original,AbortSignal.timeout(1000),async candidate=>{
@@ -209,8 +237,23 @@ test('token-limit retries add one cumulative instruction line per failure',async
   const retryLines=(candidate:CompletionRequest)=>String((candidate.messages.at(-1) as {content?:unknown}).content).match(/^Limit token usage\./gm)?.length??0;
   assert.equal(retryLines(candidates[0]),0);
   assert.equal(retryLines(candidates[1]),1);
-  assert.equal(retryLines(candidates[2]),2);
+  assert.equal(retryLines(candidates[2]),1);
+  assert.doesNotMatch(String((candidates[2].messages.at(-1) as {content?:unknown}).content),/Retry 1/);
+  assert.match(String((candidates[2].messages.at(-1) as {content?:unknown}).content),/Retry 2/);
   assert.match(String((candidates[2].messages.at(-1) as {content?:unknown}).content),/10000 reasoning tokens and 2200 output tokens/);
+});
+
+test('minimum reasoning retries describe disabled thinking without a zero-token instruction',async()=>{
+  const candidates:CompletionRequest[]=[];
+  const original={...request,reasoning:'minimum' as const,messages:[{role:'user',content:'Choose an action.'}]};
+  await retryTokenLimitedCompletion(original,AbortSignal.timeout(1000),async candidate=>{
+    candidates.push(candidate);
+    if(candidates.length===1)throw new OutputTokenLimitError('local',900,0);
+    return result(provider('local'));
+  });
+  const correction=String((candidates[1].messages.at(-1) as {content?:unknown}).content);
+  assert.match(correction,/Reasoning is disabled/);
+  assert.doesNotMatch(correction,/0 reasoning tokens/);
 });
 
 test('reported reasoning and visible output usage are enforced separately',async t=>{
@@ -258,7 +301,7 @@ test('tokenless HTTP diagnostics remain readable when the provider key is empty'
   });
 });
 
-test('local reasoning and output budgets are separate and legacy thinking false is ignored',async t=>{
+test('every compatible reasoning profile reserves headroom and minimum explicitly disables thinking',async t=>{
   const bodies:Record<string,unknown>[]=[];
   t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{
     bodies.push(JSON.parse(String(init.body)));
@@ -268,14 +311,17 @@ test('local reasoning and output budgets are separate and legacy thinking false 
   await new ProviderChain([configured]).complete(request,AbortSignal.timeout(1000),()=>{});
   await new ProviderChain([provider('default')]).complete(request,AbortSignal.timeout(1000),()=>{});
   await new ProviderChain([{...provider('explicit'),enableThinking:true}]).complete({...request,reasoning:'minimum'},AbortSignal.timeout(1000),()=>{});
+  await new ProviderChain([provider('medium')]).complete({...request,reasoning:'medium'},AbortSignal.timeout(1000),()=>{});
+  await new ProviderChain([provider('maximum')]).complete({...request,reasoning:'maximum'},AbortSignal.timeout(1000),()=>{});
   assert.equal(bodies[0].enable_thinking,undefined);
   assert.equal(bodies[0].max_tokens,4096+DEFAULT_REASONING_TOKENS);
   assert.equal(bodies[0].max_completion_tokens,4096+DEFAULT_REASONING_TOKENS);
   assert.equal(bodies[1].enable_thinking,undefined);
-  assert.equal(bodies[1].max_tokens,request.max_tokens+DEFAULT_REASONING_TOKENS);
-  assert.equal(bodies[1].max_completion_tokens,request.max_tokens+DEFAULT_REASONING_TOKENS);
-  assert.equal(bodies[2].enable_thinking,true);
-  assert.equal(bodies[2].max_tokens,request.max_tokens);
-  assert.equal(bodies[2].max_completion_tokens,request.max_tokens);
+  for(const body of bodies.slice(1)){
+    assert.equal(body.max_tokens,request.max_tokens+DEFAULT_REASONING_TOKENS);
+    assert.equal(body.max_completion_tokens,request.max_tokens+DEFAULT_REASONING_TOKENS);
+  }
+  assert.equal(bodies[2].enable_thinking,false);
+  assert.deepEqual(bodies[2].chat_template_kwargs,{enable_thinking:false});
   assert.equal(bodies.every(body=>body.stream===false),true);
 });

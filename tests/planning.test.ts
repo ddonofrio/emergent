@@ -25,6 +25,7 @@ test('planning runs initially and after thirty decisions, including legacy plans
   assert.equal(needsPlanReview({...plan,version:undefined},2),true);
   const current:AgentPlan={version:4,...structuredClone(projectFields),goal:authored.goal,status:'active',steps:[{task:authored.successCondition,status:'pending'}],explanation:authored.explanation,createdTurn:1,reviewedTurn:1,startedAtSecond:0};
   assert.equal(needsPlanReview(current,2),false);
+  assert.equal(needsPlanReview({...current,identity:undefined},2),true,'Version 4 plans without a self-authored identity are refreshed immediately.');
   assert.equal(needsPlanReview({...current,suggestedActions:['Inspect the surroundings.']},2),true,'Version 4 plans without the standing journal action are refreshed.');
 });
 
@@ -84,7 +85,8 @@ test('the planner authors goals outside any catalog and preserves its exact succ
   let calls=0;
   const next=await planDecision({...base(),async complete(request){
     const schema=(request.tools[0] as any).function.parameters;
-    assert.deepEqual(Object.keys(schema.properties),['direction','project','goal','successCondition','suggestedActions','explanation']);
+    assert.deepEqual(Object.keys(schema.properties),['identity','direction','project','goal','successCondition','suggestedActions','explanation']);
+    assert.match(schema.properties.identity.description,/stable first-person understanding of who you are/);
     assert.equal(schema.properties.goal.enum,undefined);
     assert.equal(schema.properties.successCondition.enum,undefined);
     assert.doesNotMatch(JSON.stringify(request),/milestoneOptions|collect_wood|shape_wood/);
@@ -93,6 +95,7 @@ test('the planner authors goals outside any catalog and preserves its exact succ
     return answer('set_plan',authored);
   }});
   assert.equal(calls,3);assert.equal(next.version,4);assert.equal(next.steps.length,1);assert.equal(next.steps[0].criterion,undefined);
+  assert.equal(next.identity,projectFields.identity);
   assert.equal(next.goal,authored.goal);assert.equal(next.steps[0].task,authored.successCondition);
   assert.equal(next.explanation,authored.explanation);
   assert.equal(needsPlanReview(next,32),false,'A free-text goal needs no programmed criterion.');
@@ -150,7 +153,7 @@ test('planning corrects drafts beyond double the declared contract before compac
 
 test('plan compaction cannot change a review outcome or its evidence references',async()=>{
   const current:AgentPlan={version:4,...structuredClone(projectFields),goal:authored.goal,status:'active',steps:[{task:authored.successCondition,status:'pending'}],explanation:authored.explanation,createdTurn:1,reviewedTurn:1,startedAtSecond:0};
-  const draft={outcome:'continue',explanation:'Still useful. '.repeat(50),project:structuredClone(projectFields.project),suggestedActions:structuredClone(projectFields.suggestedActions),evidenceEventIds:[42]};
+  const draft={outcome:'continue',identity:projectFields.identity,explanation:'Still useful. '.repeat(50),project:structuredClone(projectFields.project),suggestedActions:structuredClone(projectFields.suggestedActions),evidenceEventIds:[42]};
   let plannerCalls=0,compactorCalls=0;
   const next=await planDecision({...base(),plan:current,async complete(){plannerCalls++;return answer('review_plan',draft);},async compact(){
     compactorCalls++;

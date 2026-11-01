@@ -78,7 +78,17 @@ test('planner sees accumulated experience and learned recipes while holding a di
         assert.doesNotMatch(JSON.stringify(context),/five planks|bottom_center to make/);
         return answer('set_plan',{...structuredClone(projectFields),goal:'Examine my recorded strike.',successCondition:'I have compared the observed input and output.',explanation:'Continue learning from my own experiments.'});
       }
+      const system=(request.messages[0] as {content:string}).content;
+      assert.match(system,/You are Flint, a curious, embodied Troglodyte/);
+      assert.match(system,/same individual across decisions/);
+      assert.match(system,/no observer access, external task, or score/);
+      assert.deepEqual(context.self,{name:'Flint',kind:'troglodyte',identity:projectFields.identity});
+      assert.equal(context.plan.identity,projectFields.identity);
+      assert.equal(context.plan.direction,projectFields.direction);
       assert.equal(context.plan.project,projectFields.project.goal);
+      assert.equal(context.plan.projectSuccessCondition,projectFields.project.successCondition);
+      assert.equal(context.plan.projectProgress,projectFields.project.progress);
+      assert.deepEqual(context.plan.openQuestions,projectFields.project.openQuestions);
       assert.deepEqual(context.plan.suggestedActions,projectFields.suggestedActions);
       assert.equal(context.plan.reviewInDecisions,undefined);
       return answer('wait',{});
@@ -148,10 +158,11 @@ test('looking changes the reported view direction but preserves the body frame f
 test('project reviews preserve the parent and reject an empty method before continuing',async()=>{
   const current=plan(),saved:AgentPlan[]=[];let calls=0;
   const next=await planDecision({name:'Flint',turn:10,time:9,plan:current,context:{},actions:[],signal:AbortSignal.timeout(1000),retryDelayMs:1,waiting(){},save(value){saved.push(value);},complete:async request=>{
-    if(calls){const context=JSON.parse((request.messages[1] as any).content);assert.match(context.correction,/suggestedActions must be a flat array/);assert.ok(context.previousAttempt);}
-    return answer('review_plan',{outcome:'continue',project:{...current.project,progress:'The previous method was blocked; I will inspect another approach.'},suggestedActions:++calls===1?[]:['Inspect a currently available interaction.','If it reveals a relevant new finding, call journal before acting again.'],explanation:'Change the method while retaining the project.'});
+    if(calls){const context=JSON.parse((request.messages[1] as any).content);assert.match(context.correction,/suggestedActions/);assert.ok(context.previousAttempt);}
+    return answer('review_plan',{outcome:'continue',identity:current.identity,project:{...current.project,progress:'The previous method was blocked; I will inspect another approach.'},suggestedActions:++calls===1?[]:['Inspect a currently available interaction.','If it reveals a relevant new finding, call journal before acting again.'],explanation:'Change the method while retaining the project.'});
   }});
   assert.equal(calls,2);assert.equal(saved.length,1);assert.equal(next.direction,current.direction);assert.equal(next.project!.goal,current.project!.goal);
+  assert.equal(next.identity,current.identity);
   assert.equal(next.suggestedActions!.length,2);assert.ok(next.suggestedActions!.some(action=>/\bjournal\b/i.test(action)));
   assert.equal(goalEvidence(next,[]).length,0);
 });

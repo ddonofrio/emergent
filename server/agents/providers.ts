@@ -1,6 +1,7 @@
 import { detectTokenLoop, tokenizeLoopText } from '../../vendor/deepseek-harness/loop-detector';
 import { BedrockClient, ListFoundationModelsCommand, ListInferenceProfilesCommand } from '@aws-sdk/client-bedrock';
 import { BedrockRuntimeClient, ConverseCommand, type ConverseCommandInput } from '@aws-sdk/client-bedrock-runtime';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string }; }
 export interface ProviderConfig {
@@ -100,16 +101,44 @@ export class OutputTokenLimitError extends InvalidCompletionError {
     const generatedDetail=generated?.reasoning!==undefined||generated?.output!==undefined
       ? ` The response used${generated.reasoning===undefined?'':` ${generated.reasoning} reasoning tokens`}${generated.reasoning!==undefined&&generated.output!==undefined?' and':''}${generated.output===undefined?'':` ${generated.output} output tokens`}.`
       : '';
-    super(`${providerName} reached the token limit for generation (${reasoningLimit} reasoning tokens + ${outputLimit} output tokens).${generatedDetail} The truncated response was discarded.`);
+    const budget=reasoningLimit===0?`reasoning disabled + ${outputLimit} output tokens`:`${reasoningLimit} reasoning tokens + ${outputLimit} output tokens`;
+    super(`${providerName} reached the token limit for generation (${budget}).${generatedDetail} The truncated response was discarded.`);
     this.name='OutputTokenLimitError';
   }
 }
+export class ProviderUnavailableError extends Error {}
+class ProviderHttpError extends ProviderUnavailableError {
+  constructor(message:string,readonly status:number){super(message);this.name='ProviderHttpError';}
+}
+class ProviderRecoveryError extends ProviderUnavailableError {
+  constructor(providerName:string){super(`${providerName} cancelled an in-flight request to recover after an upstream timeout.`);this.name='ProviderRecoveryError';}
+}
+
+interface ProviderRecoveryState {
+  active:number;
+  blockedUntil:number;
+  controller:AbortController;
+  degraded:boolean;
+  generation:number;
+  waiters:Set<()=>void>;
+}
+interface ProviderAttempt {
+  freshConnection:boolean;
+  generation:number;
+  release():void;
+  signal:AbortSignal;
+}
+const RECOVERY_HTTP_STATUSES=new Set([502,503,504,522,523,524]);
+const DEFAULT_RECOVERY_COOLDOWN_MS=1000;
 
 function tokenLimitRetryLine(error:OutputTokenLimitError,retry:number) {
   const generated=error.generated?.reasoning!==undefined||error.generated?.output!==undefined
     ? ` The previous attempt generated${error.generated.reasoning===undefined?'':` ${error.generated.reasoning} reasoning tokens`}${error.generated.reasoning!==undefined&&error.generated.output!==undefined?' and':''}${error.generated.output===undefined?'':` ${error.generated.output} output tokens`}.`
     : '';
-  return `Limit token usage. Retry ${retry}: the previous attempt exceeded the generation budget.${generated} Use no more than ${error.reasoningLimit} reasoning tokens and ${error.outputLimit} output tokens, then return the required tool call without extra prose.`;
+  const budget=error.reasoningLimit===0
+    ? `Reasoning is disabled for this request. Return the required tool call within ${error.outputLimit} output tokens without analysis prose.`
+    : `Use no more than ${error.reasoningLimit} reasoning tokens and ${error.outputLimit} output tokens, then return the required tool call without extra prose.`;
+  return `Limit token usage. Retry ${retry}: the previous attempt exceeded the generation budget.${generated} ${budget}`;
 }
 
 function addTokenLimitRetry(request:CompletionRequest,error:OutputTokenLimitError,retry:number):CompletionRequest {
@@ -127,7 +156,7 @@ function addTokenLimitRetry(request:CompletionRequest,error:OutputTokenLimitErro
   return{...request,messages};
 }
 
-/** Retry only budget exhaustion, varying the prompt with one cumulative line per failure. */
+/** Retry only budget exhaustion, replacing the previous correction instead of growing the prompt forever. */
 export async function retryTokenLimitedCompletion(request:CompletionRequest,signal:AbortSignal,complete:(candidate:CompletionRequest)=>Promise<CompletionResult>) {
   let candidate=request,retry=0;
   while(true){
@@ -136,7 +165,7 @@ export async function retryTokenLimitedCompletion(request:CompletionRequest,sign
     catch(error){
       signal.throwIfAborted();
       if(!(error instanceof OutputTokenLimitError))throw error;
-      candidate=addTokenLimitRetry(candidate,error,++retry);
+      candidate=addTokenLimitRetry(request,error,++retry);
     }
   }
 }
@@ -294,9 +323,10 @@ export class ProviderChain {
   private stickyIndex = 0;
   private bedrockClients = new Map<string,BedrockRuntimeClient>();
   private providerHealth = new Map<string,ProviderHealth>();
+  private providerRecovery = new Map<string,ProviderRecoveryState>();
   currentStatus='';
   readonly providers:ProviderConfig[];
-  constructor(providers: ProviderConfig[], public strategy: ProviderStrategy = 'fallback') {
+  constructor(providers: ProviderConfig[], public strategy: ProviderStrategy = 'fallback',private recoveryCooldownMs=DEFAULT_RECOVERY_COOLDOWN_MS) {
     this.providers=enabledProviders(providers);
   }
   get enabled() { return this.providers.length > 0; }
@@ -325,6 +355,64 @@ export class ProviderChain {
     await Promise.all(this.providers.filter(provider => provider.modelDiscovery === 'lm-studio').map(provider => this.discoverLmStudioModel(provider, signal)));
   }
 
+  private recoveryFor(id:string) {
+    let state=this.providerRecovery.get(id);
+    if(!state){state={active:0,blockedUntil:0,controller:new AbortController(),degraded:false,generation:0,waiters:new Set()};this.providerRecovery.set(id,state);}
+    return state;
+  }
+
+  private notifyRecoveryWaiters(state:ProviderRecoveryState) {
+    for(const wake of [...state.waiters])wake();
+  }
+
+  private waitForRecoverySlot(state:ProviderRecoveryState,signal:AbortSignal) {
+    return new Promise<void>((resolve,reject)=>{
+      const cleanup=()=>{state.waiters.delete(wake);signal.removeEventListener('abort',abort);};
+      const wake=()=>{cleanup();resolve();};
+      const abort=()=>{cleanup();reject(signal.reason);};
+      state.waiters.add(wake);signal.addEventListener('abort',abort,{once:true});
+      if(signal.aborted)abort();
+    });
+  }
+
+  private async acquireProviderAttempt(provider:ProviderConfig,signal:AbortSignal):Promise<ProviderAttempt> {
+    const state=this.recoveryFor(provider.id);
+    while(true){
+      signal.throwIfAborted();
+      const cooldown=state.blockedUntil-Date.now();
+      if(cooldown>0){
+        this.currentStatus=`${provider.name}: cooling down for ${Math.ceil(cooldown/1000)} seconds after an upstream timeout.`;
+        await delay(cooldown,undefined,{signal});
+        continue;
+      }
+      if(state.degraded&&state.active>0){await this.waitForRecoverySlot(state,signal);continue;}
+      state.active++;
+      const generation=state.generation,freshConnection=state.degraded;
+      const requestSignal=AbortSignal.any([signal,state.controller.signal]);
+      let released=false;
+      return{freshConnection,generation,signal:requestSignal,release:()=>{
+        if(released)return;released=true;state.active=Math.max(0,state.active-1);this.notifyRecoveryWaiters(state);
+      }};
+    }
+  }
+
+  private tripProviderRecovery(provider:ProviderConfig,generation:number) {
+    const state=this.recoveryFor(provider.id);
+    if(generation!==state.generation)return;
+    state.degraded=true;
+    state.blockedUntil=Date.now()+this.recoveryCooldownMs;
+    state.generation++;
+    state.controller.abort(new ProviderRecoveryError(provider.name));
+    state.controller=new AbortController();
+    this.notifyRecoveryWaiters(state);
+  }
+
+  private markProviderRecovered(id:string,generation:number) {
+    const state=this.recoveryFor(id);
+    if(generation!==state.generation)return;
+    state.blockedUntil=0;state.degraded=false;this.notifyRecoveryWaiters(state);
+  }
+
   async complete(request: CompletionRequest, signal: AbortSignal, onAttempt: (provider: ProviderConfig, index: number) => void): Promise<CompletionResult> {
     request={reasoning:DEFAULT_REASONING,reasoning_tokens:DEFAULT_REASONING_TOKENS,...request};
     const failures: string[] = [];
@@ -333,13 +421,16 @@ export class ProviderChain {
     const order=this.providerOrder();
     for (const {index,provider} of order) {
       signal.throwIfAborted();
+      let attempt:ProviderAttempt|undefined;
       try {
+        attempt=await this.acquireProviderAttempt(provider,signal);
         this.currentStatus=`${failures.length?`${failures.join(' ')} `:''}Requesting inference from ${provider.name}…`;
         this.providerHealth.set(provider.id,{...this.healthFor(provider.id),inFlight:true});
         if (provider.modelDiscovery === 'lm-studio') await this.discoverLmStudioModel(provider, signal);
         onAttempt(provider, index);
-        const result=await this.request(provider, request, signal);
+        const result=await this.request(provider, request, attempt.signal,attempt.freshConnection);
         validateToolCalls(provider,result.calls);
+        this.markProviderRecovered(provider.id,attempt.generation);
         this.providerHealth.set(provider.id,{state:'ok',detail:'Last inference request succeeded.'});
         this.currentStatus=`${provider.name}: connected; last inference request succeeded.${failures.length?` Earlier provider failures: ${failures.join(' ')}`:''}`;
         if(this.strategy==='fallback')this.stickyIndex=index;
@@ -350,19 +441,20 @@ export class ProviderChain {
           this.providerHealth.set(provider.id,health);
           signal.throwIfAborted();
         }
+        if(error instanceof ProviderHttpError&&RECOVERY_HTTP_STATUSES.has(error.status)&&attempt)this.tripProviderRecovery(provider,attempt.generation);
         if(error instanceof InvalidCompletionError)invalid++;
         if(error instanceof OutputTokenLimitError)tokenLimit=error;
         const detail=error instanceof Error?error.message:`${provider.name} failed.`;
-        this.providerHealth.set(provider.id,{state:'bad',detail});
+        if(!(error instanceof ProviderRecoveryError))this.providerHealth.set(provider.id,{state:'bad',detail});
         const failure=detail.startsWith(`${provider.name} `)?detail:`${provider.name}: ${detail}`;
-        this.currentStatus=failure;
+        this.currentStatus=error instanceof ProviderRecoveryError?`${provider.name}: recovering after an upstream timeout.`:failure;
         failures.push(failure);
-      }
+      } finally {attempt?.release();}
     }
     if(tokenLimit){this.currentStatus=`All inference providers exhausted or failed before producing a complete response. ${failures.join(' ')}`;throw tokenLimit;}
     if(order.length&&invalid===order.length){this.currentStatus=`All inference providers returned invalid completions. ${failures.join(' ')}`;throw new InvalidCompletionError(this.currentStatus);}
     this.currentStatus=`All inference providers are unavailable. ${failures.join(' ')}`;
-    throw new Error(this.currentStatus);
+    throw new ProviderUnavailableError(this.currentStatus);
   }
 
   private async discoverLmStudioModel(provider: ProviderConfig, signal: AbortSignal) {
@@ -389,7 +481,7 @@ export class ProviderChain {
     provider.reasoningOptions = normalizeReasoningOptions(preferred.capabilities?.reasoning?.allowed_options);
   }
 
-  private async request(provider: ProviderConfig, request: CompletionRequest, signal: AbortSignal): Promise<CompletionResult> {
+  private async request(provider: ProviderConfig, request: CompletionRequest, signal: AbortSignal,freshConnection=false): Promise<CompletionResult> {
     if(provider.type==='amazon-bedrock')return this.requestBedrock(provider,request,signal);
     const timeout = provider.timeoutMs ? AbortSignal.timeout(provider.timeoutMs) : undefined;
     const requestSignal = timeout ? AbortSignal.any([signal, timeout]) : signal;
@@ -397,20 +489,22 @@ export class ProviderChain {
     const {reasoning,reasoning_tokens,max_tokens,...completion}=request;
     const reasoningEffort=reasoning&&reasoning!=='default'&&provider.reasoningOptions?.length?selectReasoningEffort(provider.reasoningOptions,reasoning):undefined;
     const outputLimit=provider.maxOutputTokens??max_tokens;
-    // Default leaves the effort selector to the provider, but it still needs room
-    // for reasoning tokens. Only minimum explicitly removes that reserved budget.
-    const reasoningLimit=reasoning==='minimum'?0:(reasoning_tokens??DEFAULT_REASONING_TOKENS);
+    // Effort controls whether and how much the model reasons. Keep generation
+    // headroom for every profile because some compatible servers ignore effort
+    // controls and otherwise consume the visible-output budget with hidden thought.
+    const reasoningLimit=reasoning_tokens??DEFAULT_REASONING_TOKENS;
     const generationLimit=outputLimit+reasoningLimit;
+    const enableThinking=reasoning==='minimum'?false:provider.enableThinking===true?true:undefined;
     try {
       response = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
-        headers: providerHeaders(provider,{'Content-Type':'application/json'}),
+        headers: providerHeaders(provider,{'Content-Type':'application/json',...(freshConnection?{Connection:'close'}:{})}),
         signal: requestSignal,
         body: JSON.stringify({ ...completion, model: provider.model,
           stream:false,
           max_tokens:generationLimit,
           max_completion_tokens:generationLimit,
-          ...(provider.enableThinking===true?{enable_thinking:true}:{}),
+          ...(enableThinking===undefined?{}:{enable_thinking:enableThinking,chat_template_kwargs:{enable_thinking:enableThinking}}),
           ...(reasoningEffort?{reasoning_effort:reasoningEffort}:{}) }),
       });
     } catch (error) {
@@ -420,7 +514,7 @@ export class ProviderChain {
     }
     if (!response.ok) {
       const detail=await httpErrorDetail(response,provider);
-      throw new Error(`${provider.name} returned HTTP ${response.status}.${detail?` ${detail}`:''}`);
+      throw new ProviderHttpError(`${provider.name} returned HTTP ${response.status}.${detail?` ${detail}`:''}`,response.status);
     }
     let payload:{ model?: string; choices?: { finish_reason?:string; message: { content?: string; tool_calls?: ToolCall[] } }[]; usage?: unknown };
     try{payload=await response.json() as typeof payload;}

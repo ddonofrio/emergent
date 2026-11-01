@@ -18,6 +18,7 @@ const scriptedDemo=process.env.SCRIPTED_DEMO==='true';
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port.');
 const dataDirectory=resolve(process.env.DATA_DIR??'data'),llmConfigPath=resolve(dataDirectory,'llm-config.json');
 const store = new Store(resolve(dataDirectory, `${worldModule.manifest.id}.sqlite`), worldModule.manifest);
+store.cancelInterruptedInferences();
 const engine = new Engine(worldModule, store.hasWorld() ? store.stateAt(store.latestTick()) : undefined);
 engine.nextEvent = store.maxEventId() + 1;
 const optionalTurnLimit = (value: string | undefined) => {

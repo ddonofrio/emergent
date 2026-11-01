@@ -195,6 +195,17 @@ test('cancelled requests do not acknowledge speech or change the active intentio
   }finally{store.close();}
 });
 
+test('startup cleanup marks interrupted inference audits as cancelled',()=>{
+  const {store}=fixture();
+  try{
+    store.beginInference(0,'t1','action',PROMPT_VERSION,{messages:[],tools:[],max_tokens:20});
+    assert.equal(store.cancelInterruptedInferences(),1);
+    const row=store.db.prepare('SELECT status,response FROM inference_audit').get() as {status:string;response:Uint8Array};
+    assert.equal(row.status,'cancelled');
+    assert.equal(JSON.parse(inflateSync(row.response).toString()).message,'Request cancelled by server restart.');
+  }finally{store.close();}
+});
+
 test('decision views keep reachable targets once and historical speech has no usable old bearing',()=>{
   const {engine,store}=fixture();
   try{

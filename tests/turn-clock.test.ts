@@ -57,7 +57,7 @@ function respondTool(request:Request,name:string,argumentsValue:unknown){
   argumentsValue=projectReply(name,argumentsValue);
   if(name==='review_plan'&&request.body.tools[0].function.parameters.properties.project){
     const previous=JSON.parse(request.body.messages[1].content).previousPlan;
-    argumentsValue={project:previous.project,suggestedActions:previous.suggestedActions,...argumentsValue as object};
+    argumentsValue={identity:previous.identity??projectFields.identity,project:previous.project,suggestedActions:previous.suggestedActions,...argumentsValue as object};
   }
   request.response.setHeader('Content-Type','application/json');
   request.response.end(JSON.stringify({choices:[{message:{content:null,tool_calls:[{id:'call-'+request.id,type:'function',function:{name,arguments:JSON.stringify(argumentsValue)}}]}}],usage:{total_tokens:42}}));
@@ -708,7 +708,8 @@ test('journal favors durable world knowledge and persists notes for future promp
     assert.match(p.requests[0].body.tools.find((tool:any)=>tool.function.name==='journal').function.description,/memorable fact learned about the world/i);
     assert.match(p.requests[0].body.messages[0].content,/carrying out a task from your own plan/);
     assert.match(p.requests[0].body.messages[0].content,/Use current observations/);
-    assert.doesNotMatch(p.requests[0].body.messages[0].content,/curious|curiosity/i);
+    assert.match(p.requests[0].body.messages[0].content,/curious, embodied Troglodyte/);
+    assert.match(p.requests[0].body.messages[0].content,/same individual across decisions/);
     assert.match(p.planningRequests[0].body.messages[0].content,/You are t1, a curious Troglodyte/);
     assert.match(p.planningRequests[0].body.messages[0].content,/Decide for yourself what you want to do/);
     assert.doesNotMatch(p.planningRequests[0].body.messages[0].content,/Your mission is to complete/);
