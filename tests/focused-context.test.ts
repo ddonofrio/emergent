@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {Engine} from '../src/core/engine';
-import {island} from '../src/modules/island';
+import {island} from '../src/universes/first-shore';
 import type {AgentPlan,Block,Entity} from '../src/core/types';
 import {Store} from '../server/store';
 import {AgentRuntime} from '../server/agents/runtime';

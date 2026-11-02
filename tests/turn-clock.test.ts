@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { Engine } from '../src/core/engine';
-import { island } from '../src/modules/island';
+import { island } from '../src/universes/first-shore';
 import type { Action, Block, Entity, Frame } from '../src/core/types';
 import { Store } from '../server/store';
 import { AgentRuntime } from '../server/agents/runtime';

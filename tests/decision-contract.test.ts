@@ -3,7 +3,7 @@ import { projectFields, projectReply } from './agent-fixtures';
 import assert from 'node:assert/strict';
 import { inflateSync } from 'node:zlib';
 import { Engine } from '../src/core/engine';
-import { island } from '../src/modules/island';
+import { island } from '../src/universes/first-shore';
 import type { AgentPlan, Block, Entity } from '../src/core/types';
 import { Store } from '../server/store';
 import { AgentRuntime, type PreparedTurn } from '../server/agents/runtime';

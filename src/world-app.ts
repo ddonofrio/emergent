@@ -1,22 +1,23 @@
 import { WorldView } from './view/world-view';
 import { advancePlayback, fastScrubSpeed } from './view/playback-clock';
 import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, TURN_TICKS, type TurnStatus } from './core/time';
-import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from './core/types';
+import { key, unkey, type Frame, type UniverseManifest, type WorldEvent, type WorldState } from './core/types';
 import { knowledgeDescription } from './core/knowledge';
 import { PLAN_REVIEW_INTERVAL } from './core/memory';
 import { SAMPLING_TEMPLATES, type SamplingTemplateId } from './core/sampling-templates';
 
 interface ProviderHealth {state:'unknown'|'ok'|'bad';detail:string;inFlight?:boolean;}
-interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm' | 'waiting'; model: string; providerStrategy:string; llmConfig?:LlmConfig; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
+interface Metadata { universe: UniverseManifest; mode: 'demo' | 'llm' | 'waiting'; model: string; providerStrategy:string; llmConfig?:LlmConfig; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
 interface LlmProvider {id:string;type:string;enabled:boolean;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKeyRemoved?:boolean;tokenless?:boolean;apiKeySource?:'own'|'provider';apiKeySavedType?:string;apiKeyCleared?:boolean;apiKey?:string;vastTokenConfigured?:boolean;vastTokenRemoved?:boolean;vastTokenCleared?:boolean;vastToken?:string;vastContainerLabel?:string;samplingTemplate?:SamplingTemplateId;copyFromId?:string;health?:ProviderHealth;}
 type ReasoningProfile='default'|'minimum'|'medium'|'maximum';
 interface ReasoningSettings {movement:ReasoningProfile;action:ReasoningProfile;planning:ReasoningProfile;planCompaction:ReasoningProfile;journalCompaction:ReasoningProfile;}
 interface LlmConfig {strategy:string;reasoning:ReasoningSettings;currentStatus?:string;providers:LlmProvider[];}
 interface ProviderModelOption {id:string;label:string;}
-const worldId=/^\/worlds\/([a-z0-9-]+)\/?$/.exec(window.location.pathname)?.[1];
-if(!worldId)throw new Error('A world route is required.');
-const worldApi=`/api/worlds/${worldId}`;
+const universeId=/^\/universes\/([a-z0-9-]+)\/?$/.exec(window.location.pathname)?.[1];
+if(!universeId)throw new Error('A universe route is required.');
+const worldApi=`/api/universes/${universeId}`;
+document.body.classList.toggle('world-only',universeId==='robots-vs-robots');
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <main id="main">
@@ -75,6 +76,7 @@ let meta: Metadata;
 let shown: WorldState;
 let liveDynamic: Omit<WorldState,'blocks'>;
 const liveCells = new Map<string,string>();
+const liveRemoved = new Set<string>();
 let latest = 0, selected = 't1', isLive = true, playing = false, cursor = 0, scrubTarget: number | null = null, events: WorldEvent[] = [], liveEvents: WorldEvent[] = [];
 let epoch = 0, seekTimer: ReturnType<typeof setTimeout>, replayFrames: Frame[] = [], fetching = false, replayClock = 0, replayRequest = 0, lastPlayback = performance.now(), lastUi = 0, nextReplayFetch = 0, seeking = false;
 let dayCount = 0,detailsSignature='';
@@ -294,14 +296,16 @@ async function loadMemory(){
   catch{if(request===memoryRequest){memoryView={actor,tick,notes:[]};renderDetails();}}
 }
 function setBoot(boot: Boot) {
-  meta = boot; latest = boot.latestTick; liveDynamic = boot.state; liveCells.clear();
+  meta = boot; latest = boot.latestTick; liveDynamic = boot.state; liveCells.clear();liveRemoved.clear();
   for (const [x,y,z,kind] of boot.state.blocks) liveCells.set(key([x,y,z]),kind);
+  for(const voxel of boot.state.removedBlocks??[])liveRemoved.add(voxel);
+  if(!boot.state.entities.some(entity=>entity.id===selected)&&boot.state.entities[0]){selected=boot.state.entities[0].id;view.select(selected);}
   liveEvents = boot.events; $('loading').classList.add('hidden');
   renderProviderStatus(meta.llmConfig);
   if(!meta.llmConfig||meta.llmConfig.providers.some(provider=>!provider.health||provider.health.state==='unknown'))void loadProviderStatus();
   $<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
   $<HTMLInputElement>('parallel-requests').disabled=false;
-  $('module-name').textContent = meta.module.name;
+  $('module-name').textContent = meta.universe.name;
   if (isLive) goLive(); else renderTimeline();
 }
 const stream = new EventSource(`${worldApi}/stream`);
@@ -325,7 +329,7 @@ stream.addEventListener('frame', event => {
   const packet = JSON.parse((event as MessageEvent).data) as { frame: Frame; runtime: TurnStatus }, frame = packet.frame;
   if (!meta) return;
   latest = frame.tick; meta.runtime = packet.runtime; liveDynamic = frame;
-  for (const [k,kind] of frame.changes) { if (kind) liveCells.set(k,kind); else liveCells.delete(k); }
+  for (const [k,kind] of frame.changes) { if (kind){liveCells.set(k,kind);liveRemoved.delete(k);}else{liveCells.delete(k);if(meta.universe.terrain)liveRemoved.add(k);} }
   liveEvents = [...liveEvents,...frame.events].slice(-200);
   if (isLive) {
     shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);
@@ -338,8 +342,8 @@ stream.addEventListener('frame', event => {
 function goLive() {
   if (!meta || !liveDynamic) return;
   epoch++; replayRequest++; fetching = false; seeking = false; clearTimeout(seekTimer); isLive = true; playing = false; scrubTarget = null; replayFrames = [];
-  shown = { ...liveDynamic, blocks: [...liveCells].map(([k,kind]) => [...unkey(k),kind]) };
-  cursor = latest; events = liveEvents; view.load(shown,meta.module); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
+  shown = { ...liveDynamic, blocks: [...liveCells].map(([k,kind]) => [...unkey(k),kind]), ...(liveRemoved.size?{removedBlocks:[...liveRemoved]}:{}) };
+  cursor = latest; events = liveEvents; view.load(shown,meta.universe); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
 }
 async function seek(tick: number) {
   const request = ++epoch; replayRequest++; fetching = false; seeking = true; isLive = false; playing = false; scrubTarget = null; replayFrames = []; view.hold();
@@ -347,7 +351,7 @@ async function seek(tick: number) {
   try {
     const response = await fetch(`${worldApi}/state?tick=${cursor}`); if (!response.ok) throw new Error('Could not load recorded history.');
     const data = await response.json() as Boot; if (request !== epoch) return;
-    shown = data.state; cursor = shown.tick; replayClock = cursor; seeking = false; events = data.events; view.load(shown,meta.module); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
+    shown = data.state; cursor = shown.tick; replayClock = cursor; seeking = false; events = data.events; view.load(shown,meta.universe); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
   } catch (error) { if (request === epoch) toast(error instanceof Error ? error.message : 'History unavailable.'); }
   finally { if (request === epoch) seeking = false; }
 }
@@ -467,7 +471,7 @@ function renderDetails() {
   detailsSignature=signature;panel.replaceChildren();recordPanel.replaceChildren();
   const held=e.inventory?.selected===null||!e.inventory?undefined:e.inventory.stacks[e.inventory.selected];
   const inventory=e.inventory?.stacks.map((stack,index)=>`${index}: ${stack.count} × ${stack.kind}${stack.contents?` (${stack.contents})`:''}`).join(', ')??'Empty';
-  const pairs = [['Position',`${e.position.map(v => v.toFixed(1)).join(' / ')} / ${Math.round(e.yaw)}º`],['Hands',held?`${held.kind}${held.contents?` · ${held.contents}`:''}`:'Empty'],['Inventory',inventory],['Perception',`${meta.module.perception.range} m · ${meta.module.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
+  const pairs = [['Position',`${e.position.map(v => v.toFixed(1)).join(' / ')} / ${Math.round(e.yaw)}º`],['Hands',held?`${held.kind}${held.contents?` · ${held.contents}`:''}`:'Empty'],['Inventory',inventory],['Perception',`${meta.universe.perception.range} m · ${meta.universe.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
   for (const [label,value] of pairs) { const row = document.createElement('div'); row.className = 'detail-row';row.dataset.detail=label; const a = document.createElement('span'); a.textContent = label; const b = document.createElement('span');b.className='detail-value'; b.textContent = value; row.append(a,b); panel.append(row); }
   if(e.controller==='agent'){
     const section=document.createElement('section');section.className='agent-plan';section.setAttribute('aria-label','Recorded goal and steps');

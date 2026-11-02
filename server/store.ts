@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { deflateSync, inflateSync } from 'node:zlib';
-import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from '../src/core/types';
+import { key, unkey, type Frame, type UniverseManifest, type WorldEvent, type WorldState } from '../src/core/types';
 import { CLOCK_VERSION } from '../src/core/time';
 import { PRIVATE_NOTE_LIMIT, RECENT_ACTION_LIMIT } from '../src/core/memory';
 
@@ -11,7 +11,7 @@ const unpack = <T>(data: Uint8Array): T => JSON.parse(inflateSync(data).toString
 export class Store {
   db: DatabaseSync;
   private savedMinds = new Map<string,string>();
-  constructor(path: string, manifest: ModuleManifest) {
+  constructor(path: string, readonly manifest: UniverseManifest) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
@@ -29,9 +29,10 @@ export class Store {
       this.db.close(); throw new Error('This recording uses an older clock. Archive it and start a new world.');
     }
     this.db.prepare('INSERT OR IGNORE INTO meta VALUES (?, ?)').run('clock', CLOCK_VERSION);
-    const previous = this.db.prepare('SELECT value FROM meta WHERE key = ?').get('module') as { value: string } | undefined;
-    if (previous && !compatibleManifest(previous.value,manifest)) { this.db.close();throw new Error('Module configuration changed. Use a new DATA_DIR to preserve the existing recording.'); }
-    this.db.prepare('INSERT OR IGNORE INTO meta VALUES (?, ?)').run('module', JSON.stringify(manifest));
+    // Older recordings used the name "module" before universes and world instances were separated.
+    const previous = (this.db.prepare('SELECT value FROM meta WHERE key = ?').get('universe')??this.db.prepare('SELECT value FROM meta WHERE key = ?').get('module')) as { value: string } | undefined;
+    if (previous && !compatibleManifest(previous.value,manifest)) { this.db.close();throw new Error('Universe configuration changed. Use a new DATA_DIR to preserve the existing recording.'); }
+    this.db.prepare('INSERT OR IGNORE INTO meta VALUES (?, ?)').run('universe', JSON.stringify(manifest));
   }
   latestTick() { return (this.db.prepare('SELECT MAX(tick) AS tick FROM frames').get() as { tick: number | null }).tick ?? 0; }
   hasWorld() { return !!this.db.prepare('SELECT tick FROM checkpoints LIMIT 1').get(); }
@@ -60,11 +61,15 @@ export class Store {
     if (!checkpoint) throw new Error('No recording exists at that time.');
     let state = unpack<WorldState>(checkpoint.data);
     const cells = new Map(state.blocks.map(([x,y,z,kind]) => [key([x,y,z]),kind]));
+    const removed = new Set(state.removedBlocks??[]);
     const rows = this.db.prepare('SELECT data FROM frames WHERE tick > ? AND tick <= ? ORDER BY tick').all(checkpoint.tick, tick) as { data: Uint8Array }[];
     for (const row of rows) {
       const frame = unpack<Frame>(row.data);
-      for (const [k, kind] of frame.changes) { if (kind) cells.set(k, kind); else cells.delete(k); }
-      state = { tick: frame.tick, time: frame.time, entities: frame.entities, bodies: frame.bodies, lost: frame.lost, inbox: frame.inbox, blockDamage: frame.blockDamage ?? {}, discoveries:frame.discoveries??{},contacts:frame.contacts??{},encounterNotices:frame.encounterNotices??{},terrainNotices:frame.terrainNotices??{},impactNotices:frame.impactNotices??{}, blocks: [] };
+      for (const [k, kind] of frame.changes) {
+        if (kind) { cells.set(k, kind);removed.delete(k); }
+        else { cells.delete(k);if(this.manifest.terrain)removed.add(k); }
+      }
+      state = { tick: frame.tick, time: frame.time, entities: frame.entities, bodies: frame.bodies, lost: frame.lost, inbox: frame.inbox, blockDamage: frame.blockDamage ?? {}, discoveries:frame.discoveries??{},contacts:frame.contacts??{},encounterNotices:frame.encounterNotices??{},terrainNotices:frame.terrainNotices??{},impactNotices:frame.impactNotices??{}, blocks: [], ...(removed.size?{removedBlocks:[...removed]}:{}) };
     }
     state.blocks = [...cells].map(([k, kind]) => [...unkey(k),kind]); return state;
   }
@@ -127,9 +132,9 @@ export class Store {
   close() { this.db.close(); }
 }
 
-function compatibleManifest(recorded: string, current: ModuleManifest) {
+function compatibleManifest(recorded: string, current: UniverseManifest) {
   try {
-    const previous=JSON.parse(recorded) as ModuleManifest;
+    const previous=JSON.parse(recorded) as UniverseManifest;
     // Day length is presentation metadata; ticks remain the authoritative net time.
     previous.daySeconds=current.daySeconds;
     // Agent wording does not change recorded geometry or replay compatibility.

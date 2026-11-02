@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { key, unkey, type Body, type Entity, type Frame, type ModuleManifest, type Vec3, type WorldState } from '../core/types';
+import { key, unkey, type Body, type Entity, type Frame, type UniverseManifest, type Vec3, type WorldState } from '../core/types';
 import { entityLabelText } from './entity-label';
 
 const neighbors: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
@@ -21,10 +21,13 @@ export class WorldView {
   private effects: { mesh: THREE.Mesh; until: number; start: number }[] = [];
   private sea: THREE.Mesh;
   private seabed: THREE.Mesh;
+  private proceduralGround?: THREE.InstancedMesh;
+  private proceduralGroundOrigin = '';
+  private removedTerrain = new Set<string>();
   private labels = new Map<string, HTMLButtonElement>();
   private cube = new THREE.BoxGeometry(1,1,1);
   private blockMaterial = new THREE.MeshStandardMaterial({ roughness: .94, metalness: 0 });
-  private manifest?: ModuleManifest;
+  private manifest?: UniverseManifest;
   private current?: Pick<WorldState,'entities'|'bodies'|'time'>;
   private prior?: Pick<WorldState,'entities'|'bodies'|'time'>;
   private received = 0;
@@ -35,6 +38,7 @@ export class WorldView {
   private last = performance.now();
   private target = new THREE.Vector3();
   private frameId = 0;
+  private loaded = false;
   private observer: ResizeObserver;
   readonly onSelect: (id: string) => void;
   constructor(readonly container: HTMLElement, onSelect: (id: string) => void) {
@@ -77,19 +81,23 @@ export class WorldView {
     if (kind) { this.cells.set(k,kind); if (!this.chunks.has(chunk)) this.chunks.set(chunk,new Set()); this.chunks.get(chunk)!.add(k); }
     else { this.cells.delete(k); this.chunks.get(chunk)?.delete(k); }
   }
-  load(state: WorldState, manifest: ModuleManifest) {
-    this.manifest = manifest; this.cells.clear(); this.chunks.clear(); this.punches.clear(); this.damage=new Map(Object.entries(state.blockDamage??{}));
+  load(state: WorldState, manifest: UniverseManifest) {
+    this.manifest = manifest; this.cells.clear(); this.chunks.clear(); this.punches.clear(); this.damage=new Map(Object.entries(state.blockDamage??{}));this.removedTerrain=new Set(state.removedBlocks??[]);
+    const fog=manifest.view?.fog??{near:150,far:420};this.scene.fog=new THREE.Fog('#b2ccc1',fog.near,fog.far);this.controls.maxDistance=manifest.view?.maxDistance??260;
     this.sea.position.y = manifest.waterLevel + .015; this.seabed.position.y = manifest.bounds.min[1];
     for (const effect of this.effects) { this.scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose(); } this.effects = [];
     for (const mesh of this.meshes.values()) { this.scene.remove(mesh); mesh.dispose(); } this.meshes.clear();
     for (const [x,y,z,kind] of state.blocks) this.setCell(key([x,y,z]),kind);
     for (const chunk of this.chunks.keys()) this.buildChunk(chunk);
+    this.proceduralGroundOrigin='';this.buildProceduralGround();
     this.current = state; this.prior = state; this.received = performance.now(); this.syncEntities(state.entities);
+    if(!this.loaded){this.loaded=true;this.overview();}
   }
   hold() { this.prior = this.current; }
   update(frame: Frame, snap = false, speed = 1) {
     const dirty = new Set<string>();
     for (const [k,kind] of frame.changes) {
+      if(kind)this.removedTerrain.delete(k);else if(this.manifest?.terrain&&unkey(k)[1]<=this.manifest.terrain.top)this.removedTerrain.add(k);
       this.setCell(k,kind); const p = unkey(k); dirty.add(this.chunk(p));
       for (const offset of neighbors) dirty.add(this.chunk(p.map((v,i) => v+offset[i]) as Vec3));
     }
@@ -97,6 +105,7 @@ export class WorldView {
     for(const voxel of new Set([...this.damage.keys(),...nextDamage.keys()]))if(this.damage.get(voxel)!==nextDamage.get(voxel))dirty.add(this.chunk(unkey(voxel)));
     this.damage=nextDamage;
     for (const chunk of dirty) this.buildChunk(chunk);
+    if(frame.changes.length){this.proceduralGroundOrigin='';this.buildProceduralGround();}
     this.prior = snap ? frame : this.current;
     this.interpolationMs = Math.max(1, (frame.time - (this.prior?.time ?? frame.time)) * 1000 / speed);
     this.current = frame; this.received = performance.now(); this.syncEntities(frame.entities);
@@ -126,6 +135,29 @@ export class WorldView {
       const color = new THREE.Color(this.manifest!.materials[kind]?.color ?? '#ffffff'); color.multiplyScalar((.94 + .1 * (Math.sin(p[0]*12.98 + p[2]*78.23 + p[1]*37.7)*.5+.5))*(1-(this.damage.get(k)??0)*.22)); mesh.setColorAt(index,color);
     });
     mesh.castShadow = true; mesh.receiveShadow = true; mesh.computeBoundingSphere(); this.meshes.set(chunk,mesh); this.scene.add(mesh);
+  }
+  private buildProceduralGround() {
+    const terrain=this.manifest?.terrain;
+    if(!terrain){
+      if(this.proceduralGround){this.scene.remove(this.proceduralGround);this.proceduralGround.dispose();delete this.proceduralGround;}
+      return;
+    }
+    const centerX=Math.floor(this.controls.target.x/16)*16,centerZ=Math.floor(this.controls.target.z/16)*16,origin=`${centerX},${centerZ}`;
+    if(origin===this.proceduralGroundOrigin)return;
+    this.proceduralGroundOrigin=origin;
+    if(this.proceduralGround){this.scene.remove(this.proceduralGround);this.proceduralGround.dispose();}
+    const radius=96,positions:Vec3[]=[],kind=terrain.layers.find(layer=>terrain.top>=layer.min)?.kind;
+    if(!kind)return;
+    for(let x=centerX-radius;x<centerX+radius;x++)for(let z=centerZ-radius;z<centerZ+radius;z++){
+      const position:Vec3=[x,terrain.top,z],k=key(position);
+      if(!this.removedTerrain.has(k)&&!this.cells.has(k))positions.push(position);
+    }
+    const mesh=this.proceduralGround=new THREE.InstancedMesh(this.cube,this.blockMaterial,positions.length),dummy=new THREE.Object3D(),baseColor=new THREE.Color(this.manifest!.materials[kind]?.color??'#ffffff');
+    positions.forEach((position,index)=>{
+      dummy.position.set(position[0]+.5,position[1]+.5,position[2]+.5);dummy.updateMatrix();mesh.setMatrixAt(index,dummy.matrix);
+      const color=baseColor.clone().multiplyScalar(.94+.1*(Math.sin(position[0]*12.98+position[2]*78.23)*.5+.5));mesh.setColorAt(index,color);
+    });
+    mesh.receiveShadow=true;mesh.computeBoundingSphere();this.scene.add(mesh);
   }
   private box(group: THREE.Group, size: Vec3, position: Vec3, color: string) {
     const mesh = new THREE.Mesh(this.cube, new THREE.MeshStandardMaterial({ color, roughness: .9 }));
@@ -284,7 +316,11 @@ export class WorldView {
     const e = this.current?.entities.find(e => e.id === id); if (!e) return;
     this.selected = id; this.following = true; this.target.set(...e.position); this.controls.target.copy(this.target).add(new THREE.Vector3(0,1,0)); this.camera.position.copy(this.target).add(new THREE.Vector3(11,9,14)); this.controls.update();
   }
-  overview() { this.following = false; this.camera.position.set(86,79,103); this.controls.target.set(0,2,0); this.controls.update(); }
+  overview() {
+    this.following=false;
+    const position=this.manifest?.view?.overviewPosition??[86,79,103],target=this.manifest?.view?.overviewTarget??[0,2,0];
+    this.camera.position.set(...position);this.controls.target.set(...target);this.controls.update();this.buildProceduralGround();
+  }
   topDown() { this.following = false; this.camera.position.set(0,145,.01); this.controls.target.set(0,0,0); this.controls.update(); }
   private animate = () => {
     this.frameId = requestAnimationFrame(this.animate);
@@ -344,8 +380,9 @@ export class WorldView {
       const movement = new THREE.Vector3(); if (this.keys.has('w')) movement.add(direction); if (this.keys.has('s')) movement.sub(direction); if (this.keys.has('d')) movement.add(right); if (this.keys.has('a')) movement.sub(right); if (this.keys.has('e')) movement.y++; if (this.keys.has('q')) movement.y--;
       movement.normalize().multiplyScalar(dt*(this.keys.has('shift')?35:12)); this.camera.position.add(movement); this.controls.target.add(movement);
     }
+    this.buildProceduralGround();
     this.controls.update(); this.renderer.render(this.scene,this.camera);
   };
-  dispose() { cancelAnimationFrame(this.frameId); this.observer.disconnect(); this.controls.dispose();for(const label of this.labels.values())label.remove();this.labels.clear();this.renderer.dispose(); }
+  dispose() { cancelAnimationFrame(this.frameId); this.observer.disconnect(); this.controls.dispose();for(const label of this.labels.values())label.remove();this.labels.clear();if(this.proceduralGround){this.scene.remove(this.proceduralGround);this.proceduralGround.dispose();}this.renderer.dispose(); }
 }
 const distanceSquared = (a: Vec3,b: Vec3) => a.reduce((sum,v,i) => sum+(v-b[i])**2,0);

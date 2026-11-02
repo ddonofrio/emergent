@@ -4,8 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from '../src/core/engine';
-import { island } from '../src/modules/island';
-import type { Block, Entity, Vec3, WorldModule } from '../src/core/types';
+import { island } from '../src/universes/first-shore';
+import type { Block, Entity, UniverseModule, Vec3 } from '../src/core/types';
 import { Store } from '../server/store';
 import { worldTools } from '../server/agents/tools';
 import { apply } from '../server/agents/harness-plugin';
@@ -18,7 +18,7 @@ const entity = (id = 't1', x = .5, z = .5): Entity => ({ id, name: id, kind: 'tr
 function fixture(blocks: Block[] = [], entities = [entity()]): Engine {
   const floor: Block[] = [];
   for (let x=-8;x<=8;x++) for (let z=-8;z<=8;z++) floor.push([x,0,z,'stone']);
-  const module: WorldModule = { ...island, generate: () => ({ blocks: [...floor,...blocks], entities }) };
+  const module: UniverseModule = { ...island, generate: () => ({ blocks: [...floor,...blocks], entities }) };
   return new Engine(module);
 }
 
@@ -68,7 +68,7 @@ test('entity hitboxes prevent pass-through and produce a recorded safe rebound',
     const gap=Math.hypot(walker.position[0]-other.position[0],walker.position[2]-other.position[2]);
     closest=Math.min(closest,gap);
     assert.ok(gap>=(walker.hitbox!.radius+other.hitbox!.radius)-.001,'Hitboxes must never overlap.');
-    assert.equal(engine.module.canEnter(walker,walker.position).ok,true,'A rebound must remain in permitted terrain.');
+    assert.equal(engine.module.canEnter!(walker,walker.position).ok,true,'A rebound must remain in permitted terrain.');
     assert.ok([-.23,.23].some(dx=>[-.23,.23].some(dz=>engine.voxels.solid([walker.position[0]+dx,walker.position[1]-.01,walker.position[2]+dz]))),'A rebound must retain safe ground beneath the character.');
     if(walker.motion?.kind==='bounce'||other.motion?.kind==='bounce')sawBounce=true;
   }
@@ -314,8 +314,8 @@ test('generated plants never replace tree roots and all nine trunks reach the te
 });
 test('half-height water boundary and swept movement refuse a deep intermediate cell', () => {
   const e = entity();
-  assert.equal(island.canEnter(e,[0,-1,0]).ok,true);
-  assert.equal(island.canEnter(e,[0,-1.01,0]).ok,false);
+  assert.equal(island.canEnter!(e,[0,-1,0]).ok,true);
+  assert.equal(island.canEnter!(e,[0,-1.01,0]).ok,false);
   const engine = fixture();
   engine.voxels.set([0,0,1],null); engine.voxels.set([0,-2,1],'sand');
   assert.ok(engine.observe('t1').navigation.paths.find(path => path.turn === 0)!.clearance < 1);
@@ -337,7 +337,7 @@ test('water is a visible procedural material block with traversable fluid physic
   assert.ok(observation.blocks.some(block=>block[3]==='water'));
   assert.ok(engine.materialsAround('t1').some(material=>material.material==='water'));
   assert.ok(!observation.interactions.hit.some(target=>target.kind==='water'));
-  assert.equal(island.canEnter(creature,creature.position).ok,true);
+  assert.equal(island.canEnter!(creature,creature.position).ok,true);
   const scan=engine.act('t1',{action:'find_material'});assert.ok((scan.feedback?.materials as {material:string}[]).some(material=>material.material==='water'));
   for(let tick=0;tick<20;tick++)engine.step();assert.ok(engine.discoveries.get('t1')?.has(observedMaterialKnowledge('water')));
 });
@@ -351,7 +351,7 @@ test('walking and running are half speed when one block of water reaches half th
     }
     actor.position=[.5,-1,.5];
     assert.equal(island.manifest.waterLevel-actor.position[1],actor.height/2,'One water block reaches exactly half the Troglodyte height.');
-    assert.equal(island.canEnter(actor,actor.position).ok,true);
+    assert.equal(island.canEnter!(actor,actor.position).ok,true);
     assert.equal(island.movementSpeed!(actor,actor.position,speed*2),speed);
     assert.equal(engine.act('t1',{action,distance}).ok,true);
     for(let tick=0;tick<20;tick++)engine.step();
@@ -954,7 +954,7 @@ test('agent language and new materials can extend a recording without changing i
     new Store(path,newLanguage).close();
     new Store(path,island.manifest).close();
     const incompatible=structuredClone(island.manifest);incompatible.materials.wood.floats=false;
-    assert.throws(()=>new Store(path,incompatible),/Module configuration changed/);
+    assert.throws(()=>new Store(path,incompatible),/Universe configuration changed/);
   }finally{rmSync(directory,{recursive:true,force:true});}
 });
 test('SQLite reconstructs the last ten private memory notes at a recorded instant',()=>{

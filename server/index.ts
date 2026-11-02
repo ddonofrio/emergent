@@ -3,25 +3,15 @@ import { readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { once } from 'node:events';
 import { inflateSync } from 'node:zlib';
-import { Engine } from '../src/core/engine';
-import { loadModule, worldCatalog } from '../src/modules';
-import { Store } from './store';
-import { AgentRuntime } from './agents/runtime';
+import { loadUniverse, universeCatalog } from '../src/universes';
 import { discoverProviderModels, enabledProviders, isReasoningSettings, normalizeReasoningSettings, normalizeSavedProvider, ProviderChain, providersFromEnv, resolveProviderApiKey, resolveProviderVastToken, type ProviderConfig, type ProviderStrategy, type ReasoningSettings } from './agents/providers';
-import { TurnClock } from './turn-clock';
-import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
 import { isSamplingTemplateId, type SamplingTemplateId } from '../src/core/sampling-templates';
+import { UniverseRuntime } from './universe-runtime';
 
 const port = Number(process.env.PORT ?? 3000);
-const worldModule = loadModule('first-shore');
-let worldRequestedRunning=false;
 const scriptedDemo=process.env.SCRIPTED_DEMO==='true';
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port.');
 const dataDirectory=resolve(process.env.DATA_DIR??'data'),llmConfigPath=resolve(dataDirectory,'llm-config.json');
-const store = new Store(resolve(dataDirectory, `${worldModule.manifest.id}.sqlite`), worldModule.manifest);
-store.cancelInterruptedInferences();
-const engine = new Engine(worldModule, store.hasWorld() ? store.stateAt(store.latestTick()) : undefined);
-engine.nextEvent = store.maxEventId() + 1;
 const optionalTurnLimit = (value: string | undefined) => {
   if (!value?.trim()) return null;
   const parsed = Number(value);
@@ -42,33 +32,22 @@ if (enabledProviders(providers).some(provider => provider.modelDiscovery)) {
   try { await new ProviderChain(enabledProviders(providers)).refreshDiscoveredModels(AbortSignal.timeout(2000)); }
   catch { /* Discovery is retried whenever the local fallback is needed. */ }
 }
-const agents = new AgentRuntime(engine, store, { providers:enabledProviders(providers), maxTurns: optionalTurnLimit(process.env.AGENT_MAX_TURNS),scriptedDemo,reasoning:reasoningSettings });
-agents.setInferenceConfig(enabledProviders(providers),providerStrategy,reasoningSettings);
-let autoPausedForMissingModel=agents.mode==='waiting';
-for(const event of store.eventsAt(engine.tick,'',500)){
-  if(event.type!=='decision'&&event.type!=='movement-decision')continue;
-  const provider=(event.data as {provider?:unknown}|undefined)?.provider;
-  if(typeof provider==='string')agents.inference.seedHistoricalSuccess(provider,Math.floor(event.tick/TURN_TICKS)+1);
-}
-engine.event('world','session',`World ${store.hasWorld()?'resumed':'created'} in ${agents.mode==='demo'?'scripted demo':agents.mode==='waiting'?'model-waiting':'LLM'} mode.`);
-store.record(engine.frame(), engine.state(), agents.persistence());
-const clients = new Set<ServerResponse>();
+const runtimes=new Map(universeCatalog.filter(universe=>universe.available).map(entry=>{
+  const runtime=new UniverseRuntime(loadUniverse(entry.id),dataDirectory,{
+    providers:enabledProviders(providers),providerStrategy,reasoning:reasoningSettings,
+    maxTurns:optionalTurnLimit(process.env.AGENT_MAX_TURNS),scriptedDemo,
+    fatal(error){console.error(`${entry.name} storage or runtime failure:`,error);void shutdown(1);},
+  });
+  return [entry.id,runtime] as const;
+}));
 const production = process.argv.includes('--production');
 const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
-const publicLlmConfig = () => ({
-  strategy: agents.inference.providers.length < 2 ? 'first-only' : agents.inference.strategy,
-  reasoning:agents.reasoningSettings,
-  currentStatus:agents.inference.currentStatus,
-  providers: providers.map(({id,type,enabled,name,baseUrl,model,region,displayModel,apiKey,apiKeyRemoved,vastToken,vastTokenRemoved,vastContainerLabel,tokenless,maxOutputTokens,enableThinking,samplingTemplate})=>({id,type:type??'openai-compatible',enabled:enabled!==false,name,baseUrl,model,region,displayModel,maxOutputTokens,enableThinking,samplingTemplate,apiKeyConfigured:!!apiKey,apiKeyRemoved:apiKeyRemoved===true,vastTokenConfigured:!!vastToken,vastTokenRemoved:vastTokenRemoved===true,vastContainerLabel,tokenless:tokenless===true,health:enabled===false?{state:'unknown' as const,detail:'Disabled in settings.'}:agents.inference.healthFor(id)})),
+const publicLlmConfig = (runtime:UniverseRuntime) => ({
+  strategy: runtime.agents.inference.providers.length < 2 ? 'first-only' : runtime.agents.inference.strategy,
+  reasoning:runtime.agents.reasoningSettings,
+  currentStatus:runtime.agents.inference.currentStatus,
+  providers: providers.map(({id,type,enabled,name,baseUrl,model,region,displayModel,apiKey,apiKeyRemoved,vastToken,vastTokenRemoved,vastContainerLabel,tokenless,maxOutputTokens,enableThinking,samplingTemplate})=>({id,type:type??'openai-compatible',enabled:enabled!==false,name,baseUrl,model,region,displayModel,maxOutputTokens,enableThinking,samplingTemplate,apiKeyConfigured:!!apiKey,apiKeyRemoved:apiKeyRemoved===true,vastTokenConfigured:!!vastToken,vastTokenRemoved:vastTokenRemoved===true,vastContainerLabel,tokenless:tokenless===true,health:enabled===false?{state:'unknown' as const,detail:'Disabled in settings.'}:runtime.agents.inference.healthFor(id)})),
 });
-const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.mode==='demo'?'Scripted demo':agents.inference.label, providerStrategy:publicLlmConfig().strategy, llmConfig:publicLlmConfig(), parallelRequests: agents.parallelRequests, running:turnClock.status().enabled, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
-function broadcast(event: string, value: unknown) {
-  const message = `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`;
-  for (const client of clients) {
-    if (client.writableLength > 2_000_000) { client.end(); clients.delete(client); }
-    else client.write(message);
-  }
-}
 const json = (res: ServerResponse, value: unknown, code = 200) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
 const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml' };
 const supportedProviderTypes=new Set(['openai-compatible','openai','openrouter','vast-ai','amazon-bedrock']);
@@ -80,18 +59,21 @@ const server = createServer(async (req, res) => {
     if (req.headers.origin && !allowedHosts.map(h => `http://${h}`).includes(req.headers.origin)) { json(res, { error: 'Cross-origin access is disabled.' }, 403); return; }
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
     if (url.pathname.startsWith('/api/')) {
-      if(url.pathname==='/api/worlds'&&req.method==='GET'){
-        json(res,worldCatalog.map(world=>({...world,running:world.id===worldModule.manifest.id&&turnClock.status().enabled})));return;
+      if(url.pathname==='/api/universes'&&req.method==='GET'){
+        json(res,universeCatalog.map(universe=>({...universe,running:runtimes.get(universe.id)?.clock.status().enabled??false})));return;
       }
-      const worldRoute=/^\/api\/worlds\/([a-z0-9-]+)\/([a-z-]+)$/.exec(url.pathname);
-      if(worldRoute){
-        const world=worldCatalog.find(candidate=>candidate.id===worldRoute[1]);
-        if(!world){json(res,{error:'Unknown world.'},404);return;}
-        if(!world.available){json(res,{error:`${world.name} is not available yet.`},409);return;}
-        if(world.id!==worldModule.manifest.id){json(res,{error:'This world runtime is unavailable.'},503);return;}
-      }
-      const apiPath=worldRoute?`/api/${worldRoute[2]}`:url.pathname;
-      if(apiPath==='/api/llm-config'&&req.method==='GET'){json(res,publicLlmConfig());return;}
+      const universeRoute=/^\/api\/universes\/([a-z0-9-]+)\/([a-z-]+)$/.exec(url.pathname);
+      if(!universeRoute){json(res,{error:'Use a universe-scoped API endpoint.'},404);return;}
+      const universe=universeCatalog.find(candidate=>candidate.id===universeRoute[1]);
+      if(!universe){json(res,{error:'Unknown universe.'},404);return;}
+      if(!universe.available){json(res,{error:`${universe.name} is not available yet.`},409);return;}
+      const runtime=runtimes.get(universe.id);
+      if(!runtime){json(res,{error:'This universe runtime is unavailable.'},503);return;}
+      const {agents,engine,store,clock:turnClock}=runtime;
+      const metadata=()=>runtime.metadata(publicLlmConfig(runtime));
+      const broadcast=(event:string,value:unknown)=>runtime.broadcast(event,value);
+      const apiPath=`/api/${universeRoute[2]}`;
+      if(apiPath==='/api/llm-config'&&req.method==='GET'){json(res,publicLlmConfig(runtime));return;}
       if(apiPath==='/api/llm-models'&&req.method==='POST'){
         let body='';for await(const chunk of req){body+=chunk;if(body.length>8192){json(res,{error:'Model discovery settings are too large.'},413);return;}}
         const row=JSON.parse(body) as Record<string,unknown>,id=typeof row.id==='string'?row.id:'',type=String(row.type??''),bedrock=type==='amazon-bedrock',vast=type==='vast-ai',clearApiKey=row.clearApiKey===true,clearVastToken=row.clearVastToken===true,tokenless=row.tokenless===true,copyFromId=typeof row.copyFromId==='string'?row.copyFromId:'';
@@ -171,34 +153,33 @@ const server = createServer(async (req, res) => {
         }
         const strategy=data.strategy as ProviderStrategy,tempPath=`${llmConfigPath}.tmp`;
         await writeFile(tempPath,JSON.stringify({strategy,reasoning:nextReasoning,providers:next}),{encoding:'utf8',mode:0o600});await rename(tempPath,llmConfigPath);
-        const resumeAfterModelConfiguration=autoPausedForMissingModel;
-        providers=next;reasoningSettings={...nextReasoning};agents.setInferenceConfig(enabledProviders(providers),strategy,reasoningSettings);
-        if(agents.mode==='waiting'){autoPausedForMissingModel=true;turnClock.setEnabled(false);}
-        else if(resumeAfterModelConfiguration&&worldRequestedRunning){autoPausedForMissingModel=false;turnClock.setEnabled(true);}
-        const config=publicLlmConfig();broadcast('llm-config',config);broadcast('settings',{parallelRequests:agents.parallelRequests});json(res,{...metadata(),llmConfig:config});return;
+        providers=next;reasoningSettings={...nextReasoning};
+        for(const candidate of runtimes.values()){
+          candidate.configureInference(enabledProviders(providers),strategy,reasoningSettings);
+          candidate.broadcast('llm-config',publicLlmConfig(candidate));
+        }
+        const config=publicLlmConfig(runtime);broadcast('settings',{parallelRequests:agents.parallelRequests});json(res,{...metadata(),llmConfig:config});return;
       }
       if (apiPath === '/api/control' && req.method === 'POST') {
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 2048) { json(res, { error: 'Request too large.' }, 413); return; } }
         const data = JSON.parse(body);
         if(typeof data.running==='boolean'){
-          worldRequestedRunning=data.running;autoPausedForMissingModel=false;turnClock.setEnabled(data.running);
-          json(res,{id:worldModule.manifest.id,running:turnClock.status().enabled});return;
+          json(res,{id:universe.id,running:runtime.setRunning(data.running)});return;
         }
         if(typeof data.parallelRequests==='boolean'){
           agents.setParallelRequests(data.parallelRequests);
           broadcast('settings',{parallelRequests:agents.parallelRequests});json(res,metadata());return;
         }
         if (typeof data.agentsEnabled === 'boolean') {
-          if(data.agentsEnabled&&agents.mode==='waiting'){json(res,{error:'Configure and activate a model before enabling agents.'},409);return;}
-          worldRequestedRunning=data.agentsEnabled;autoPausedForMissingModel=false;
-          turnClock.setEnabled(data.agentsEnabled); json(res, metadata()); return;
+          if(data.agentsEnabled&&runtime.hasAgents&&agents.mode==='waiting'){json(res,{error:'Configure and activate a model before enabling agents.'},409);return;}
+          runtime.setRunning(data.agentsEnabled);json(res,metadata());return;
         }
         if (typeof data.entityId === 'string' && typeof data.entityEnabled === 'boolean') {
           const entity = engine.entities.find(candidate => candidate.id === data.entityId);
           if (!entity) { json(res, { error: 'Unknown entity.' }, 404); return; }
           if (engine.setEntityEnabled(entity.id, data.entityEnabled)) {
-            turnClock.entityChanged(); publishFrame(true);
+            turnClock.entityChanged();runtime.publishFrame(true);
           }
           json(res, { ...metadata(), entity: engine.entity(entity.id) }); return;
         }
@@ -215,12 +196,12 @@ const server = createServer(async (req, res) => {
       if (apiPath === '/api/stream') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
         res.write(`event: boot\ndata: ${JSON.stringify({ ...metadata(), state: engine.state(), events: store.eventsAt(engine.tick) })}\n\n`);
-        clients.add(res); req.on('close', () => clients.delete(res)); return;
+        runtime.clients.add(res);req.on('close',()=>runtime.clients.delete(res));return;
       }
       if (apiPath === '/api/export') {
         const endTick = store.latestTick();
         res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Content-Disposition': `attachment; filename="emergent-day-${engine.day}.ndjson"` });
-        res.write(JSON.stringify({ type: 'world', clock: metadata().clock, module: worldModule.manifest, state: store.stateAt(0) }) + '\n');
+        res.write(JSON.stringify({ type: 'world', clock: metadata().clock, universe: runtime.universe.manifest, state: store.stateAt(0) }) + '\n');
         for (const row of store.db.prepare('SELECT data FROM frames WHERE tick <= ? ORDER BY tick').iterate(endTick) as Iterable<{ data: Uint8Array }>) {
           if (res.destroyed) break;
           if (!res.write(JSON.stringify({ type: 'frame', frame: JSON.parse(inflateSync(row.data).toString()) }) + '\n')) await once(res, 'drain');
@@ -239,31 +220,19 @@ const server = createServer(async (req, res) => {
 });
 
 let stopping = false;
-const turnClock = new TurnClock(engine, agents, {
-  frame() {
-    publishFrame(engine.tick % 600 === 0);
-  },
-  status() { broadcast('status', { runtime: turnClock.status(),llmConfig:publicLlmConfig() }); },
-  fatal(error) { console.error('World storage or runtime failure:', error); void shutdown(1); },
-});
-function publishFrame(checkpoint = false) {
-  const frame = engine.frame();
-  store.record(frame, checkpoint ? engine.state() : undefined, agents.persistence());
-  broadcast('frame', { frame, agentsEnabled: turnClock.status().enabled, runtime: turnClock.status() });
-}
-turnClock.setEnabled(false);
 const timer = setInterval(() => {
-  try { turnClock.pump(); }
+  try { for(const runtime of runtimes.values())runtime.pump(); }
   catch (error) { console.error('Simulation stopped:', error); void shutdown(1); }
 }, 20);
-const heartbeat = setInterval(() => broadcast('status', { runtime: turnClock.status(),llmConfig:publicLlmConfig() }), 10000);
-server.listen(port,'127.0.0.1',()=>console.log(`Emergent: http://127.0.0.1:${port} (${agents.mode} mode)`));
+const heartbeat = setInterval(()=>{
+  for(const runtime of runtimes.values())runtime.broadcast('status',{runtime:runtime.clock.status(),llmConfig:publicLlmConfig(runtime)});
+},10000);
+server.listen(port,'127.0.0.1',()=>console.log(`Emergent: http://127.0.0.1:${port} (${runtimes.size} universes)`));
 server.on('error', error => { console.error(error); void shutdown(1); });
 async function shutdown(code = 0) {
-  if (stopping) return; stopping = true; clearInterval(timer); clearInterval(heartbeat); turnClock.close();
-  try { store.record(engine.frame(), engine.state(), agents.persistence()); } catch (error) { console.error(error); code = 1; }
-  for (const client of clients) client.end();
-  await vite?.close(); server.close(); store.close(); process.exit(code);
+  if (stopping) return; stopping = true; clearInterval(timer); clearInterval(heartbeat);
+  for(const runtime of runtimes.values())try{runtime.close();}catch(error){console.error(error);code=1;}
+  await vite?.close();server.close();process.exit(code);
 }
 process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());

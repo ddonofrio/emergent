@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {planDecision} from '../server/agents/planning';
 import {worldTools} from '../server/agents/tools';
 import {Engine} from '../src/core/engine';
-import {island} from '../src/modules/island';
+import {island} from '../src/universes/first-shore';
 import type {AgentPlan} from '../src/core/types';
 import type {CompletionResult} from '../server/agents/providers';
 import {compactResult} from '../server/agents/context';

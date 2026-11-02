@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Engine } from '../src/core/engine';
-import { island } from '../src/modules/island';
+import { island } from '../src/universes/first-shore';
 import type { Block, Entity } from '../src/core/types';
 import { compactResult, decisionCycle, historicalActions, recentActions } from '../server/agents/context';
 import { worldTools } from '../server/agents/tools';

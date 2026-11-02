@@ -2,7 +2,7 @@ param(
     [string]$DataDir,
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[a-z0-9-]+$')]
-    [string]$ModuleId
+    [string]$UniverseId
 )
 
 Set-StrictMode -Version Latest
@@ -41,7 +41,7 @@ $resolvedDataDir = if ([System.IO.Path]::IsPathRooted($DataDir)) {
 } else {
     [System.IO.Path]::GetFullPath((Join-Path $projectRoot $DataDir))
 }
-$worldPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedDataDir "$ModuleId.sqlite"))
+$worldPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedDataDir "$UniverseId.sqlite"))
 $projectPrefix = $projectRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 $savedWorlds = [System.IO.Path]::GetFullPath((Join-Path $projectRoot 'data\worlds'))
 $savedWorldsPrefix = $savedWorlds.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
@@ -56,7 +56,7 @@ if ($worldPath.StartsWith($savedWorldsPrefix, [System.StringComparison]::Ordinal
 $targets = @($worldPath, "$worldPath-wal", "$worldPath-shm", "$worldPath-journal")
 $existing = @($targets | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
 if ($existing.Count -eq 0) {
-    Write-Host "The active $ModuleId world is already empty."
+    Write-Host "The active $UniverseId world is already empty."
     exit 0
 }
 
@@ -68,6 +68,6 @@ try {
     throw "Could not reset the active world. Stop the Emergent server and run this script again. $($_.Exception.Message)"
 }
 
-Write-Host "Deleted the active $ModuleId recording."
+Write-Host "Deleted the active $UniverseId world recording."
 Write-Host 'Saved worlds in data\worlds were preserved.'
-Write-Host 'The next server start will generate a clean world from the module seed.'
+Write-Host 'The next server start will generate a clean world from the universe seed.'

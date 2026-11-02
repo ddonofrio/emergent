@@ -1,6 +1,11 @@
 export type Vec3 = [number, number, number];
 export type Block = [number, number, number, string];
 export interface Material { color: string; solid: boolean; floats: boolean; stackLimit?: number; vessel?: boolean; fluid?: boolean; }
+export interface LayeredTerrain {
+  type: 'layers';
+  top: number;
+  layers: { min: number; kind: string }[];
+}
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; itemId?: string; }
@@ -54,11 +59,14 @@ export interface BlockImpactNotice { eventId:number; tick:number; itemId:string;
 export interface HeardVoice { from: string; word: string; tick: number; speakerId?: string; direction?: string; distance?: number; }
 export interface EntitySighting extends Pick<Entity,'id'|'name'|'kind'|'position'> { holding: Pick<Stack,'kind'|'contents'> | null; }
 export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, HeardVoice[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; terrainNotices:Record<string,TerrainNotice[]>; impactNotices?:Record<string,BlockImpactNotice[]>; }
-export interface WorldState extends DynamicState { blocks: Block[]; }
+export interface WorldState extends DynamicState { blocks: Block[]; removedBlocks?: string[]; }
 export interface Frame extends DynamicState { changes: [string, string | null][]; events: WorldEvent[]; }
-export interface ModuleManifest {
+export interface UniverseManifest {
   id: string; version: number; name: string; description: string; seed: number;
   bounds: { min: Vec3; max: Vec3 }; waterLevel: number; gravity: number;
+  infiniteHorizontal?: boolean;
+  terrain?: LayeredTerrain;
+  view?: { overviewPosition: Vec3; overviewTarget: Vec3; maxDistance?: number; fog?: { near: number; far: number } };
   daySeconds: number; materials: Record<string, Material>; vocabulary: string[];
   perception: { range: number; fieldOfView: number; maxBlocks: number };
   agentInstructions: string;
@@ -93,11 +101,11 @@ export interface Observation {
   interactions: InteractionTargets;
   description: string; truncated: boolean;
 }
-export interface WorldModule {
-  manifest: ModuleManifest;
+export interface UniverseModule {
+  manifest: UniverseManifest;
   generate(): { blocks: Block[]; entities: Entity[] };
-  transformHit(kind: string, impact: Vec3, orientation?: 'up' | 'down'): string | null;
-  canEnter(entity: Entity, feet: Vec3): ActionResult;
+  transformHit?(kind: string, impact: Vec3, orientation?: 'up' | 'down'): string | null;
+  canEnter?(entity: Entity, feet: Vec3): ActionResult;
   movementSpeed?(entity:Entity,feet:Vec3,speed:number):number;
   describeObstacle?(issue: MovementIssue): string | undefined;
   encounterMessage?(observer:Entity,other:Entity,metres:number):string|undefined;

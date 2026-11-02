@@ -3,7 +3,7 @@ import { TICKS_PER_SECOND, TURN_TICKS } from './time';
 import { exchangeInventory, normalizeInventory } from './inventory';
 import { knowledgeDescription, observedMaterialKnowledge } from './knowledge';
 import { speechProblem, speechTurn, speechWordCount, speechWordsRemaining } from './speech';
-import { clone, distance, key, type Action, type ActionResult, type BlockImpactNotice, type Body, type EncounterNotice, type Entity, type EntitySighting, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type Vec3, type WorldEvent, type WorldModule, type WorldState } from './types';
+import { clone, distance, key, type Action, type ActionResult, type BlockImpactNotice, type Body, type EncounterNotice, type Entity, type EntitySighting, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type UniverseModule, type Vec3, type WorldEvent, type WorldState } from './types';
 
 const ok = (message: string): ActionResult => ({ ok: true, message });
 const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
@@ -32,10 +32,10 @@ export class Engine {
   private encounterNotices=new Map<string,EncounterNotice[]>();
   private terrainNotices=new Map<string,TerrainNotice[]>();
   private impactNotices=new Map<string,BlockImpactNotice[]>();
-  constructor(readonly module: WorldModule, state?: WorldState) {
+  constructor(readonly module: UniverseModule, state?: WorldState) {
     const initial = state ?? module.generate();
     const water=module.manifest.materials.water?.fluid?{kind:'water',level:module.manifest.waterLevel,bounds:module.manifest.bounds}:undefined;
-    this.voxels = new Voxels(module.manifest.materials, initial.blocks,water);
+    this.voxels = new Voxels(module.manifest.materials, initial.blocks,water,module.manifest.terrain,state?.removedBlocks);
     this.entities = clone(initial.entities).map(entity => ({ ...entity, enabled: entity.enabled !== false, hitbox: entity.hitbox ?? { radius: entity.kind === 'duck' ? .24 : .36, height: entity.height }, inventory: normalizeInventory(entity.inventory) }));
     for (const [voxel, damage] of Object.entries((state as WorldState | undefined)?.blockDamage ?? {})) this.blockDamage.set(voxel, damage);
     for (const [actor, learned] of Object.entries((state as WorldState | undefined)?.discoveries ?? {})) this.discoveries.set(actor,new Set(learned));
@@ -79,13 +79,19 @@ export class Engine {
     if(learned.has(knowledge))return false;
     learned.add(knowledge);this.discoveries.set(actor,learned);this.event(actor,'discovery',message,{knowledge,...(data===undefined?{}:{detail:clone(data)})});return true;
   }
-  state(): WorldState { return { ...this.dynamic(), blocks: this.voxels.serialize() }; }
+  state(): WorldState {
+    const removedBlocks=this.voxels.serializeRemoved();
+    return { ...this.dynamic(), blocks: this.voxels.serialize(), ...(removedBlocks.length?{removedBlocks}:{}) };
+  }
   dynamic() { return clone({ tick: this.tick, time: this.time, entities: this.entities, bodies: this.bodies, lost: this.lost, inbox: Object.fromEntries(this.inbox), blockDamage: Object.fromEntries(this.blockDamage), discoveries:Object.fromEntries([...this.discoveries].map(([actor,learned])=>[actor,[...learned]])),contacts:Object.fromEntries([...this.contacts].map(([actor,contacts])=>[actor,[...contacts]])),encounterNotices:Object.fromEntries(this.encounterNotices),terrainNotices:Object.fromEntries(this.terrainNotices),impactNotices:Object.fromEntries(this.impactNotices) }); }
   frame(): Frame {
     const frame = { ...this.dynamic(), changes: [...this.voxels.changes], events: this.pendingEvents.splice(0) };
     this.voxels.changes.clear(); return frame;
   }
-  inside(p: Vec3) { return p.every((v, i) => v >= this.module.manifest.bounds.min[i] && v < this.module.manifest.bounds.max[i]); }
+  inside(p: Vec3) {
+    if(this.module.manifest.infiniteHorizontal)return p[1]>=this.module.manifest.bounds.min[1]&&p[1]<this.module.manifest.bounds.max[1];
+    return p.every((v, i) => v >= this.module.manifest.bounds.min[i] && v < this.module.manifest.bounds.max[i]);
+  }
   eye(e: Entity): Vec3 { return [e.position[0], e.position[1] + e.height * .85, e.position[2]]; }
   visible(e: Entity, point: Vec3, ignoreEnd = false, range = this.module.manifest.perception.range) {
     const eye = this.eye(e), d = distance(eye, point);
@@ -477,12 +483,12 @@ export class Engine {
       // An underwater shore can lose its seabed before a walkable step is found.
       const lower=this.footAt(x,z,from,e.height,maxRise,Math.max(1,from-this.module.manifest.bounds.min[1]));
       if(lower||from<=this.module.manifest.waterLevel){
-        const feet:Vec3=lower??[x,this.module.manifest.bounds.min[1],z],allowed=this.module.canEnter(e,feet);
+        const feet:Vec3=lower??[x,this.module.manifest.bounds.min[1],z],allowed=this.module.canEnter?.(e,feet)??ok('Safe terrain.');
         if(!allowed.ok)return {issue:{kind:'water',target:[Math.floor(x),Math.floor(feet[1]),Math.floor(z)],message:allowed.message}};
       }
       return { issue: { kind:'gap',target:[Math.floor(x),Math.floor(from-1),Math.floor(z)],message:'There is no safe ground ahead; the terrain drops away.' } };
     }
-    const allowed = this.module.canEnter(e, point);
+    const allowed = this.module.canEnter?.(e, point)??ok('Safe terrain.');
     if (!allowed.ok) return { issue: { kind:'water',target:[Math.floor(x),Math.floor(point[1]),Math.floor(z)],message:allowed.message } };
     const other = this.collidingEntity(e,point);
     if (other) return { issue: { kind:'entity',entity:other.name,entityId:other.id,message:`${other.name}'s body blocks your path.` } };
@@ -508,7 +514,7 @@ export class Engine {
     const angle=yaw*Math.PI/180,x=e.position[0]+Math.sin(angle)*jumpDistance,z=e.position[2]+Math.cos(angle)*jumpDistance;
     const landing=this.footAt(x,z,e.position[1],e.height,1,1);
     if(!landing)return {issue,message:'There is no safe landing within one block of your current height.'};
-    const allowed=this.module.canEnter(e,landing);
+    const allowed=this.module.canEnter?.(e,landing)??ok('Safe terrain.');
     if(!allowed.ok)return {issue:{kind:'water',target:[Math.floor(x),Math.floor(landing[1]),Math.floor(z)],message:allowed.message},message:'The landing would put you in dangerously deep water.'};
     const other=this.collidingEntity(e,landing);
     if(other)return {issue:{kind:'entity',entity:other.name,entityId:other.id,message:`${other.name} occupies the landing point.`},message:`${other.name} occupies the landing point.`};
@@ -718,7 +724,7 @@ export class Engine {
       const held=this.held(e);if(!held||held.kind!=='wood')return fail('Only a raw wood block can be worked this way.');
       if(!a.impact||a.impact.length!==3||!a.impact.every(v=>Number.isFinite(v)&&v>=0&&v<=1))return fail('Impact must be a local surface point in [0,1]^3.');
       if(a.impact[0]<=.18&&a.impact[1]>=.32&&a.impact[1]<=.68&&a.impact[2]>=.82&&!a.orientation)return fail('Choose orientation up or down for this strike.');
-      const made=this.module.transformHit(held.kind,a.impact,a.orientation);
+      const made=this.module.transformHit?.(held.kind,a.impact,a.orientation)??null;
       if(!made)return ok('The strike leaves a notch in the wood, but its form does not change.');
       const count=made==='plank'?5:1;
       if(!this.replaceHeld(e,{kind:made,count}))return fail('No space for the result: at most 10 different stacks, 64 identical items each. Put something down first.');

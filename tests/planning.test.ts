@@ -7,7 +7,7 @@ import { compactResult } from '../server/agents/context';
 import type { AgentPlan, MilestoneCriterion } from '../src/core/types';
 import type { CompletionResult } from '../server/agents/providers';
 import { Engine } from '../src/core/engine';
-import { island } from '../src/modules/island';
+import { island } from '../src/universes/first-shore';
 
 const plan:AgentPlan={version:2,inventoryBaseline:{},goal:'Collect wood.',status:'active',steps:[{task:'Collect one wood from the world.',status:'pending',criterion:{kind:'collect',subject:'wood'}}],explanation:'I want to try wood.',createdTurn:1,reviewedTurn:1,startedAtSecond:0};
 const authored={goal:'Compare the shade on opposite sides of the tree.',successCondition:'I have observed both sides and can describe how their shade differs.',explanation:'I wonder whether the tree changes the light around it.'};

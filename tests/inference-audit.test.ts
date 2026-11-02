@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { inflateSync } from 'node:zlib';
 import { Store } from '../server/store';
-import { island } from '../src/modules/island';
+import { island } from '../src/universes/first-shore';
 import { auditedCompletion } from '../server/agents/audit';
 import type { CompletionRequest, CompletionResult } from '../server/agents/providers';
 

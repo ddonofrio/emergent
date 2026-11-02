@@ -1,13 +1,21 @@
-import { key, unkey, type Block, type Vec3, type Material } from './types';
+import { key, unkey, type Block, type LayeredTerrain, type Vec3, type Material } from './types';
 
 export interface ProceduralFluid { kind:string;level:number;bounds:{min:Vec3;max:Vec3} }
 
 export class Voxels {
   readonly cells = new Map<string, string>();
+  readonly removed = new Set<string>();
   readonly chunks = new Map<string, Set<string>>();
   changes = new Map<string, string | null>();
-  constructor(readonly materials: Record<string, Material>, blocks: Block[] = [],readonly fluid?:ProceduralFluid) {
+  constructor(
+    readonly materials: Record<string, Material>,
+    blocks: Block[] = [],
+    readonly fluid?: ProceduralFluid,
+    readonly terrain?: LayeredTerrain,
+    removed: string[] = [],
+  ) {
     for (const [x, y, z, kind] of blocks) this.set([x, y, z], kind);
+    for (const voxel of removed) this.removed.add(voxel);
     this.changes.clear();
   }
   chunk(p: Vec3) { return p.map(v => Math.floor(v / 16)).join(','); }
@@ -16,17 +24,28 @@ export class Voxels {
     const point=p.map(Math.floor) as Vec3;
     return point.every((value,index)=>value>=this.fluid!.bounds.min[index]&&value<this.fluid!.bounds.max[index])&&point[1]<this.fluid.level?this.fluid.kind:undefined;
   }
-  get(p: Vec3) { const point=p.map(Math.floor) as Vec3;return this.cells.get(key(point))??this.fluidAt(point); }
+  private terrainAt(p: Vec3) {
+    if (!this.terrain || p[1] > this.terrain.top) return undefined;
+    return this.terrain.layers.find(layer => p[1] >= layer.min)?.kind;
+  }
+  get(p: Vec3) {
+    const point=p.map(Math.floor) as Vec3,k=key(point),explicit=this.cells.get(k);
+    if(explicit)return explicit;
+    if(this.removed.has(k))return undefined;
+    return this.terrainAt(point)??this.fluidAt(point);
+  }
   solid(p: Vec3) { const kind = this.get(p); return !!kind && this.materials[kind]?.solid; }
   set(p: Vec3, kind: string | null) {
     const k = key(p), c = this.chunk(p);
     if (kind) {
       this.cells.set(k, kind);
+      this.removed.delete(k);
       if (!this.chunks.has(c)) this.chunks.set(c, new Set());
       this.chunks.get(c)!.add(k);
     } else {
       this.cells.delete(k); this.chunks.get(c)?.delete(k);
       if (!this.chunks.get(c)?.size) this.chunks.delete(c);
+      if(this.terrainAt(p))this.removed.add(k);else this.removed.delete(k);
     }
     this.changes.set(k, kind);
   }
@@ -49,9 +68,20 @@ export class Voxels {
         }
       }
     }
+    if(this.terrain){
+      const top=this.terrain.top,minX=Math.floor(center[0]-radius),maxX=Math.ceil(center[0]+radius),minZ=Math.floor(center[2]-radius),maxZ=Math.ceil(center[2]+radius);
+      for(let x=minX;x<maxX;x++)for(let z=minZ;z<maxZ;z++){
+        let y=top;
+        while(y>=this.terrain.layers.at(-1)!.min&&!this.get([x,y,z]))y--;
+        const kind=y>=this.terrain.layers.at(-1)!.min?this.get([x,y,z]):undefined;
+        const point:Vec3=[x,y,z],k=key(point);
+        if(kind&&!this.cells.has(k)&&Math.hypot(x+.5-center[0],y+.5-center[1],z+.5-center[2])<=radius)blocks.push([x,y,z,kind]);
+      }
+    }
     return blocks;
   }
   serialize(): Block[] { return [...this.cells].map(([k, kind]) => [...unkey(k), kind]); }
+  serializeRemoved(): string[] { return [...this.removed]; }
   clearLine(a: Vec3, b: Vec3, ignoreEnd = false): boolean {
     // Amanatides-Woo grid traversal: visit crossed voxels, not arbitrary ray samples.
     const cell = a.map(Math.floor) as Vec3;

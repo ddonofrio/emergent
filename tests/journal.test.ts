@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { compactJournal } from '../server/agents/journal-compaction';
 import type { CompletionResult } from '../server/agents/providers';
 import { Engine } from '../src/core/engine';
-import { island } from '../src/modules/island';
+import { island } from '../src/universes/first-shore';
 import { worldTools, type Memory } from '../server/agents/tools';
 import { journalEntries, setJournalNotes } from '../server/agents/journal';
 import { assertSupportedJsonSchema, validateJsonSchemaValue } from '../vendor/deepseek-harness/json-schema';
