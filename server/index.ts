@@ -4,7 +4,7 @@ import { resolve, extname, sep } from 'node:path';
 import { once } from 'node:events';
 import { inflateSync } from 'node:zlib';
 import { Engine } from '../src/core/engine';
-import { loadModule } from '../src/modules';
+import { loadModule, worldCatalog } from '../src/modules';
 import { Store } from './store';
 import { AgentRuntime } from './agents/runtime';
 import { discoverProviderModels, enabledProviders, isReasoningSettings, normalizeReasoningSettings, normalizeSavedProvider, ProviderChain, providersFromEnv, resolveProviderApiKey, resolveProviderVastToken, type ProviderConfig, type ProviderStrategy, type ReasoningSettings } from './agents/providers';
@@ -13,8 +13,8 @@ import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
 import { isSamplingTemplateId, type SamplingTemplateId } from '../src/core/sampling-templates';
 
 const port = Number(process.env.PORT ?? 3000);
-const worldModule = loadModule(process.env.EMERGENT_MODULE ?? 'first-shore');
-const worldStartPaused=process.env.WORLD_START_PAUSED==='true';
+const worldModule = loadModule('first-shore');
+let worldRequestedRunning=false;
 const scriptedDemo=process.env.SCRIPTED_DEMO==='true';
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port.');
 const dataDirectory=resolve(process.env.DATA_DIR??'data'),llmConfigPath=resolve(dataDirectory,'llm-config.json');
@@ -61,7 +61,7 @@ const publicLlmConfig = () => ({
   currentStatus:agents.inference.currentStatus,
   providers: providers.map(({id,type,enabled,name,baseUrl,model,region,displayModel,apiKey,apiKeyRemoved,vastToken,vastTokenRemoved,vastContainerLabel,tokenless,maxOutputTokens,enableThinking,samplingTemplate})=>({id,type:type??'openai-compatible',enabled:enabled!==false,name,baseUrl,model,region,displayModel,maxOutputTokens,enableThinking,samplingTemplate,apiKeyConfigured:!!apiKey,apiKeyRemoved:apiKeyRemoved===true,vastTokenConfigured:!!vastToken,vastTokenRemoved:vastTokenRemoved===true,vastContainerLabel,tokenless:tokenless===true,health:enabled===false?{state:'unknown' as const,detail:'Disabled in settings.'}:agents.inference.healthFor(id)})),
 });
-const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.mode==='demo'?'Scripted demo':agents.inference.label, providerStrategy:publicLlmConfig().strategy, llmConfig:publicLlmConfig(), parallelRequests: agents.parallelRequests, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
+const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.mode==='demo'?'Scripted demo':agents.inference.label, providerStrategy:publicLlmConfig().strategy, llmConfig:publicLlmConfig(), parallelRequests: agents.parallelRequests, running:turnClock.status().enabled, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
 function broadcast(event: string, value: unknown) {
   const message = `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`;
   for (const client of clients) {
@@ -80,8 +80,19 @@ const server = createServer(async (req, res) => {
     if (req.headers.origin && !allowedHosts.map(h => `http://${h}`).includes(req.headers.origin)) { json(res, { error: 'Cross-origin access is disabled.' }, 403); return; }
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
     if (url.pathname.startsWith('/api/')) {
-      if(url.pathname==='/api/llm-config'&&req.method==='GET'){json(res,publicLlmConfig());return;}
-      if(url.pathname==='/api/llm-models'&&req.method==='POST'){
+      if(url.pathname==='/api/worlds'&&req.method==='GET'){
+        json(res,worldCatalog.map(world=>({...world,running:world.id===worldModule.manifest.id&&turnClock.status().enabled})));return;
+      }
+      const worldRoute=/^\/api\/worlds\/([a-z0-9-]+)\/([a-z-]+)$/.exec(url.pathname);
+      if(worldRoute){
+        const world=worldCatalog.find(candidate=>candidate.id===worldRoute[1]);
+        if(!world){json(res,{error:'Unknown world.'},404);return;}
+        if(!world.available){json(res,{error:`${world.name} is not available yet.`},409);return;}
+        if(world.id!==worldModule.manifest.id){json(res,{error:'This world runtime is unavailable.'},503);return;}
+      }
+      const apiPath=worldRoute?`/api/${worldRoute[2]}`:url.pathname;
+      if(apiPath==='/api/llm-config'&&req.method==='GET'){json(res,publicLlmConfig());return;}
+      if(apiPath==='/api/llm-models'&&req.method==='POST'){
         let body='';for await(const chunk of req){body+=chunk;if(body.length>8192){json(res,{error:'Model discovery settings are too large.'},413);return;}}
         const row=JSON.parse(body) as Record<string,unknown>,id=typeof row.id==='string'?row.id:'',type=String(row.type??''),bedrock=type==='amazon-bedrock',vast=type==='vast-ai',clearApiKey=row.clearApiKey===true,clearVastToken=row.clearVastToken===true,tokenless=row.tokenless===true,copyFromId=typeof row.copyFromId==='string'?row.copyFromId:'';
         if(!/^[a-zA-Z0-9_-]{1,64}$/.test(id)||!supportedProviderTypes.has(type)){json(res,{error:'Choose a supported provider before refreshing models.'},400);return;}
@@ -104,7 +115,7 @@ const server = createServer(async (req, res) => {
         const candidate:ProviderConfig={id,type:type as ProviderConfig['type'],name:'Provider',apiKey,...(vastToken?{vastToken}:{}),...(vastContainerLabel?{vastContainerLabel}:{}),tokenless,baseUrl,model:'',...(region?{region}:{}),headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined};
         try{json(res,{models:await discoverProviderModels(candidate,AbortSignal.timeout(20000))});}catch(error){json(res,{error:error instanceof Error?error.message:'Model discovery failed.'},502);}return;
       }
-      if(url.pathname==='/api/llm-config'&&req.method==='POST'){
+      if(apiPath==='/api/llm-config'&&req.method==='POST'){
         let body='';for await(const chunk of req){body+=chunk;if(body.length>16384){json(res,{error:'Configuration is too large.'},413);return;}}
         const data=JSON.parse(body) as {providers?:unknown;strategy?:unknown;reasoning?:unknown};
         const strategies=new Set(['first-only','round-robin','fallback','master-slaves']);
@@ -163,20 +174,24 @@ const server = createServer(async (req, res) => {
         const resumeAfterModelConfiguration=autoPausedForMissingModel;
         providers=next;reasoningSettings={...nextReasoning};agents.setInferenceConfig(enabledProviders(providers),strategy,reasoningSettings);
         if(agents.mode==='waiting'){autoPausedForMissingModel=true;turnClock.setEnabled(false);}
-        else if(resumeAfterModelConfiguration&&!worldStartPaused){autoPausedForMissingModel=false;turnClock.setEnabled(true);}
+        else if(resumeAfterModelConfiguration&&worldRequestedRunning){autoPausedForMissingModel=false;turnClock.setEnabled(true);}
         const config=publicLlmConfig();broadcast('llm-config',config);broadcast('settings',{parallelRequests:agents.parallelRequests});json(res,{...metadata(),llmConfig:config});return;
       }
-      if (url.pathname === '/api/control' && req.method === 'POST') {
+      if (apiPath === '/api/control' && req.method === 'POST') {
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 2048) { json(res, { error: 'Request too large.' }, 413); return; } }
         const data = JSON.parse(body);
+        if(typeof data.running==='boolean'){
+          worldRequestedRunning=data.running;autoPausedForMissingModel=false;turnClock.setEnabled(data.running);
+          json(res,{id:worldModule.manifest.id,running:turnClock.status().enabled});return;
+        }
         if(typeof data.parallelRequests==='boolean'){
           agents.setParallelRequests(data.parallelRequests);
           broadcast('settings',{parallelRequests:agents.parallelRequests});json(res,metadata());return;
         }
         if (typeof data.agentsEnabled === 'boolean') {
           if(data.agentsEnabled&&agents.mode==='waiting'){json(res,{error:'Configure and activate a model before enabling agents.'},409);return;}
-          autoPausedForMissingModel=false;
+          worldRequestedRunning=data.agentsEnabled;autoPausedForMissingModel=false;
           turnClock.setEnabled(data.agentsEnabled); json(res, metadata()); return;
         }
         if (typeof data.entityId === 'string' && typeof data.entityEnabled === 'boolean') {
@@ -192,17 +207,17 @@ const server = createServer(async (req, res) => {
       if (req.method !== 'GET') { json(res, { error: 'Method not allowed.' }, 405); return; }
       const requestedTick = Number(url.searchParams.get('tick') ?? engine.tick);
       if (!Number.isFinite(requestedTick) || requestedTick < 0) { json(res, { error: 'Invalid tick.' }, 400); return; }
-      if (url.pathname === '/api/meta') { json(res, metadata()); return; }
-      if (url.pathname === '/api/state') { json(res, { ...metadata(), state: store.stateAt(requestedTick), events: store.eventsAt(requestedTick) }); return; }
-      if (url.pathname === '/api/memory') { const actor=url.searchParams.get('actor')?.trim();if(!actor){json(res,{error:'Actor is required.'},400);return;}json(res,store.memoryAt(requestedTick,actor));return; }
-      if (url.pathname === '/api/events') { json(res, store.eventsAt(requestedTick, url.searchParams.get('actor') ?? '', 120)); return; }
-      if (url.pathname === '/api/frames') { json(res, store.framesAfter(requestedTick)); return; }
-      if (url.pathname === '/api/stream') {
+      if (apiPath === '/api/meta') { json(res, metadata()); return; }
+      if (apiPath === '/api/state') { json(res, { ...metadata(), state: store.stateAt(requestedTick), events: store.eventsAt(requestedTick) }); return; }
+      if (apiPath === '/api/memory') { const actor=url.searchParams.get('actor')?.trim();if(!actor){json(res,{error:'Actor is required.'},400);return;}json(res,store.memoryAt(requestedTick,actor));return; }
+      if (apiPath === '/api/events') { json(res, store.eventsAt(requestedTick, url.searchParams.get('actor') ?? '', 120)); return; }
+      if (apiPath === '/api/frames') { json(res, store.framesAfter(requestedTick)); return; }
+      if (apiPath === '/api/stream') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
         res.write(`event: boot\ndata: ${JSON.stringify({ ...metadata(), state: engine.state(), events: store.eventsAt(engine.tick) })}\n\n`);
         clients.add(res); req.on('close', () => clients.delete(res)); return;
       }
-      if (url.pathname === '/api/export') {
+      if (apiPath === '/api/export') {
         const endTick = store.latestTick();
         res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Content-Disposition': `attachment; filename="emergent-day-${engine.day}.ndjson"` });
         res.write(JSON.stringify({ type: 'world', clock: metadata().clock, module: worldModule.manifest, state: store.stateAt(0) }) + '\n');
@@ -236,7 +251,7 @@ function publishFrame(checkpoint = false) {
   store.record(frame, checkpoint ? engine.state() : undefined, agents.persistence());
   broadcast('frame', { frame, agentsEnabled: turnClock.status().enabled, runtime: turnClock.status() });
 }
-if(worldStartPaused||autoPausedForMissingModel)turnClock.setEnabled(false);
+turnClock.setEnabled(false);
 const timer = setInterval(() => {
   try { turnClock.pump(); }
   catch (error) { console.error('Simulation stopped:', error); void shutdown(1); }

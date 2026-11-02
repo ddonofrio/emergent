@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open http://127.0.0.1:3000. Without an active provider the agents start paused and perform no scripted actions. Set `SCRIPTED_DEMO=true` only to opt into the clearly labelled deterministic demo. Copy `.env.example` to `.env` and configure OpenRouter and/or a local OpenAI-compatible server. Providers are attempted in declaration order; exhaustion pauses world time and retries indefinitely. Keys remain server-side. Agent decisions are unlimited unless an optional positive `AGENT_MAX_TURNS` is explicitly configured. Context keeps ten private notes, four recent actions, and a factual progress summary. Direct interaction tools identify their current local targets while the agent chooses its own movement and actions.
+Open http://127.0.0.1:3000. Every server start leaves all worlds stopped and opens the launcher. Enter First Shore at any time; its separate Play/Stop control runs the simulation whether the observer is open or not. Without an active provider the started world waits indefinitely without advancing world time or inventing actions, and Settings remains available inside the observer. Set `SCRIPTED_DEMO=true` only to opt into the clearly labelled deterministic demo. Copy `.env.example` to `.env` and configure OpenRouter and/or a local OpenAI-compatible server. Providers are attempted in declaration order; exhaustion pauses world time and retries indefinitely. Keys remain server-side. Agent decisions are unlimited unless an optional positive `AGENT_MAX_TURNS` is explicitly configured. Context keeps ten private notes, four recent actions, and a factual progress summary. Direct interaction tools identify their current local targets while the agent chooses its own movement and actions.
 
 ## Inference settings
 
@@ -28,7 +28,7 @@ Token-limit responses and tool calls with malformed JSON arguments are discarded
 ## Shape
 
 - `src/core`: authoritative 20 Hz simulation, sparse 16³ voxel chunks, local perception and validated physical actions.
-- `src/modules`: `WorldModule` manifest, materials/items, entities, generator and world-specific rules. Register another module in `index.ts` and select it with `EMERGENT_MODULE`. Bump its version when generation or rules change.
+- `src/modules`: world catalog plus each `WorldModule` manifest, materials/items, entities, generator and world-specific rules. Register another module in `index.ts`. Bump its version when generation or rules change.
 - `server/agents`: independent per-entity decisions, bounded memory, tool contracts, model adapter, and an agent-scoped Harness plugin bridge.
 - `server/turn-clock.ts`: all decisions share one observation boundary; deterministic rotating priority commits them together, then twenty physics steps advance exactly one world second. NPCs, gravity, movement and speech use that same clock. Long movements continue into subsequent turns without another decision.
 - `server/store.ts`: SQLite WAL, compressed 10 Hz state deltas, 30-second checkpoints and append-only event identities. Seeking reads recordings; it never reruns a model.
@@ -36,7 +36,15 @@ Token-limit responses and tool calls with malformed JSON arguments are discarded
 
 Records live in `data/`; restarting resumes the world. A world day is ten simulation minutes. Change `DATA_DIR` to start a fresh experiment. Export downloads the complete recording as NDJSON. Ready decisions survive pause, provider outages and restart. Unfinished requests are reissued after restart; a partially committed turn finishes its remaining physics before asking again.
 
-Inference has no deadline and consumes no world time. A missing response holds the shared turn indefinitely; connection failures retry with bounded backoff until availability returns. Live status uses a separate telemetry stream, so camera controls and history remain usable. At 1x, replay shows one world second per real second, omitting inference waits. Reaching the recording edge waits for new frames without accumulating time debt or switching to Live. Pause world cancels unfinished requests or finishes the current committed second. Set `WORLD_START_PAUSED=true` to start paused. Old wall-clock recordings require a fresh world; clock versions cannot be mixed.
+Inference has no deadline and consumes no world time. A missing response holds the shared turn indefinitely; connection failures retry with bounded backoff until availability returns. Live status uses a separate telemetry stream, so camera controls and history remain usable. At 1x, replay shows one world second per real second, omitting inference waits. Reaching the recording edge waits for new frames without accumulating time debt or switching to Live. Stopping a world cancels unfinished requests or finishes the current committed second. Old wall-clock recordings require a fresh world; clock versions cannot be mixed.
+
+Reset one active recording explicitly while the server is stopped:
+
+```powershell
+.\scripts\worlds\reset.ps1 -ModuleId first-shore
+```
+
+The reset command never infers a world from configuration and preserves every saved world under `data/worlds/`.
 
 The planner writes its own stable identity, longer-term direction, sustained project and immediate task, with observable success conditions and one to three conditional suggestions for the executor. Identity describes the individual's temperament, values, interests or commitments rather than its species or current work, and stays visible to the executor and observer across tasks. There is no goal catalog or programmed activity sequence. Reviews run after 30 decisions, repeated cycles, new discoveries, repeated blocked attempts or unproductive searches. The executor can return a blocked task without claiming success or erasing its parent project. Completion references recorded outcomes, but whether they satisfy a free-text condition remains an agent assessment, not an engine-verified fact. Version-3 plans are reframed at the next uncached decision; version-2 plans retain their recorded criteria until closed. Already prepared decisions remain intact across restart. Initial terrain and spawn positions are fixed, so fresh runs can still produce similar model choices.
 

@@ -1,12 +1,14 @@
 param(
     [string]$DataDir,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[a-z0-9-]+$')]
     [string]$ModuleId
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$projectRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
+$projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $envFile = Join-Path $projectRoot '.env'
 
 function Get-EnvValue([string]$Name, [string]$Fallback) {
@@ -34,13 +36,6 @@ function Get-EnvValue([string]$Name, [string]$Fallback) {
 if ([string]::IsNullOrWhiteSpace($DataDir)) {
     $DataDir = Get-EnvValue 'DATA_DIR' 'data'
 }
-if ([string]::IsNullOrWhiteSpace($ModuleId)) {
-    $ModuleId = Get-EnvValue 'EMERGENT_MODULE' 'first-shore'
-}
-if ($ModuleId -notmatch '^[a-z0-9-]+$') {
-    throw "Invalid module ID: $ModuleId"
-}
-
 $resolvedDataDir = if ([System.IO.Path]::IsPathRooted($DataDir)) {
     [System.IO.Path]::GetFullPath($DataDir)
 } else {
