@@ -31,8 +31,11 @@ export class UniverseRuntime {
   ) {
     this.store=new Store(resolve(dataDirectory,`${universe.manifest.id}.sqlite`),universe.manifest);
     this.store.cancelInterruptedInferences();
-    this.engine=new Engine(universe,this.store.hasWorld()?this.store.stateAt(this.store.latestTick()):undefined);
+    const storedState=this.store.hasWorld()?this.store.stateAt(this.store.latestTick()):undefined;
+    const migration=storedState?universe.migrateState?.(storedState):undefined;
+    this.engine=new Engine(universe,migration?.state??storedState);
     this.engine.nextEvent=this.store.maxEventId()+1;
+    for(const event of migration?.events??[])this.engine.event(event.actor,event.type,event.message,event.data);
     this.agents=new AgentRuntime(this.engine,this.store,{providers:config.providers,maxTurns:config.maxTurns,scriptedDemo:config.scriptedDemo,reasoning:config.reasoning});
     this.agents.setInferenceConfig(config.providers,config.providerStrategy,config.reasoning);
     this.autoPausedForMissingModel=this.hasAgents&&this.agents.mode==='waiting';

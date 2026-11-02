@@ -274,6 +274,34 @@ export class WorldView {
           this.box(leg,[.16,.07,.26],[0,-.215,.08],legColor);
           group.add(leg);
         }
+      } else if (entity.kind === 'miner-robot') {
+        const iron=entity.color,darkIron='#353b38',joint='#242a28',rust='#986747',eye='#e2bd70';
+        this.box(group,[.18,.25,.58],[-.34,.13,0],darkIron);
+        this.box(group,[.18,.25,.58],[.34,.13,0],darkIron);
+        this.box(group,[.12,.13,.46],[-.435,.13,0],joint);
+        this.box(group,[.12,.13,.46],[.435,.13,0],joint);
+        this.box(group,[.62,.18,.5],[0,.35,0],rust);
+        this.box(group,[.68,.43,.48],[0,.61,0],iron);
+        this.box(group,[.34,.22,.035],[0,.62,.258],darkIron);
+        this.box(group,[.08,.08,.04],[-.1,.63,.278],eye);
+        this.box(group,[.08,.08,.04],[.1,.63,.278],eye);
+        this.box(group,[.17,.12,.17],[0,.88,0],darkIron);
+        this.box(group,[.72,.35,.43],[0,1.08,0],iron);
+        this.box(group,[.52,.18,.035],[0,1.08,.233],darkIron);
+        this.box(group,[.15,.11,.04],[-.14,1.09,.255],eye);
+        this.box(group,[.15,.11,.04],[.14,1.09,.255],eye);
+        this.box(group,[.05,.035,.045],[-.14,1.087,.282],'#302b24');
+        this.box(group,[.05,.035,.045],[.14,1.087,.282],'#302b24');
+        this.box(group,[.2,.14,.18],[0,1.325,.01],darkIron);
+        this.box(group,[.11,.075,.035],[0,1.325,.118],'#f0d994');
+        for(const [name,side] of [['arm-left',-1],['arm-right',1]] as const){
+          const arm=new THREE.Group();arm.name=name;arm.position.set(side*.43,.8,0);
+          this.box(arm,[.13,.36,.16],[0,-.18,0],iron);
+          this.box(arm,[.18,.13,.2],[0,-.4,.03],darkIron);
+          this.box(arm,[.06,.12,.08],[-side*.07,-.5,.08],joint);
+          this.box(arm,[.06,.12,.08],[side*.07,-.5,.08],joint);
+          group.add(arm);
+        }
       } else {
         const hairColor='#514d3e',invertedHide=entity.id==='t2',hideColor=invertedHide?'#493326':'#b8874d',spotColor=invertedHide?'#b8874d':'#493326',skinColor='#d9b98d';
         this.box(group,[.58,.66,.35],[0,.93,0],skinColor);

@@ -227,6 +227,9 @@ function troglodytePortrait(id:string){
   const colors=id==='t2'?{fur:'#493326',trim:'#b8874d',hair:'#302c26',skin:'#cfae83',beard:'#40352b'}:{fur:'#b8874d',trim:'#493326',hair:'#514d3e',skin:'#d9b98d',beard:'#514638'};
   return `<svg class="troglodyte-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><path d="M5 52 7 39q1-6 9-9l5-2h7l5 2q8 3 9 9l2 13Z" fill="${colors.fur}"/><path d="m9 39 5 2 4-2 5 3 5-3 5 3 5-3 5 2-1 11H7Z" fill="${colors.trim}"/><path d="m16 30 8 6 8-6 3 3-8 9h-6l-8-9Z" fill="${colors.fur}"/><path d="M18 25h12v8q-6 5-12 0Z" fill="${colors.skin}"/><ellipse cx="14" cy="17" rx="3" ry="4" fill="${colors.skin}"/><ellipse cx="34" cy="17" rx="3" ry="4" fill="${colors.skin}"/><path d="M15 12q0-8 9-9 10 1 10 10v7q-2 7-10 9-8-2-9-9Z" fill="${colors.skin}"/><path d="M14 14Q13 4 24 3q11 1 11 11l-3-3-2-4q-5 4-14 3l-1 5Z" fill="${colors.hair}"/><path d="M16 18q2 1 4 0m8 0q2 1 4 0" fill="none" stroke="#382f25" stroke-width="1.5" stroke-linecap="round"/><path d="M24 18v4l-2 1" fill="none" stroke="#a67f60" stroke-width="1.2" stroke-linecap="round"/><path d="M17 21q2-2 5 0h4q3-2 5 0l-1 6-3 4-3 2-3-2-3-4Z" fill="${colors.beard}"/><path d="m18 22 4 1 2-1 2 1 4-1" fill="none" stroke="${colors.beard}" stroke-width="2" stroke-linecap="round"/><path d="m16 30 8 6 8-6 2 3-6 6h-8l-6-6Z" fill="${colors.trim}"/><path d="m21 37 3 3 3-3" fill="none" stroke="${colors.fur}" stroke-width="2" stroke-linecap="round"/></svg>`;
 }
+function minerRobotPortrait(){
+  return '<svg class="miner-robot-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><path d="M9 41h30v7H9z" fill="#343a37"/><path d="M6 40h8v10H6zm28 0h8v10h-8z" fill="#202624"/><path d="M11 27h26v16H11z" fill="#7b817b"/><path d="M16 23h16v5H16z" fill="#343a37"/><path d="M8 10h32v15H8z" fill="#858b85"/><path d="M11 14h26v8H11z" fill="#343a37"/><path d="M14 16h7v4h-7zm13 0h7v4h-7z" fill="#e2bd70"/><path d="M21 5h6v6h-6z" fill="#343a37"/><path d="M22 6h4v3h-4z" fill="#f0d994"/><path d="M7 30h4v11H7zm30 0h4v11h-4z" fill="#986747"/></svg>';
+}
 function updateStrategyControl(){
   const control=$<HTMLSelectElement>('settings-strategy'),count=Array.from($('model-list').querySelectorAll<HTMLInputElement>('[data-field="enabled"]')).filter(input=>input.checked).length,description=$('strategy-description');
   control.disabled=count<2;
@@ -437,9 +440,9 @@ function renderInspector() {
     const portrait=e.kind==='troglodyte'?inhabitantPortraits[e.name]:undefined;
     if(portrait){
       const image=document.createElement('img');image.src=portrait;image.alt='';image.width=31;image.height=36;image.decoding='async';avatar.append(image);
-    }else avatar.innerHTML=e.kind==='troglodyte'?troglodytePortrait(e.id):'<i></i>';
+    }else avatar.innerHTML=e.kind==='troglodyte'?troglodytePortrait(e.id):e.kind==='miner-robot'?minerRobotPortrait():'<i></i>';
     const text=document.createElement('span');text.className='inhabitant-text';const name=document.createElement('strong');name.textContent=e.name;
-    const kind=document.createElement('small');kind.textContent=e.kind==='troglodyte'?'Troglodyte':'Duck · NPC';text.append(name,kind);
+    const kind=document.createElement('small');kind.textContent=e.kind==='troglodyte'?'Troglodyte':e.kind==='miner-robot'?'Miner Robot':'Duck · NPC';text.append(name,kind);
     const status=document.createElement('span');status.className=`entity-status ${['planning','thinking','waiting'].includes(displayStatus)?'thinking':''} ${displayStatus==='error'?'error':''}`;status.textContent=displayStatus;
     const toggle=document.createElement('input');toggle.type='checkbox';toggle.className='entity-toggle';toggle.checked=enabled;toggle.disabled=!isLive;toggle.title=`Enable ${e.name}`;toggle.setAttribute('aria-label',`Enable ${e.name}`);toggle.onchange=()=>void setEntityEnabled(e.id,toggle.checked,toggle);
     button.append(avatar,text,status);button.onclick=()=>selectEntity(e.id);button.ondblclick=()=>view.focus(e.id);row.append(button,toggle);list.append(row);
@@ -534,7 +537,7 @@ function journalEventLabel(event:WorldEvent) {
     const labels:Record<string,string>={walk:'Walking',run:'Running',jump:'Jumping',turn:'Turning',wait:'Waiting',find_material:'Scanning for materials',find_entity:'Searching for living beings',hit:'Striking a block',dig:'Digging with a shovel',strike_held:'Crafting with wood',join:'Joining door halves',open:'Opening a door',close:'Closing a door',place:'Placing an item',throw:'Throwing an item',pickup:'Picking up an item',hold:'Taking an item in hand',store:'Putting an item away',fill:'Filling a bucket',empty:'Emptying a bucket',say:'Speaking',follow:'Following',stop_follow:'Stopping following'};
     const label=labels[action]??'Action';return event.type==='rejected'?`${label} failed`:label;
   }
-  const labels:Record<string,string>={damage:'Block damaged',discovery:'Learned',memory:'Journal note',arrived:'Movement complete',scanned:'Material scan complete',blocked:'Movement blocked',collision:'Collision',settled:'Block settled',lost:'Item lost',speech:'Speech',encounter:'Encounter',collapse:'Tree collapse',reflection:'Reflection','journal-compaction':'Journal condensed','agent-error':'Agent paused','entity-control':'Entity control','knowledge-correction':'Knowledge update','follow-ended':'Follow ended','follow-blocked':'Follow blocked',splash:'Water splashed'};
+  const labels:Record<string,string>={damage:'Block damaged',discovery:'Learned',memory:'Journal note',arrived:'Movement complete',scanned:'Material scan complete',blocked:'Movement blocked',collision:'Collision',settled:'Block settled',lost:'Item lost',speech:'Speech',encounter:'Encounter',collapse:'Tree collapse',reflection:'Reflection','journal-compaction':'Journal condensed','agent-error':'Agent paused','entity-control':'Entity control','entity-arrival':'Entity arrival','knowledge-correction':'Knowledge update','follow-ended':'Follow ended','follow-blocked':'Follow blocked',splash:'Water splashed'};
   return labels[event.type]??event.type.replaceAll('-',' ');
 }
 function journalEventMessage(event:WorldEvent) {

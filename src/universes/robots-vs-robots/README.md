@@ -10,4 +10,4 @@ Universe-specific rules, generation parameters, entities, and presentation choic
 
 ## Initial increment
 
-The initial world is an infinite horizontal procedural surface using the shared voxel materials. Pebble, the duck, starts alone at the origin. Its observer uses the shared world renderer in a world-only layout with no side panels.
+The initial world is an infinite horizontal procedural surface using the shared voxel materials. Pebble, the duck, starts at the origin. MIN-01, a compact miner robot, starts ten metres to Pebble's right. Its observer uses the shared world renderer in a world-only layout with no side panels.

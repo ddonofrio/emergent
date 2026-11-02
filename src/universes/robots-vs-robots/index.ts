@@ -17,6 +17,21 @@ const duck: Entity = {
   status: 'idle',
 };
 
+const min01: Entity = {
+  id: 'min-01',
+  name: 'MIN-01',
+  kind: 'miner-robot',
+  controller: 'agent',
+  enabled: true,
+  position: [10.5, 1, .5],
+  yaw: -90,
+  height: 1.4,
+  hitbox: { radius: .43, height: 1.4 },
+  color: '#7b817b',
+  inventory: null,
+  status: 'idle',
+};
+
 export const robotsVsRobots: UniverseModule = {
   manifest: {
     id: 'robots-vs-robots',
@@ -45,5 +60,20 @@ export const robotsVsRobots: UniverseModule = {
     agentInstructions: 'You are {name}, an embodied robot in an unbounded physical world. Choose your own goals and success conditions from what you can perceive and remember.',
     planningInstructions: 'Choose and maintain your own direction, project, immediate task, and success conditions from your local experience.',
   },
-  generate: () => ({ blocks: [], entities: [duck] }),
+  generate: () => ({ blocks: [], entities: [duck, min01] }),
+  migrateState(state) {
+    if(state.entities.some(entity=>entity.id===min01.id))return;
+    const pebble=state.entities.find(entity=>entity.id===duck.id),position=pebble
+      ? [pebble.position[0]+10,pebble.position[1],pebble.position[2]] as [number,number,number]
+      : min01.position;
+    return {
+      state:{...state,entities:[...state.entities,{...min01,position}]},
+      events:[{
+        actor:min01.id,
+        type:'entity-arrival',
+        message:`${min01.name} joined the world ten metres to ${duck.name}'s right.`,
+        data:{position,relativeTo:duck.id},
+      }],
+    };
+  },
 };

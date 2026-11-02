@@ -101,9 +101,14 @@ export interface Observation {
   interactions: InteractionTargets;
   description: string; truncated: boolean;
 }
+export interface WorldStateMigration {
+  state: WorldState;
+  events: { actor: string; type: string; message: string; data?: unknown }[];
+}
 export interface UniverseModule {
   manifest: UniverseManifest;
   generate(): { blocks: Block[]; entities: Entity[] };
+  migrateState?(state: WorldState): WorldStateMigration | undefined;
   transformHit?(kind: string, impact: Vec3, orientation?: 'up' | 'down'): string | null;
   canEnter?(entity: Entity, feet: Vec3): ActionResult;
   movementSpeed?(entity:Entity,feet:Vec3,speed:number):number;
