@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { terrainFloorY, terrainKindAt, terrainSurfaceY } from '../core/procedural-terrain';
 import { key, unkey, type Body, type Entity, type Frame, type UniverseManifest, type Vec3, type WorldState } from '../core/types';
 import { entityLabelText } from './entity-label';
 
@@ -81,6 +82,10 @@ export class WorldView {
     if (kind) { this.cells.set(k,kind); if (!this.chunks.has(chunk)) this.chunks.set(chunk,new Set()); this.chunks.get(chunk)!.add(k); }
     else { this.cells.delete(k); this.chunks.get(chunk)?.delete(k); }
   }
+  private kindAt(p:Vec3){
+    const k=key(p),explicit=this.cells.get(k);if(explicit)return explicit;if(this.removedTerrain.has(k))return undefined;
+    return terrainKindAt(this.manifest?.terrain,this.manifest?.seed??0,p);
+  }
   load(state: WorldState, manifest: UniverseManifest) {
     this.manifest = manifest; this.cells.clear(); this.chunks.clear(); this.punches.clear(); this.damage=new Map(Object.entries(state.blockDamage??{}));this.removedTerrain=new Set(state.removedBlocks??[]);
     const fog=manifest.view?.fog??{near:150,far:420};this.scene.fog=new THREE.Fog('#b2ccc1',fog.near,fog.far);this.controls.maxDistance=manifest.view?.maxDistance??260;
@@ -97,7 +102,7 @@ export class WorldView {
   update(frame: Frame, snap = false, speed = 1) {
     const dirty = new Set<string>();
     for (const [k,kind] of frame.changes) {
-      if(kind)this.removedTerrain.delete(k);else if(this.manifest?.terrain&&unkey(k)[1]<=this.manifest.terrain.top)this.removedTerrain.add(k);
+      if(kind)this.removedTerrain.delete(k);else if(terrainKindAt(this.manifest?.terrain,this.manifest?.seed??0,unkey(k)))this.removedTerrain.add(k);
       this.setCell(k,kind); const p = unkey(k); dirty.add(this.chunk(p));
       for (const offset of neighbors) dirty.add(this.chunk(p.map((v,i) => v+offset[i]) as Vec3));
     }
@@ -123,7 +128,7 @@ export class WorldView {
     const old = this.meshes.get(chunk); if (old) { this.scene.remove(old); old.dispose(); this.meshes.delete(chunk); }
     const visible = [...(this.chunks.get(chunk) ?? [])].filter(k => {
       const p = unkey(k);
-      return neighbors.some(d => { const kind = this.cells.get(key(p.map((v,i) => v+d[i]) as Vec3)); return !kind || !this.manifest!.materials[kind]?.solid; });
+      return neighbors.some(d => { const kind = this.kindAt(p.map((v,i) => v+d[i]) as Vec3); return !kind || !this.manifest!.materials[kind]?.solid; });
     });
     if (!visible.length) return;
     const mesh = new THREE.InstancedMesh(this.cube,this.blockMaterial,visible.length), dummy = new THREE.Object3D();
@@ -142,25 +147,33 @@ export class WorldView {
       if(this.proceduralGround){this.scene.remove(this.proceduralGround);this.proceduralGround.dispose();delete this.proceduralGround;}
       return;
     }
-    const centerX=Math.floor(this.controls.target.x/16)*16,centerZ=Math.floor(this.controls.target.z/16)*16,origin=`${centerX},${centerZ}`;
+    const seed=this.manifest!.seed,centerX=Math.floor(this.controls.target.x/16)*16,centerZ=Math.floor(this.controls.target.z/16)*16,origin=`${centerX},${centerZ}`;
     if(origin===this.proceduralGroundOrigin)return;
     this.proceduralGroundOrigin=origin;
     if(this.proceduralGround){this.scene.remove(this.proceduralGround);this.proceduralGround.dispose();}
-    const radius=96,positions:Vec3[]=[],kind=terrain.layers.find(layer=>terrain.top>=layer.min)?.kind;
-    if(!kind)return;
-    for(let x=centerX-radius;x<centerX+radius;x++)for(let z=centerZ-radius;z<centerZ+radius;z++){
-      const position:Vec3=[x,terrain.top,z],k=key(position);
-      if(!this.removedTerrain.has(k)&&!this.cells.has(k))positions.push(position);
+    this.sea.position.x=this.seabed.position.x=centerX;this.sea.position.z=this.seabed.position.z=centerZ;
+    const radius=96,floor=terrainFloorY(terrain),tops=new Map<string,number>(),visible=new Map<string,{position:Vec3;kind:string}>();
+    for(let x=centerX-radius-1;x<=centerX+radius;x++)for(let z=centerZ-radius-1;z<=centerZ+radius;z++){
+      let y=terrainSurfaceY(terrain,seed,x,z);while(y>=floor&&!this.kindAt([x,y,z]))y--;tops.set(`${x},${z}`,y);
     }
-    const mesh=this.proceduralGround=new THREE.InstancedMesh(this.cube,this.blockMaterial,positions.length),dummy=new THREE.Object3D(),baseColor=new THREE.Color(this.manifest!.materials[kind]?.color??'#ffffff');
-    positions.forEach((position,index)=>{
+    for(let x=centerX-radius;x<centerX+radius;x++)for(let z=centerZ-radius;z<centerZ+radius;z++){
+      const top=tops.get(`${x},${z}`)!;if(top<floor)continue;
+      const expose=(y:number)=>{const position:[number,number,number]=[x,y,z],k=key(position),kind=this.kindAt(position);if(kind&&!this.cells.has(k))visible.set(k,{position,kind});};
+      expose(top);
+      for(const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){
+        const adjacent=tops.get(`${x+dx},${z+dz}`)??floor-1;
+        for(let y=top-1;y>adjacent&&y>=floor;y--)expose(y);
+      }
+    }
+    const positions=[...visible.values()],mesh=this.proceduralGround=new THREE.InstancedMesh(this.cube,this.blockMaterial,positions.length),dummy=new THREE.Object3D();
+    positions.forEach(({position,kind},index)=>{
       dummy.position.set(position[0]+.5,position[1]+.5,position[2]+.5);dummy.updateMatrix();mesh.setMatrixAt(index,dummy.matrix);
-      const color=baseColor.clone().multiplyScalar(.94+.1*(Math.sin(position[0]*12.98+position[2]*78.23)*.5+.5));mesh.setColorAt(index,color);
+      const color=new THREE.Color(this.manifest!.materials[kind]?.color??'#ffffff').multiplyScalar(.94+.1*(Math.sin(position[0]*12.98+position[2]*78.23+position[1]*37.7)*.5+.5));mesh.setColorAt(index,color);
     });
-    mesh.receiveShadow=true;mesh.computeBoundingSphere();this.scene.add(mesh);
+    mesh.castShadow=true;mesh.receiveShadow=true;mesh.computeBoundingSphere();this.scene.add(mesh);
   }
-  private box(group: THREE.Group, size: Vec3, position: Vec3, color: string) {
-    const mesh = new THREE.Mesh(this.cube, new THREE.MeshStandardMaterial({ color, roughness: .9 }));
+  private box(group: THREE.Group, size: Vec3, position: Vec3, color: string, metalness=0, roughness=metalness ? .68 : .9) {
+    const mesh = new THREE.Mesh(this.cube, new THREE.MeshStandardMaterial({ color, roughness, metalness }));
     mesh.material.userData.activeColor = color;
     mesh.scale.set(...size); mesh.position.set(...position); mesh.castShadow = true; mesh.receiveShadow = true; group.add(mesh); return mesh;
   }
@@ -275,33 +288,77 @@ export class WorldView {
           group.add(leg);
         }
       } else if (entity.kind === 'miner-robot') {
-        const iron=entity.color,darkIron='#353b38',joint='#242a28',rust='#986747',eye='#e2bd70';
-        this.box(group,[.18,.25,.58],[-.34,.13,0],darkIron);
-        this.box(group,[.18,.25,.58],[.34,.13,0],darkIron);
-        this.box(group,[.12,.13,.46],[-.435,.13,0],joint);
-        this.box(group,[.12,.13,.46],[.435,.13,0],joint);
-        this.box(group,[.62,.18,.5],[0,.35,0],rust);
-        this.box(group,[.68,.43,.48],[0,.61,0],iron);
-        this.box(group,[.34,.22,.035],[0,.62,.258],darkIron);
-        this.box(group,[.08,.08,.04],[-.1,.63,.278],eye);
-        this.box(group,[.08,.08,.04],[.1,.63,.278],eye);
-        this.box(group,[.17,.12,.17],[0,.88,0],darkIron);
-        this.box(group,[.72,.35,.43],[0,1.08,0],iron);
-        this.box(group,[.52,.18,.035],[0,1.08,.233],darkIron);
-        this.box(group,[.15,.11,.04],[-.14,1.09,.255],eye);
-        this.box(group,[.15,.11,.04],[.14,1.09,.255],eye);
-        this.box(group,[.05,.035,.045],[-.14,1.087,.282],'#302b24');
-        this.box(group,[.05,.035,.045],[.14,1.087,.282],'#302b24');
-        this.box(group,[.2,.14,.18],[0,1.325,.01],darkIron);
-        this.box(group,[.11,.075,.035],[0,1.325,.118],'#f0d994');
+        const materialType=entity.appearance?.material??(new THREE.Color(entity.color).getHSL({h:0,s:0,l:0}).l>.6?'steel':'iron'),titanium=materialType==='titanium',steel=materialType==='steel';
+        const metal=entity.color,brushedMetal=titanium?'#f1f6f7':steel?'#d8dfe1':'#8c928e',darkMetal=titanium?'#91a2a9':steel?'#768084':'#454b48',blackMetal=titanium?'#59676d':steel?'#414a4d':'#252a28',polishedMetal=titanium?'#ffffff':steel?'#f0f5f6':'#aeb3ae',lamp='#f0d994';
+        const metalness=entity.appearance?.metalness??(titanium?.99:steel?.94:.72),roughness=entity.appearance?.roughness??(titanium?.16:steel?.3:.68),widthScale=entity.appearance?.widthScale??1;
+        const robotBox=(target:THREE.Group,size:Vec3,position:Vec3,color=metal)=>this.box(target,size,position,color,metalness,roughness);
+        const metalBox=(size:Vec3,position:Vec3,color=metal)=>robotBox(group,size,position,color);
+        metalBox([.18,.25,.58],[-.34,.13,0],darkMetal);
+        metalBox([.18,.25,.58],[.34,.13,0],darkMetal);
+        metalBox([.035,.19,.52],[-.445,.13,0],blackMetal);
+        metalBox([.035,.19,.52],[.445,.13,0],blackMetal);
+        const wheelGeometry=new THREE.CylinderGeometry(.085,.085,.045,8),hubGeometry=new THREE.CylinderGeometry(.033,.033,.058,8);
+        const trackMaterial=(color:string)=>{const material=new THREE.MeshStandardMaterial({color,roughness:titanium?.2:steel?.34:.58,metalness:titanium?.99:steel?.96:.82});material.userData.activeColor=color;return material;};
+        for(const side of [-1,1] as const){
+          for(const z of [-.18,0,.18]){
+            const wheel=new THREE.Mesh(wheelGeometry,trackMaterial(darkMetal));wheel.rotation.z=Math.PI/2;wheel.position.set(side*.465,.13,z);wheel.castShadow=true;wheel.receiveShadow=true;group.add(wheel);
+            const hub=new THREE.Mesh(hubGeometry,trackMaterial(polishedMetal));hub.rotation.z=Math.PI/2;hub.position.set(side*.49,.13,z);hub.castShadow=true;group.add(hub);
+          }
+          for(const z of [-.24,-.12,0,.12,.24]){
+            metalBox([.045,.045,.09],[side*.47,.025,z],blackMetal);
+            metalBox([.045,.045,.09],[side*.47,.235,z],blackMetal);
+          }
+          for(const y of [.075,.14,.205]){
+            metalBox([.045,.06,.045],[side*.47,y,-.275],blackMetal);
+            metalBox([.045,.06,.045],[side*.47,y,.275],blackMetal);
+          }
+        }
+        if(entity.appearance?.powerModule==='lithium-battery'){
+          const lithium='#c8bed8',lithiumDark='#81778f';
+          metalBox([.56,.46,.06],[0,.67,-.28],darkMetal);
+          this.box(group,[.5,.38,.14],[0,.67,-.35],blackMetal,.9,.3);
+          for(const x of [-.17,-.055,.055,.17])this.box(group,[.085,.27,.016],[x,.67,-.428],lithium,.55,.28);
+          this.box(group,[.44,.045,.02],[0,.835,-.43],lithiumDark,.65,.25);
+          this.box(group,[.44,.045,.02],[0,.505,-.43],lithiumDark,.65,.25);
+          this.box(group,[.12,.055,.025],[0,.88,-.4],polishedMetal,.92,.2);
+          this.box(group,[.06,.04,.028],[0,.88,-.43],lamp,.15,.24);
+        }else if(entity.appearance?.powerModule==='nuclear-reactor'){
+          metalBox([.56,.46,.06],[0,.67,-.28],darkMetal);
+          this.box(group,[.5,.38,.14],[0,.67,-.35],blackMetal,.94,.26);
+          for(const y of [.515,.825])this.box(group,[.48,.045,.02],[0,y,-.43],polishedMetal,.96,.18);
+          for(const x of [-.205,.205])for(const y of [.59,.67,.75])this.box(group,[.055,.045,.035],[x,y,-.435],darkMetal,.96,.22);
+          const reactorShell=new THREE.Mesh(new THREE.CylinderGeometry(.145,.145,.07,10),trackMaterial(polishedMetal));
+          reactorShell.rotation.x=Math.PI/2;reactorShell.position.set(0,.67,-.43);reactorShell.castShadow=true;reactorShell.receiveShadow=true;group.add(reactorShell);
+          const coreColor='#d7eea3',coreMaterial=new THREE.MeshStandardMaterial({color:coreColor,emissive:'#526b31',emissiveIntensity:1.1,metalness:.3,roughness:.22});
+          coreMaterial.userData.activeColor=coreColor;
+          const reactorCore=new THREE.Mesh(new THREE.CylinderGeometry(.075,.075,.078,10),coreMaterial);
+          reactorCore.rotation.x=Math.PI/2;reactorCore.position.set(0,.67,-.47);reactorCore.castShadow=true;group.add(reactorCore);
+          this.box(group,[.1,.045,.025],[0,.88,-.4],polishedMetal,.92,.2);
+          this.box(group,[.045,.03,.028],[0,.88,-.43],lamp,.15,.24);
+        }
+        metalBox([.62,.18,.5],[0,.35,0],brushedMetal);
+        metalBox([.68,.43,.48],[0,.61,0]);
+        metalBox([.34,.22,.035],[0,.62,.258],darkMetal);
+        this.box(group,[.08,.08,.04],[-.1,.63,.278],lamp);
+        this.box(group,[.08,.08,.04],[.1,.63,.278],lamp);
+        metalBox([.17,.12,.17],[0,.88,0],darkMetal);
+        metalBox([.72,.35,.43],[0,1.08,0]);
+        metalBox([.52,.18,.035],[0,1.08,.233],darkMetal);
+        this.box(group,[.15,.11,.04],[-.14,1.09,.255],lamp);
+        this.box(group,[.15,.11,.04],[.14,1.09,.255],lamp);
+        metalBox([.05,.035,.045],[-.14,1.087,.282],blackMetal);
+        metalBox([.05,.035,.045],[.14,1.087,.282],blackMetal);
+        metalBox([.2,.14,.18],[0,1.325,.01],darkMetal);
+        this.box(group,[.11,.075,.035],[0,1.325,.118],lamp);
         for(const [name,side] of [['arm-left',-1],['arm-right',1]] as const){
           const arm=new THREE.Group();arm.name=name;arm.position.set(side*.43,.8,0);
-          this.box(arm,[.13,.36,.16],[0,-.18,0],iron);
-          this.box(arm,[.18,.13,.2],[0,-.4,.03],darkIron);
-          this.box(arm,[.06,.12,.08],[-side*.07,-.5,.08],joint);
-          this.box(arm,[.06,.12,.08],[side*.07,-.5,.08],joint);
+          robotBox(arm,[.13,.36,.16],[0,-.18,0]);
+          robotBox(arm,[.18,.13,.2],[0,-.4,.03],darkMetal);
+          robotBox(arm,[.06,.12,.08],[-side*.07,-.5,.08],blackMetal);
+          robotBox(arm,[.06,.12,.08],[side*.07,-.5,.08],blackMetal);
           group.add(arm);
         }
+        group.scale.set(2*widthScale,2.043,2);
       } else {
         const hairColor='#514d3e',invertedHide=entity.id==='t2',hideColor=invertedHide?'#493326':'#b8874d',spotColor=invertedHide?'#b8874d':'#493326',skinColor='#d9b98d';
         this.box(group,[.58,.66,.35],[0,.93,0],skinColor);
@@ -373,9 +430,15 @@ export class WorldView {
         const walking = e.motion && distanceSquared(e.position,previous.position) > .00001;
         const gait=Math.sin(visualTime*9);
         for (const name of ['leg-left','leg-right']) { const leg = group.getObjectByName(name); if (leg) leg.rotation.x = walking ? gait*(name === 'leg-left' ? .32 : -.32) : 0; }
-        const leftArm=group.getObjectByName('arm-left'),rightArm=group.getObjectByName('arm-right'),punch=this.punches.get(e.id);
-        if(leftArm)leftArm.rotation.x=walking?-gait*.3:0;
-        if(rightArm){if(punch&&visualTime<=punch.until){const phase=Math.max(0,Math.min(1,(visualTime-punch.start)/(punch.until-punch.start)));rightArm.rotation.x=-Math.sin(Math.PI*phase)*1.8;}else{rightArm.rotation.x=walking?gait*.3:0;if(punch)this.punches.delete(e.id);}}
+        const leftArm=group.getObjectByName('arm-left'),rightArm=group.getObjectByName('arm-right'),punch=this.punches.get(e.id),miner=e.kind==='miner-robot',showcase=e.motion?.kind==='showcase';
+        if(miner){
+          const progress=showcase?e.motion?.progress??0:0,extension=showcase?(progress<.2?progress/.2:progress>.8?(1-progress)/.2:1):0,pitch=e.motion?.kind==='reverse'?Math.PI/4:walking?-Math.PI/4:0;
+          if(leftArm){leftArm.rotation.x=pitch;leftArm.rotation.z=-extension*Math.PI/2;}
+          if(rightArm){rightArm.rotation.x=pitch;rightArm.rotation.z=extension*Math.PI/2;}
+        }else{
+          if(leftArm)leftArm.rotation.x=walking?-gait*.3:0;
+          if(rightArm){if(punch&&visualTime<=punch.until){const phase=Math.max(0,Math.min(1,(visualTime-punch.start)/(punch.until-punch.start)));rightArm.rotation.x=-Math.sin(Math.PI*phase)*1.8;}else{rightArm.rotation.x=walking?gait*.3:0;if(punch)this.punches.delete(e.id);}}
+        }
         const label=this.labels.get(e.id)!;const projected=group.position.clone().add(new THREE.Vector3(0,e.height+.7,0)).project(this.camera);
         label.style.display=Math.abs(projected.x)>1||Math.abs(projected.y)>1||projected.z>1?'none':'block';
         label.style.left=`${(projected.x*.5+.5)*this.container.clientWidth}px`;label.style.top=`${(-projected.y*.5+.5)*this.container.clientHeight}px`;

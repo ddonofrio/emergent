@@ -1,5 +1,5 @@
 import { createServer, type ServerResponse } from 'node:http';
-import { readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { once } from 'node:events';
 import { inflateSync } from 'node:zlib';
@@ -32,14 +32,20 @@ if (enabledProviders(providers).some(provider => provider.modelDiscovery)) {
   try { await new ProviderChain(enabledProviders(providers)).refreshDiscoveredModels(AbortSignal.timeout(2000)); }
   catch { /* Discovery is retried whenever the local fallback is needed. */ }
 }
-const runtimes=new Map(universeCatalog.filter(universe=>universe.available).map(entry=>{
-  const runtime=new UniverseRuntime(loadUniverse(entry.id),dataDirectory,{
+const createUniverseRuntime=(entry:(typeof universeCatalog)[number])=>new UniverseRuntime(loadUniverse(entry.id),dataDirectory,{
     providers:enabledProviders(providers),providerStrategy,reasoning:reasoningSettings,
     maxTurns:optionalTurnLimit(process.env.AGENT_MAX_TURNS),scriptedDemo,
     fatal(error){console.error(`${entry.name} storage or runtime failure:`,error);void shutdown(1);},
   });
-  return [entry.id,runtime] as const;
-}));
+const runtimes=new Map(universeCatalog.filter(universe=>universe.available).map(entry=>[entry.id,createUniverseRuntime(entry)] as const));
+async function restartUniverse(entry:(typeof universeCatalog)[number]){
+  const current=runtimes.get(entry.id);
+  if(!current)throw new Error('This universe runtime is unavailable.');
+  runtimes.delete(entry.id);current.close();
+  const recording=resolve(dataDirectory,`${entry.id}.sqlite`);
+  await Promise.all([recording,`${recording}-shm`,`${recording}-wal`].map(path=>rm(path,{force:true})));
+  const replacement=createUniverseRuntime(entry);runtimes.set(entry.id,replacement);replacement.setRunning(true);return replacement;
+}
 const production = process.argv.includes('--production');
 const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
 const publicLlmConfig = (runtime:UniverseRuntime) => ({
@@ -164,8 +170,12 @@ const server = createServer(async (req, res) => {
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 2048) { json(res, { error: 'Request too large.' }, 413); return; } }
         const data = JSON.parse(body);
+        if(data.reset===true){
+          const replacement=await restartUniverse(universe);
+          json(res,{...replacement.metadata(publicLlmConfig(replacement)),reset:true});return;
+        }
         if(typeof data.running==='boolean'){
-          json(res,{id:universe.id,running:runtime.setRunning(data.running)});return;
+          const running=runtime.setRunning(data.running);json(res,{id:universe.id,...metadata(),running});return;
         }
         if(typeof data.parallelRequests==='boolean'){
           agents.setParallelRequests(data.parallelRequests);
@@ -175,6 +185,23 @@ const server = createServer(async (req, res) => {
           if(data.agentsEnabled&&runtime.hasAgents&&agents.mode==='waiting'){json(res,{error:'Configure and activate a model before enabling agents.'},409);return;}
           runtime.setRunning(data.agentsEnabled);json(res,metadata());return;
         }
+        if(typeof data.entityId==='string'&&['manual','automaton'].includes(data.controlMode)){
+          const entity=engine.entities.find(candidate=>candidate.id===data.entityId);
+          if(!entity){json(res,{error:'Unknown entity.'},404);return;}
+          if(!['static','automaton'].includes(entity.controller)){json(res,{error:'This character does not support manual or automaton control.'},409);return;}
+          if(engine.setEntityControlMode(entity.id,data.controlMode)){turnClock.entityChanged();runtime.publishFrame(true);}
+          json(res,{...metadata(),entity:engine.entity(entity.id)});return;
+        }
+        if(typeof data.entityId==='string'&&['up','down','left','right'].includes(data.manualDirection)){
+          const entity=engine.entities.find(candidate=>candidate.id===data.entityId);
+          if(!entity){json(res,{error:'Unknown entity.'},404);return;}
+          if(entity.controller!=='static'){json(res,{error:'Arrow-key control is only available for static characters.'},409);return;}
+          if(!turnClock.status().enabled){json(res,{error:'The world is stopped.'},409);return;}
+          if(entity.motion){json(res,{error:`${entity.name} is still moving.`},409);return;}
+          const offsets:Record<string,[number,number]>={up:[0,-.5],down:[0,.5],left:[-.5,0],right:[.5,0]},offset=offsets[data.manualDirection];
+          const result=engine.act(entity.id,{action:'walk',target:[entity.position[0]+offset[0],entity.position[1],entity.position[2]+offset[1]]},'manual');
+          turnClock.entityChanged();runtime.publishFrame(true);json(res,{...metadata(),entity:engine.entity(entity.id),result});return;
+        }
         if (typeof data.entityId === 'string' && typeof data.entityEnabled === 'boolean') {
           const entity = engine.entities.find(candidate => candidate.id === data.entityId);
           if (!entity) { json(res, { error: 'Unknown entity.' }, 404); return; }
@@ -183,7 +210,7 @@ const server = createServer(async (req, res) => {
           }
           json(res, { ...metadata(), entity: engine.entity(entity.id) }); return;
         }
-        json(res, { error: 'Provide parallelRequests, agentsEnabled, or entityId with entityEnabled.' }, 400); return;
+        json(res, { error: 'Provide reset, running, parallelRequests, agentsEnabled, controlMode, manualDirection, or entityId with entityEnabled.' }, 400); return;
       }
       if (req.method !== 'GET') { json(res, { error: 'Method not allowed.' }, 405); return; }
       const requestedTick = Number(url.searchParams.get('tick') ?? engine.tick);

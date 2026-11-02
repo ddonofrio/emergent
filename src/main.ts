@@ -5,7 +5,7 @@ interface UniverseSummary {
   name: string;
   available: boolean;
   running: boolean;
-  observerLayout: 'full' | 'world-only';
+  observerLayout: 'full' | 'roster';
 }
 
 const app=document.querySelector<HTMLDivElement>('#app')!;
@@ -36,7 +36,7 @@ function renderLauncher(){
 
   let universes:UniverseSummary[]=[
     {id:'first-shore',name:'First Shore',available:true,running:false,observerLayout:'full'},
-    {id:'robots-vs-robots',name:'Robots vs Robots',available:true,running:false,observerLayout:'world-only'},
+    {id:'robots-vs-robots',name:'Robots vs Robots',available:true,running:false,observerLayout:'roster'},
   ];
   const busy=new Set<string>();
   let refreshTimer=0;

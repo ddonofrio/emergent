@@ -1,11 +1,30 @@
 export type Vec3 = [number, number, number];
 export type Block = [number, number, number, string];
-export interface Material { color: string; solid: boolean; floats: boolean; stackLimit?: number; vessel?: boolean; fluid?: boolean; }
+export interface Material { color: string; solid: boolean; floats: boolean; stackLimit?: number; vessel?: boolean; fluid?: boolean; breakable?: boolean; }
 export interface LayeredTerrain {
   type: 'layers';
   top: number;
   layers: { min: number; kind: string }[];
 }
+export interface NoiseField { frequency:number; octaves?:number; fractal?:'fbm'|'ridged'|'pingpong'; }
+export interface NoiseOre extends NoiseField { kind:string; minY:number; maxY:number; threshold:number; seedOffset:number; }
+export interface NoiseTerrain {
+  type:'noise';
+  floor:{y:number;kind:string};
+  stone:string;
+  soil:{depth:number;temperate:string;temperateSurface:string;arid:string;aridSurface:string};
+  baseHeight:number;
+  ceiling:number;
+  waterLevel:number;
+  hills:NoiseField&{amplitude:number};
+  mountains:NoiseField&{amplitude:number;threshold:number};
+  biome:NoiseField&{aridThreshold:number};
+  dunes:NoiseField&{amplitude:number};
+  rivers:NoiseField&{width:number;bankWidth:number;bedHeight:number};
+  spawn:{radius:number;blend:number;height:number};
+  ores:NoiseOre[];
+}
+export type ProceduralTerrain = LayeredTerrain | NoiseTerrain;
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; itemId?: string; }
@@ -38,17 +57,19 @@ export interface AgentPlan {
   taskAssessment?: TaskAssessment;
 }
 export interface Entity {
-  id: string; name: string; kind: string; controller: 'agent' | 'wander'; position: Vec3; yaw: number;
+  id: string; name: string; kind: string; controller: 'agent' | 'wander' | 'static' | 'automaton'; position: Vec3; yaw: number;
   enabled?: boolean;
-  height: number; hitbox?: { radius: number; height: number }; color: string; inventory: Inventory | null;
+  height: number; hitbox?: { radius: number; height: number; terrainRadius?:number }; color: string; inventory: Inventory | null;
   status: string; speech?: { word: string; until: number };
   speechBudget?: { turn: number; words: number };
   plan?: AgentPlan;
   movementPrompt?: { messages:{speakerId:string;speakerName:string;word:string;tick:number;direction:string;distance:number}[] };
   followInvitation?: { speakerId:string; speakerName:string; tick:number; untilTick:number };
   following?: { entityId: string; blocked?: MovementIssue };
-  motion?: { kind?: 'walk' | 'run' | 'jump' | 'bounce' | 'scan'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number };
+  motion?: { kind?: 'walk' | 'run' | 'reverse' | 'jump' | 'bounce' | 'scan' | 'showcase'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number };
   lastAction?: ActionResult;
+  automation?: Record<string, unknown>;
+  appearance?: { material?:string; widthScale?:number; metalness?:number; roughness?:number; powerModule?:'lithium-battery'|'nuclear-reactor' };
 }
 export interface DoorState { angle: 0 | 90; outsideYaw: number; }
 export interface Body { id: string; kind: string; position: Vec3; velocity: Vec3; contents?: string; water?: boolean; resting: boolean; owner?: string; settleAfter?: number; impactTicks?:Record<string,number>; door?:DoorState; }
@@ -65,14 +86,14 @@ export interface UniverseManifest {
   id: string; version: number; name: string; description: string; seed: number;
   bounds: { min: Vec3; max: Vec3 }; waterLevel: number; gravity: number;
   infiniteHorizontal?: boolean;
-  terrain?: LayeredTerrain;
+  terrain?: ProceduralTerrain;
   view?: { overviewPosition: Vec3; overviewTarget: Vec3; maxDistance?: number; fog?: { near: number; far: number } };
   daySeconds: number; materials: Record<string, Material>; vocabulary: string[];
   perception: { range: number; fieldOfView: number; maxBlocks: number };
   agentInstructions: string;
   planningInstructions?: string;
 }
-export interface Action { action: 'walk' | 'run' | 'jump' | 'turn' | 'wait' | 'find_material' | 'find_entity' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'open' | 'close' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; x?: number; y?: number; z?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
+export interface Action { action: 'walk' | 'run' | 'reverse' | 'jump' | 'turn' | 'wait' | 'find_material' | 'find_entity' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'open' | 'close' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; x?: number; y?: number; z?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
 export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: number; clearance: number; approach?: { distance:number; angle:number }; jump?: { distance:number; angle:number }; }
 export interface NavigationReport { checkedDistance: number; paths: (NavigationPath & { issue?: MovementIssue; options?: string[] })[]; blockedAfter?: number; }
 export interface ActionResult { ok: boolean; message: string; navigation?: NavigationReport; feedback?: Record<string, unknown>; }
@@ -109,6 +130,8 @@ export interface UniverseModule {
   manifest: UniverseManifest;
   generate(): { blocks: Block[]; entities: Entity[] };
   migrateState?(state: WorldState): WorldStateMigration | undefined;
+  initializeAutomaton?(entity: Entity): void;
+  automatonAction?(entity: Entity): Action | undefined;
   transformHit?(kind: string, impact: Vec3, orientation?: 'up' | 'down'): string | null;
   canEnter?(entity: Entity, feet: Vec3): ActionResult;
   movementSpeed?(entity:Entity,feet:Vec3,speed:number):number;

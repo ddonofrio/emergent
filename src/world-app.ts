@@ -17,7 +17,8 @@ interface ProviderModelOption {id:string;label:string;}
 const universeId=/^\/universes\/([a-z0-9-]+)\/?$/.exec(window.location.pathname)?.[1];
 if(!universeId)throw new Error('A universe route is required.');
 const worldApi=`/api/universes/${universeId}`;
-document.body.classList.toggle('world-only',universeId==='robots-vs-robots');
+const rosterLayout=universeId==='robots-vs-robots';
+document.body.classList.toggle('roster-layout',rosterLayout);
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <main id="main">
@@ -43,7 +44,9 @@ app.innerHTML = `
     </aside>
     <aside id="inspector" class="inspector" aria-label="Properties">
       <header class="panel-heading"><h2>Properties</h2><button id="focus-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-label="Collapse Properties panel" title="Collapse Properties panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span>Properties</span></button></header>
-      <section class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">03</span></div><div id="entity-list"></div></section>
+      <section class="roster-world-controls" aria-label="World control"><div class="section-heading"><h2>World control</h2><span id="roster-world-state">Stopped</span></div><div class="roster-control-actions"><button id="roster-play" type="button">Play</button><button id="roster-stop" type="button">Stop</button><button id="roster-reset" class="danger" type="button">Restart from zero</button></div><p id="roster-control-message" role="status"></p></section>
+      <section id="roster-view-controls" class="roster-view-controls" aria-label="World view controls"><div class="section-heading"><h2>View</h2></div></section>
+      <section class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">09</span></div><p class="roster-keyboard-hint">Select a stationary character and use the arrow keys to move it.</p><div id="entity-list"></div><p id="roster-move-message" class="roster-move-message" role="status"></p></section>
       <section id="record-knowledge" class="record-knowledge" aria-label="Private notes and learned knowledge"></section>
       <section class="focus-section"><div id="details" class="details"></div></section>
     </aside>
@@ -69,6 +72,10 @@ app.innerHTML = `
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+if(rosterLayout){
+  document.querySelector('#inspector .panel-heading h2')!.textContent='Characters';
+  $('roster-view-controls').append(document.querySelector('.timeline-view-controls')!);
+}
 let view: WorldView;
 try { view = new WorldView($('world'), id => selectEntity(id)); }
 catch { $('loading').textContent = 'WebGL is unavailable. Enable hardware acceleration and reload to observe the world.'; throw new Error('WebGL unavailable.'); }
@@ -227,8 +234,17 @@ function troglodytePortrait(id:string){
   const colors=id==='t2'?{fur:'#493326',trim:'#b8874d',hair:'#302c26',skin:'#cfae83',beard:'#40352b'}:{fur:'#b8874d',trim:'#493326',hair:'#514d3e',skin:'#d9b98d',beard:'#514638'};
   return `<svg class="troglodyte-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><path d="M5 52 7 39q1-6 9-9l5-2h7l5 2q8 3 9 9l2 13Z" fill="${colors.fur}"/><path d="m9 39 5 2 4-2 5 3 5-3 5 3 5-3 5 2-1 11H7Z" fill="${colors.trim}"/><path d="m16 30 8 6 8-6 3 3-8 9h-6l-8-9Z" fill="${colors.fur}"/><path d="M18 25h12v8q-6 5-12 0Z" fill="${colors.skin}"/><ellipse cx="14" cy="17" rx="3" ry="4" fill="${colors.skin}"/><ellipse cx="34" cy="17" rx="3" ry="4" fill="${colors.skin}"/><path d="M15 12q0-8 9-9 10 1 10 10v7q-2 7-10 9-8-2-9-9Z" fill="${colors.skin}"/><path d="M14 14Q13 4 24 3q11 1 11 11l-3-3-2-4q-5 4-14 3l-1 5Z" fill="${colors.hair}"/><path d="M16 18q2 1 4 0m8 0q2 1 4 0" fill="none" stroke="#382f25" stroke-width="1.5" stroke-linecap="round"/><path d="M24 18v4l-2 1" fill="none" stroke="#a67f60" stroke-width="1.2" stroke-linecap="round"/><path d="M17 21q2-2 5 0h4q3-2 5 0l-1 6-3 4-3 2-3-2-3-4Z" fill="${colors.beard}"/><path d="m18 22 4 1 2-1 2 1 4-1" fill="none" stroke="${colors.beard}" stroke-width="2" stroke-linecap="round"/><path d="m16 30 8 6 8-6 2 3-6 6h-8l-6-6Z" fill="${colors.trim}"/><path d="m21 37 3 3 3-3" fill="none" stroke="${colors.fur}" stroke-width="2" stroke-linecap="round"/></svg>`;
 }
-function minerRobotPortrait(){
-  return '<svg class="miner-robot-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><path d="M9 41h30v7H9z" fill="#343a37"/><path d="M6 40h8v10H6zm28 0h8v10h-8z" fill="#202624"/><path d="M11 27h26v16H11z" fill="#7b817b"/><path d="M16 23h16v5H16z" fill="#343a37"/><path d="M8 10h32v15H8z" fill="#858b85"/><path d="M11 14h26v8H11z" fill="#343a37"/><path d="M14 16h7v4h-7zm13 0h7v4h-7z" fill="#e2bd70"/><path d="M21 5h6v6h-6z" fill="#343a37"/><path d="M22 6h4v3h-4z" fill="#f0d994"/><path d="M7 30h4v11H7zm30 0h4v11h-4z" fill="#986747"/></svg>';
+function robotMaterial(entity:WorldState['entities'][number]){return entity.appearance?.material??(parseInt(entity.color.replace('#','').slice(0,2),16)>160?'steel':'iron');}
+function robotPowerModuleLabel(entity:WorldState['entities'][number]){return entity.appearance?.powerModule==='lithium-battery'?' · Lithium Battery':entity.appearance?.powerModule==='nuclear-reactor'?' · Nuclear Reactor':'';}
+function minerRobotPortrait(entity:WorldState['entities'][number]){
+  const material=robotMaterial(entity),palette=material==='titanium'
+    ?{base:entity.color,mid:'#d5e0e4',dark:'#819299',black:'#536167',light:'#ffffff'}
+    :material==='steel'?{base:entity.color,mid:'#aeb8bb',dark:'#596366',black:'#31393b',light:'#eef3f4'}
+    :{base:entity.color,mid:'#8c928e',dark:'#454b48',black:'#202624',light:'#aeb3ae'},width=entity.appearance?.widthScale??1,offset=24*(1-width);
+  const moduleVisual=entity.appearance?.powerModule==='lithium-battery'
+    ?'<path d="M6 25h36v19H6z" fill="#403f47"/><path d="M8 28h5v13H8zm27 0h5v13h-5z" fill="#c8bed8"/><path d="M20 27h8v3h-8z" fill="#8f82a3"/>'
+    :entity.appearance?.powerModule==='nuclear-reactor'?'<path d="M5 25h38v19H5z" fill="#303638"/><circle cx="7" cy="34" r="5" fill="#77817e"/><circle cx="7" cy="34" r="2.5" fill="#d7eea3"/><circle cx="41" cy="34" r="5" fill="#77817e"/><circle cx="41" cy="34" r="2.5" fill="#d7eea3"/>':'';
+  return `<svg class="miner-robot-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><g transform="translate(${offset} 0) scale(${width} 1)">${moduleVisual}<path d="M9 41h30v7H9z" fill="${palette.dark}"/><path d="M5 39h10v12H5zm28 0h10v12H33z" fill="${palette.black}"/><circle cx="10" cy="43" r="3" fill="${palette.mid}"/><circle cx="10" cy="48" r="2" fill="${palette.light}"/><circle cx="38" cy="43" r="3" fill="${palette.mid}"/><circle cx="38" cy="48" r="2" fill="${palette.light}"/><path d="M11 27h26v16H11z" fill="${palette.base}"/><path d="M16 23h16v5H16z" fill="${palette.dark}"/><path d="M8 10h32v15H8z" fill="${palette.mid}"/><path d="M11 14h26v8H11z" fill="${palette.black}"/><path d="M14 16h7v4h-7zm13 0h7v4h-7z" fill="#e2bd70"/><path d="M21 5h6v6h-6z" fill="${palette.dark}"/><path d="M22 6h4v3h-4z" fill="#f0d994"/><path d="M7 30h4v11H7zm30 0h4v11h-4z" fill="${palette.mid}"/></g></svg>`;
 }
 function updateStrategyControl(){
   const control=$<HTMLSelectElement>('settings-strategy'),count=Array.from($('model-list').querySelectorAll<HTMLInputElement>('[data-field="enabled"]')).filter(input=>input.checked).length,description=$('strategy-description');
@@ -309,6 +325,7 @@ function setBoot(boot: Boot) {
   $<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
   $<HTMLInputElement>('parallel-requests').disabled=false;
   $('module-name').textContent = meta.universe.name;
+  renderWorldControls();
   if (isLive) goLive(); else renderTimeline();
 }
 const stream = new EventSource(`${worldApi}/stream`);
@@ -326,7 +343,7 @@ stream.addEventListener('status', event => {
   if (!meta) return;
   const packet=JSON.parse((event as MessageEvent).data) as {runtime:TurnStatus;llmConfig?:LlmConfig};
   meta.runtime=packet.runtime;if(packet.llmConfig)meta.llmConfig=packet.llmConfig;renderProviderStatus();
-  renderTimeline(); renderInspector();
+  renderTimeline(); renderInspector();renderWorldControls();
 });
 stream.addEventListener('frame', event => {
   const packet = JSON.parse((event as MessageEvent).data) as { frame: Frame; runtime: TurnStatus }, frame = packet.frame;
@@ -424,6 +441,8 @@ function renderInspector() {
   if (!shown) return;
   $('entity-count').textContent=String(shown.entities.length).padStart(2,'0');
   const list=$('entity-list');
+  const visibleIds=new Set(shown.entities.map(entity=>`entity-${entity.id}`));
+  for(const child of [...list.children])if(!visibleIds.has(child.id))child.remove();
   for(const e of shown.entities){
     const enabled=e.enabled!==false;
     const displayStatus=enabled?isLive&&meta.runtime.phase==='thinking'?meta.runtime.agents[e.id]?.state??'held':e.status:'disabled';
@@ -432,6 +451,7 @@ function renderInspector() {
       existing.classList.toggle('selected',e.id===selected);existing.classList.toggle('disabled',!enabled);
       const select=existing.querySelector<HTMLButtonElement>('.inhabitant-select')!;select.setAttribute('aria-pressed',String(e.id===selected));
       const toggle=existing.querySelector<HTMLInputElement>('.entity-toggle')!;toggle.checked=enabled;toggle.disabled=!isLive;
+      const mode=existing.querySelector<HTMLSelectElement>('.entity-control-mode');if(mode){mode.value=e.controller==='automaton'?'automaton':'manual';mode.disabled=!isLive;}
       const status=existing.querySelector<HTMLElement>('.entity-status')!;status.textContent=displayStatus;status.classList.toggle('thinking',['planning','thinking','waiting'].includes(displayStatus));status.classList.toggle('error',displayStatus==='error');continue;
     }
     const row=document.createElement('div');row.className=`inhabitant ${e.id===selected?'selected':''} ${enabled?'':'disabled'}`;row.id=`entity-${e.id}`;
@@ -440,14 +460,62 @@ function renderInspector() {
     const portrait=e.kind==='troglodyte'?inhabitantPortraits[e.name]:undefined;
     if(portrait){
       const image=document.createElement('img');image.src=portrait;image.alt='';image.width=31;image.height=36;image.decoding='async';avatar.append(image);
-    }else avatar.innerHTML=e.kind==='troglodyte'?troglodytePortrait(e.id):e.kind==='miner-robot'?minerRobotPortrait():'<i></i>';
+    }else avatar.innerHTML=e.kind==='troglodyte'?troglodytePortrait(e.id):e.kind==='miner-robot'?minerRobotPortrait(e):'<i></i>';
     const text=document.createElement('span');text.className='inhabitant-text';const name=document.createElement('strong');name.textContent=e.name;
-    const kind=document.createElement('small');kind.textContent=e.kind==='troglodyte'?'Troglodyte':e.kind==='miner-robot'?'Miner Robot':'Duck · NPC';text.append(name,kind);
+    const kind=document.createElement('small');kind.textContent=e.kind==='troglodyte'?'Troglodyte':e.kind==='miner-robot'?`${robotMaterial(e).replace(/^./,letter=>letter.toUpperCase())} Miner Robot${robotPowerModuleLabel(e)}`:'Duck · NPC';text.append(name,kind);
     const status=document.createElement('span');status.className=`entity-status ${['planning','thinking','waiting'].includes(displayStatus)?'thinking':''} ${displayStatus==='error'?'error':''}`;status.textContent=displayStatus;
+    const mode=document.createElement('select');mode.className='entity-control-mode';mode.setAttribute('aria-label',`${e.name} control mode`);mode.append(new Option('Manual','manual'),new Option('Automaton','automaton'));mode.value=e.controller==='automaton'?'automaton':'manual';mode.disabled=!isLive;mode.onchange=()=>void setEntityControlMode(e.id,mode.value as 'manual'|'automaton',mode);
     const toggle=document.createElement('input');toggle.type='checkbox';toggle.className='entity-toggle';toggle.checked=enabled;toggle.disabled=!isLive;toggle.title=`Enable ${e.name}`;toggle.setAttribute('aria-label',`Enable ${e.name}`);toggle.onchange=()=>void setEntityEnabled(e.id,toggle.checked,toggle);
-    button.append(avatar,text,status);button.onclick=()=>selectEntity(e.id);button.ondblclick=()=>view.focus(e.id);row.append(button,toggle);list.append(row);
+    button.append(avatar,text,status);button.onclick=()=>selectEntity(e.id);button.ondblclick=()=>view.focus(e.id);row.append(button,...(e.kind==='miner-robot'?[mode]:[]),toggle);list.append(row);
   }
   renderDetails();
+}
+function renderWorldControls(){
+  if(!rosterLayout||!meta)return;
+  const running=meta.runtime.enabled,state=$('roster-world-state'),play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop');
+  state.textContent=running?'Running':'Stopped';state.classList.toggle('running',running);play.disabled=running;stop.disabled=!running;
+}
+async function playWorld(){
+  const play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop'),reset=$<HTMLButtonElement>('roster-reset'),message=$('roster-control-message');play.disabled=true;stop.disabled=true;reset.disabled=true;message.textContent='Resuming world...';
+  try{
+    const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({running:true})});
+    const packet=await response.json() as Metadata&{error?:string};if(!response.ok)throw new Error(packet.error??'Could not resume the world.');
+    meta.runtime=packet.runtime;message.textContent='World running.';renderWorldControls();
+  }catch(error){message.textContent=error instanceof Error?error.message:'Could not resume the world.';}
+  finally{reset.disabled=false;renderWorldControls();}
+}
+async function stopWorld(){
+  const play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop'),reset=$<HTMLButtonElement>('roster-reset'),message=$('roster-control-message');play.disabled=true;stop.disabled=true;reset.disabled=true;message.textContent='Stopping world...';
+  try{
+    const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({running:false})});
+    const packet=await response.json() as Metadata&{error?:string};if(!response.ok)throw new Error(packet.error??'Could not stop the world.');
+    meta.runtime=packet.runtime;message.textContent='World stopped.';renderWorldControls();
+  }catch(error){message.textContent=error instanceof Error?error.message:'Could not stop the world.';}
+  finally{reset.disabled=false;renderWorldControls();}
+}
+async function resetWorld(){
+  if(!window.confirm('Restart Robots vs Robots from zero? This permanently deletes its active history and cannot be undone.'))return;
+  const play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop'),reset=$<HTMLButtonElement>('roster-reset'),message=$('roster-control-message');play.disabled=true;stop.disabled=true;reset.disabled=true;message.textContent='Restarting world from zero...';
+  try{
+    const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reset:true})});
+    const packet=await response.json() as {error?:string};if(!response.ok)throw new Error(packet.error??'Could not restart the world.');window.location.reload();
+  }catch(error){message.textContent=error instanceof Error?error.message:'Could not restart the world.';reset.disabled=false;renderWorldControls();}
+}
+let manualMovePending=false;
+async function moveSelected(direction:'up'|'down'|'left'|'right'){
+  if(manualMovePending||!meta.runtime.enabled)return;
+  const entity=shown.entities.find(candidate=>candidate.id===selected),message=$('roster-move-message');
+  if(!entity||entity.controller!=='static')return;
+  manualMovePending=true;let moved=false;message.textContent='';
+  try{
+    const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entityId:entity.id,manualDirection:direction})});
+    const packet=await response.json() as Metadata&{entity?:WorldState['entities'][number];result?:{ok:boolean;message:string};error?:string};
+    if(!response.ok)throw new Error(packet.error??'Could not move the selected character.');
+    meta.runtime=packet.runtime;moved=packet.result?.ok===true;
+    if(packet.entity){const live=liveDynamic.entities.find(candidate=>candidate.id===entity.id);if(live)Object.assign(live,packet.entity);const visible=shown.entities.find(candidate=>candidate.id===entity.id);if(visible)Object.assign(visible,packet.entity);}
+    message.textContent=packet.result?.ok?'':packet.result?.message??'';renderInspector();
+  }catch(error){message.textContent=error instanceof Error?error.message:'Could not move the selected character.';}
+  finally{window.setTimeout(()=>{manualMovePending=false;},moved?280:0);}
 }
 async function setEntityEnabled(id: string, enabled: boolean, toggle: HTMLInputElement) {
   toggle.disabled = true;
@@ -462,6 +530,15 @@ async function setEntityEnabled(id: string, enabled: boolean, toggle: HTMLInputE
   } catch {
     toggle.checked = !enabled; toggle.disabled = !isLive; toast('Could not change inhabitant state. Check the connection.');
   }
+}
+async function setEntityControlMode(id:string,controlMode:'manual'|'automaton',select:HTMLSelectElement){
+  select.disabled=true;
+  try{
+    const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entityId:id,controlMode})});
+    const packet=await response.json() as Metadata&{entity:WorldState['entities'][number];error?:string};if(!response.ok)throw new Error(packet.error??'Could not change control mode.');
+    Object.assign(meta,packet);const live=liveDynamic.entities.find(entity=>entity.id===id);if(live)Object.assign(live,packet.entity);const visible=shown.entities.find(entity=>entity.id===id);if(visible)Object.assign(visible,packet.entity);renderInspector();
+  }catch(error){select.value=controlMode==='manual'?'automaton':'manual';$('roster-move-message').textContent=error instanceof Error?error.message:'Could not change control mode.';}
+  finally{select.disabled=!isLive;}
 }
 function renderDetails() {
   const e = shown.entities.find(e => e.id === selected); if (!e) return;
@@ -605,6 +682,14 @@ $<HTMLInputElement>('seek').oninput = event => {
 };
 $<HTMLSelectElement>('day').onchange = event => void seek((Number((event.target as HTMLSelectElement).value)-1)*WORLD_DAY_SECONDS*20);
 $('overview').onclick = () => view.overview(); $('top-down').onclick = () => view.topDown(); $('follow').onclick = () => view.focus(selected);
+$('roster-play').onclick=()=>void playWorld();$('roster-stop').onclick=()=>void stopWorld();$('roster-reset').onclick=()=>void resetWorld();
+window.addEventListener('keydown',event=>{
+  if(!rosterLayout||!isLive||event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;
+  if((event.target as HTMLElement|null)?.closest('input,select,textarea,button,[contenteditable="true"]'))return;
+  const directions:Record<string,'up'|'down'|'left'|'right'>={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right'},direction=directions[event.key];
+  if(!direction||shown?.entities.find(entity=>entity.id===selected)?.controller!=='static')return;
+  event.preventDefault();void moveSelected(direction);
+});
 $<HTMLInputElement>('parallel-requests').onchange=async event=>{
   if(!meta)return;
   const input=event.target as HTMLInputElement,parallelRequests=input.checked;input.disabled=true;

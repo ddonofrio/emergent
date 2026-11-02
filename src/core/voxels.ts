@@ -1,4 +1,5 @@
-import { key, unkey, type Block, type LayeredTerrain, type Vec3, type Material } from './types';
+import { terrainFloorY, terrainKindAt, terrainSurfaceY } from './procedural-terrain';
+import { key, unkey, type Block, type ProceduralTerrain, type Vec3, type Material } from './types';
 
 export interface ProceduralFluid { kind:string;level:number;bounds:{min:Vec3;max:Vec3} }
 
@@ -11,8 +12,9 @@ export class Voxels {
     readonly materials: Record<string, Material>,
     blocks: Block[] = [],
     readonly fluid?: ProceduralFluid,
-    readonly terrain?: LayeredTerrain,
+    readonly terrain?: ProceduralTerrain,
     removed: string[] = [],
+    readonly terrainSeed=0,
   ) {
     for (const [x, y, z, kind] of blocks) this.set([x, y, z], kind);
     for (const voxel of removed) this.removed.add(voxel);
@@ -25,8 +27,7 @@ export class Voxels {
     return point.every((value,index)=>value>=this.fluid!.bounds.min[index]&&value<this.fluid!.bounds.max[index])&&point[1]<this.fluid.level?this.fluid.kind:undefined;
   }
   private terrainAt(p: Vec3) {
-    if (!this.terrain || p[1] > this.terrain.top) return undefined;
-    return this.terrain.layers.find(layer => p[1] >= layer.min)?.kind;
+    return terrainKindAt(this.terrain,this.terrainSeed,p);
   }
   get(p: Vec3) {
     const point=p.map(Math.floor) as Vec3,k=key(point),explicit=this.cells.get(k);
@@ -68,7 +69,7 @@ export class Voxels {
         }
       }
     }
-    if(this.terrain){
+    if(this.terrain?.type==='layers'){
       const top=this.terrain.top,minX=Math.floor(center[0]-radius),maxX=Math.ceil(center[0]+radius),minZ=Math.floor(center[2]-radius),maxZ=Math.ceil(center[2]+radius);
       for(let x=minX;x<maxX;x++)for(let z=minZ;z<maxZ;z++){
         let y=top;
@@ -76,6 +77,16 @@ export class Voxels {
         const kind=y>=this.terrain.layers.at(-1)!.min?this.get([x,y,z]):undefined;
         const point:Vec3=[x,y,z],k=key(point);
         if(kind&&!this.cells.has(k)&&Math.hypot(x+.5-center[0],y+.5-center[1],z+.5-center[2])<=radius)blocks.push([x,y,z,kind]);
+      }
+    }else if(this.terrain){
+      const floor=terrainFloorY(this.terrain),minX=Math.floor(center[0]-radius),maxX=Math.ceil(center[0]+radius),minZ=Math.floor(center[2]-radius),maxZ=Math.ceil(center[2]+radius),neighbors:Vec3[]=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+      for(let x=minX;x<maxX;x++)for(let z=minZ;z<maxZ;z++){
+        const top=terrainSurfaceY(this.terrain,this.terrainSeed,x,z),minY=Math.max(floor,Math.floor(center[1]-radius)),maxY=Math.min(top,Math.ceil(center[1]+radius));
+        for(let y=maxY;y>=minY;y--){
+          const point:Vec3=[x,y,z],k=key(point),kind=this.terrainAt(point);
+          if(!kind||this.cells.has(k)||this.removed.has(k)||Math.hypot(x+.5-center[0],y+.5-center[1],z+.5-center[2])>radius)continue;
+          if(neighbors.some(offset=>!this.solid(point.map((value,index)=>value+offset[index]) as Vec3)))blocks.push([x,y,z,kind]);
+        }
       }
     }
     return blocks;

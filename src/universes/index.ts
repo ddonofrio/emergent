@@ -6,12 +6,12 @@ export interface UniverseCatalogEntry {
   id: string;
   name: string;
   available: boolean;
-  observerLayout: 'full' | 'world-only';
+  observerLayout: 'full' | 'roster';
 }
 
 export const universeCatalog: readonly UniverseCatalogEntry[] = [
   { id: firstShore.manifest.id, name: firstShore.manifest.name, available: true, observerLayout: 'full' },
-  { id: robotsVsRobots.manifest.id, name: robotsVsRobots.manifest.name, available: true, observerLayout: 'world-only' },
+  { id: robotsVsRobots.manifest.id, name: robotsVsRobots.manifest.name, available: true, observerLayout: 'roster' },
 ];
 
 export const universes: Readonly<Record<string, UniverseModule>> = {

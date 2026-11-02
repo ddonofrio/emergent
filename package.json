@@ -16,6 +16,7 @@
   "dependencies": {
     "@aws-sdk/client-bedrock": "^3.1158.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1158.0",
+    "fastnoise-lite": "1.1.1",
     "three": "0.186.1"
   },
   "devDependencies": {

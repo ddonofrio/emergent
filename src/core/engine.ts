@@ -9,7 +9,7 @@ const ok = (message: string): ActionResult => ({ ok: true, message });
 const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
 const center = (p: Vec3): Vec3 => p.map(v => v + .5) as Vec3;
 const faces: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
-const rawBlock = (kind: string) => ['grass','dirt','sand','stone','wood','leaves'].includes(kind);
+const rawBlock = (kind: string) => ['grass','dirt','sand','stone','wood','leaves','iron_ore','copper_ore','quartz','coal','lithium_ore','titanium_ore'].includes(kind);
 const TREE_FALL_HORIZONTAL_SPEED = 4;
 const TREE_FALL_DOWNWARD_SPEED = .8;
 const DOOR_WIDTH = .86;
@@ -35,7 +35,7 @@ export class Engine {
   constructor(readonly module: UniverseModule, state?: WorldState) {
     const initial = state ?? module.generate();
     const water=module.manifest.materials.water?.fluid?{kind:'water',level:module.manifest.waterLevel,bounds:module.manifest.bounds}:undefined;
-    this.voxels = new Voxels(module.manifest.materials, initial.blocks,water,module.manifest.terrain,state?.removedBlocks);
+    this.voxels = new Voxels(module.manifest.materials, initial.blocks,water,module.manifest.terrain,state?.removedBlocks,module.manifest.seed);
     this.entities = clone(initial.entities).map(entity => ({ ...entity, enabled: entity.enabled !== false, hitbox: entity.hitbox ?? { radius: entity.kind === 'duck' ? .24 : .36, height: entity.height }, inventory: normalizeInventory(entity.inventory) }));
     for (const [voxel, damage] of Object.entries((state as WorldState | undefined)?.blockDamage ?? {})) this.blockDamage.set(voxel, damage);
     for (const [actor, learned] of Object.entries((state as WorldState | undefined)?.discoveries ?? {})) this.discoveries.set(actor,new Set(learned));
@@ -67,6 +67,13 @@ export class Engine {
     entity.status = enabled ? 'idle' : 'disabled';
     this.event('world', 'entity-control', `${entity.name} was ${enabled ? 'enabled' : 'disabled'}.`, { entityId: id, enabled });
     return true;
+  }
+  setEntityControlMode(id:string,mode:'manual'|'automaton'){
+    const entity=this.entity(id),controller=mode==='manual'?'static':'automaton';
+    if(!['static','automaton'].includes(entity.controller)||entity.controller===controller)return false;
+    delete entity.motion;delete entity.following;delete entity.lastAction;entity.status='idle';entity.controller=controller;
+    if(mode==='manual')delete entity.automation;else this.module.initializeAutomaton?.(entity);
+    this.event('world','entity-control',`${entity.name} switched to ${mode} control.`,{entityId:id,controlMode:mode});return true;
   }
   event(actor: string, type: string, message: string, data?: unknown) {
     const event: WorldEvent = { id: this.nextEvent++, tick: this.tick, time: this.time, day: this.day, actor, type, message, ...(data === undefined ? {} : { data: clone(data) }) };
@@ -245,7 +252,8 @@ export class Engine {
     const interactions = {
       hit: emptyHands||hasShovel ? blocks.filter(block=>{
         const target=block.slice(0,3) as Vec3;
-        return !this.module.manifest.materials[block[3]]?.fluid&&this.blockInReach(e,target)&&!this.standingOn(target)&&(!hasShovel||['sand','dirt','grass'].includes(block[3]));
+        const material=this.module.manifest.materials[block[3]];
+        return !material?.fluid&&material?.breakable!==false&&this.blockInReach(e,target)&&!this.standingOn(target)&&(!hasShovel||['sand','dirt','grass'].includes(block[3]));
       }).sort((a,b)=>(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0)||Number(obstacles.has(key(b.slice(0,3) as Vec3)))-Number(obstacles.has(key(a.slice(0,3) as Vec3)))||Number(b[3]==='wood')-Number(a[3]==='wood'))
         .map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
       pickup: emptyHands ? items.filter(item=>(!item.door||item.door.angle===0)&&distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
@@ -439,12 +447,12 @@ export class Engine {
     for (const item of items.slice(0,3)) parts.push(item.door?`A rustic door is ${distance(e.position,item.position).toFixed(1)} m ${this.direction(body,item.position)} (item ${item.id}). It is ${item.door.angle===90?'open inward at 90 degrees':'closed at 0 degrees'}; its outside faces yaw ${item.door.outsideYaw}, with the inside on the opposite face.`:`A loose ${item.kind} is ${distance(e.position,item.position).toFixed(1)} m ${this.direction(body,item.position)} (item ${item.id}).`);
     return parts.join(' ');
   }
-  private footAt(x: number, z: number, from: number, height: number, maxRise = 0, maxDrop = 1, edgeSupport = false): Vec3 | null {
+  private footAt(x: number, z: number, from: number, height: number, maxRise = 0, maxDrop = 1, edgeSupport = false, radius=.23): Vec3 | null {
     for (let y = Math.floor(from + maxRise + .001); y >= Math.floor(from - maxDrop + .001); y--) {
-      const supported=this.voxels.solid([x,y-.01,z])||(edgeSupport&&[-.23,.23].some(dx=>[-.23,.23].some(dz=>this.voxels.solid([x+dx,y-.01,z+dz]))));
+      const supported=this.voxels.solid([x,y-.01,z])||(edgeSupport&&[-radius,radius].some(dx=>[-radius,radius].some(dz=>this.voxels.solid([x+dx,y-.01,z+dz]))));
       if (!supported) continue;
       let clear = true;
-      for (const dx of [-.23, .23]) for (const dz of [-.23, .23]) for (let dy = .05; dy < height; dy += .3) {
+      for (const dx of [-radius,radius]) for (const dz of [-radius,radius]) for (let dy = .05; dy < height; dy += .3) {
         if (this.voxels.solid([x + dx, y + dy, z + dz])) clear = false;
       }
       if (clear) return [x, y, z];
@@ -452,7 +460,8 @@ export class Engine {
     return null;
   }
   private blockingVoxel(e: Entity, x: number, z: number, feet: number): Vec3 | undefined {
-    for (const dx of [-.23,.23]) for (const dz of [-.23,.23]) for (let dy=.05;dy<e.height;dy+=.25) {
+    const radius=e.hitbox?.terrainRadius??.23;
+    for (const dx of [-radius,radius]) for (const dz of [-radius,radius]) for (let dy=.05;dy<e.height;dy+=.25) {
       if (this.voxels.solid([x+dx,feet+dy,z+dz])) return [Math.floor(x+dx),Math.floor(feet+dy),Math.floor(z+dz)];
     }
   }
@@ -467,7 +476,7 @@ export class Engine {
   }
   private movementPoint(e: Entity, x: number, z: number, from: number, maxRise = 0): { point?: Vec3; issue?: MovementIssue } {
     if (!this.inside([x, from, z])) return { issue: { kind:'boundary',message:'The boundary of the world blocks that direction.' } };
-    const point = this.footAt(x, z, from, e.height, maxRise,1,true);
+    const radius=e.hitbox?.terrainRadius??.23,point = this.footAt(x, z, from, e.height, maxRise,1,true,radius);
     if (!point) {
       const target = this.blockingVoxel(e,x,z,from);
       if (target) {
@@ -481,7 +490,7 @@ export class Engine {
         return {issue};
       }
       // An underwater shore can lose its seabed before a walkable step is found.
-      const lower=this.footAt(x,z,from,e.height,maxRise,Math.max(1,from-this.module.manifest.bounds.min[1]));
+      const lower=this.footAt(x,z,from,e.height,maxRise,Math.max(1,from-this.module.manifest.bounds.min[1]),false,radius);
       if(lower||from<=this.module.manifest.waterLevel){
         const feet:Vec3=lower??[x,this.module.manifest.bounds.min[1],z],allowed=this.module.canEnter?.(e,feet)??ok('Safe terrain.');
         if(!allowed.ok)return {issue:{kind:'water',target:[Math.floor(x),Math.floor(feet[1]),Math.floor(z)],message:allowed.message}};
@@ -512,7 +521,7 @@ export class Engine {
     if(issue&&(issue.kind==='wall'||(issue.height??0)>1))return {issue,message:`${issue.message} It is too high to jump.`};
     if(issue&&!['rise','gap'].includes(issue.kind))return {issue,message:issue.message};
     const angle=yaw*Math.PI/180,x=e.position[0]+Math.sin(angle)*jumpDistance,z=e.position[2]+Math.cos(angle)*jumpDistance;
-    const landing=this.footAt(x,z,e.position[1],e.height,1,1);
+    const landing=this.footAt(x,z,e.position[1],e.height,1,1,false,e.hitbox?.terrainRadius??.23);
     if(!landing)return {issue,message:'There is no safe landing within one block of your current height.'};
     const allowed=this.module.canEnter?.(e,landing)??ok('Safe terrain.');
     if(!allowed.ok)return {issue:{kind:'water',target:[Math.floor(x),Math.floor(landing[1]),Math.floor(z)],message:allowed.message},message:'The landing would put you in dangerously deep water.'};
@@ -564,9 +573,11 @@ export class Engine {
     });
     return { checkedDistance, paths, ...(blockedAfter === undefined ? {} : { blockedAfter: Math.floor(blockedAfter * 10) / 10 }) };
   }
-  act(id: string, action: Action): ActionResult {
+  act(id: string, action: Action, source:'model'|'manual'|'automaton'='model'): ActionResult {
     const e = this.entity(id);
     if (!this.active(e)) return fail('This entity is disabled.');
+    if (e.controller === 'static'&&source!=='manual') return fail('This entity has no actions.');
+    if (e.controller === 'automaton'&&source!=='automaton') return fail('This entity is controlled by its automaton.');
     const previousYaw=e.yaw,previousInventory=clone(e.inventory?.stacks??[]);
     let result: ActionResult;
     try { result = this.execute(e, action); }
@@ -584,7 +595,7 @@ export class Engine {
       if(inventoryDelta.length)result.feedback={...result.feedback,inventoryDelta};
     }
     e.lastAction = clone(result);
-    this.event(id, result.ok ? 'action' : 'rejected', result.message, { action, result });
+    this.event(id, result.ok ? 'action' : 'rejected', result.message, { action, result, ...(source!=='model'?{source}:{}) });
     return result;
   }
   private standingOn(target:Vec3) {
@@ -651,6 +662,14 @@ export class Engine {
       const problem=this.doorSwingProblem(body,targetAngle);if(problem)return fail(problem);
       body.door.angle=targetAngle;e.yaw=((Math.atan2(body.position[0]-e.position[0],body.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
       return {ok:true,message:targetAngle===90?'You open the door inward by 90 degrees. The passage is clear away from the hinged leaf.':'You close the door to 0 degrees. It blocks the doorway again.',feedback:{itemId:body.id,doorState:targetAngle===90?'open':'closed',angle:targetAngle,outsideYaw:body.door.outsideYaw}};
+    }
+    if(a.action==='reverse'){
+      const requestedDistance=a.distance??1;
+      if(!Number.isFinite(requestedDistance)||requestedDistance<=0||requestedDistance>4)return fail('Reverse distance must be greater than zero and at most 4 metres.');
+      const yaw=(e.yaw+180)%360,route=this.traceMovement(e,yaw,requestedDistance);
+      if(!route.destination)return fail(route.issue?.message??'The reverse path is blocked.');
+      e.motion={kind:'reverse',destination:route.destination,speed:1.5,origin:clone(e.position),requestedDistance,...(route.issue?{stopIssue:route.issue}:{})};e.status='reversing';
+      return {ok:true,message:`You start reversing ${requestedDistance.toFixed(1)} metres while keeping your forward orientation.`,feedback:{outcome:'started',from:clone(e.position),destination:clone(route.destination),requestedDistance,...(route.issue?{expectedStop:route.issue}:{})}};
     }
     if (a.action === 'walk' || a.action === 'run') {
       const held=this.held(e), running=a.action==='run', maximum=running?24:32;
@@ -786,6 +805,7 @@ export class Engine {
       if(held&&!usingShovel)return fail('You cannot strike the world while holding an object. Store, place, or throw it first.');
       if (!kind) return fail('There is nothing to hit.');
       if(fluid)return fail(`The ${kind} block flows around a strike; enter it or use a suitable container instead.`);
+      if(this.module.manifest.materials[kind]?.breakable===false)return fail(`The ${kind} is permanent and cannot be damaged or removed.`);
       if(usingShovel&&!['sand','dirt','grass'].includes(kind))return fail('The wooden shovel can remove only sand, dirt, or grass in one strike.');
       const supported=this.standingOn(target);
       if(supported)return fail(`You cannot strike that block because ${supported.name} is standing on it.`);
@@ -954,6 +974,9 @@ export class Engine {
       if (e.speech && e.speech.until < this.time) delete e.speech;
       if(e.motion?.kind==='bounce'){this.advanceBounce(e);continue;}
       if(e.following){this.advanceFollowing(e);continue;}
+      if(e.controller==='automaton'&&!e.motion&&this.tick%TURN_TICKS===0){
+        const action=this.module.automatonAction?.(e);if(action)this.act(e.id,action,'automaton');
+      }
       if (e.controller === 'wander' && !e.motion && !e.speech && this.tick % 60 === 0) {
         e.yaw = (this.tick * 13.37) % 360;
         // The NPC uses the same collision and depth rules, without adding agent journal noise.
@@ -976,6 +999,12 @@ export class Engine {
           e.lastAction.feedback!.scanEventId=this.nextEvent;
           this.event(e.id,'scanned',e.lastAction.message,e.lastAction.feedback);
         }
+        continue;
+      }
+      if(e.motion.kind==='showcase'){
+        const motion=e.motion,progress=Math.min(1,(motion.progress??0)+1/TICKS_PER_SECOND/(motion.duration??3));motion.progress=progress;e.status='showcasing';
+        e.yaw=((motion.startYaw??e.yaw)+360*progress)%360;
+        if(progress>=1){e.yaw=motion.startYaw??e.yaw;delete e.motion;e.status='idle';e.lastAction={ok:true,message:'The movement showcase is complete.',feedback:{outcome:'completed',facing:e.yaw}};this.event(e.id,'automaton-display',`${e.name} completed its movement showcase.`,e.lastAction.feedback);}
         continue;
       }
       if(e.motion.kind==='jump'){
