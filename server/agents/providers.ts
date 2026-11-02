@@ -2,6 +2,7 @@ import { detectTokenLoop, tokenizeLoopText } from '../../vendor/deepseek-harness
 import { BedrockClient, ListFoundationModelsCommand, ListInferenceProfilesCommand } from '@aws-sdk/client-bedrock';
 import { BedrockRuntimeClient, ConverseCommand, type ConverseCommandInput } from '@aws-sdk/client-bedrock-runtime';
 import { setTimeout as delay } from 'node:timers/promises';
+import { isSamplingTemplateId, SAMPLING_TEMPLATES, type SamplingTemplateId } from '../../src/core/sampling-templates';
 
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string }; }
 export interface ProviderConfig {
@@ -24,6 +25,7 @@ export interface ProviderConfig {
   timeoutMs?: number;
   maxOutputTokens?: number;
   enableThinking?: boolean;
+  samplingTemplate?: SamplingTemplateId;
   headers?: Record<string, string>;
 }
 export function savedApiKeyForProvider(providers: readonly ProviderConfig[], type: NonNullable<ProviderConfig['type']>, id: string) {
@@ -32,25 +34,34 @@ export function savedApiKeyForProvider(providers: readonly ProviderConfig[], typ
   if(existing?.apiKeyRemoved)return '';
   return existing?.apiKey.trim()?existing.apiKey:providers.find(provider => providerType(provider) === type && provider.apiKey.trim())?.apiKey ?? '';
 }
-export function resolveProviderApiKey(providers: readonly ProviderConfig[], type: NonNullable<ProviderConfig['type']>, id: string, providedKey: string, clearSavedKey = false) {
+export function resolveProviderApiKey(providers: readonly ProviderConfig[], type: NonNullable<ProviderConfig['type']>, id: string, providedKey: string, clearSavedKey = false, copyFromId = '') {
   const provided=providedKey.trim();
   if(provided)return provided;
   if(clearSavedKey)return '';
   const existing=providers.find(provider=>provider.id===id&&(provider.type??'openai-compatible')===type);
   if(existing?.apiKeyRemoved)return '';
+  if(existing?.apiKey.trim())return existing.apiKey;
+  if(copyFromId){const source=providers.find(provider=>provider.id===copyFromId&&(provider.type??'openai-compatible')===type);return source?.apiKeyRemoved?'':source?.apiKey.trim()??'';}
   return savedApiKeyForProvider(providers,type,id);
 }
-export function resolveProviderVastToken(providers: readonly ProviderConfig[], id: string, providedToken: string, clearSavedToken = false) {
+export function resolveProviderVastToken(providers: readonly ProviderConfig[], id: string, providedToken: string, clearSavedToken = false, copyFromId = '') {
   const provided=providedToken.trim();
   if(provided)return provided;
   if(clearSavedToken)return '';
   const existing=providers.find(provider=>provider.id===id&&provider.type==='vast-ai');
-  return existing?.vastTokenRemoved?'':existing?.vastToken?.trim()??'';
+  if(existing?.vastTokenRemoved)return '';
+  if(existing?.vastToken?.trim())return existing.vastToken.trim();
+  if(copyFromId){const source=providers.find(provider=>provider.id===copyFromId&&provider.type==='vast-ai');return source?.vastTokenRemoved?'':source?.vastToken?.trim()??'';}
+  return '';
 }
 export function enabledProviders(providers: readonly ProviderConfig[]) {
   return providers.filter(provider => provider.enabled !== false);
 }
 export function normalizeSavedProvider(provider: ProviderConfig): ProviderConfig {
+  if(provider.samplingTemplate&&!isSamplingTemplateId(provider.samplingTemplate)){
+    const {samplingTemplate:_invalidTemplate,...configured}=provider;
+    provider=configured;
+  }
   if(provider.modelDiscovery==='lm-studio'&&provider.model!=='auto-detect loaded model'){
     const {modelDiscovery:_legacyDiscovery,...configured}=provider;
     return configured;
@@ -496,12 +507,13 @@ export class ProviderChain {
     const reasoningLimit=reasoning_tokens??DEFAULT_REASONING_TOKENS;
     const generationLimit=outputLimit+reasoningLimit;
     const enableThinking=reasoning==='minimum'?false:provider.enableThinking===true?true:undefined;
+    const sampling=provider.samplingTemplate?SAMPLING_TEMPLATES[provider.samplingTemplate].parameters:{};
     try {
       response = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers: providerHeaders(provider,{'Content-Type':'application/json',...(freshConnection?{Connection:'close'}:{})}),
         signal: requestSignal,
-        body: JSON.stringify({ ...completion, model: provider.model,
+        body: JSON.stringify({ ...completion, model: provider.model,...sampling,
           stream:false,
           max_tokens:generationLimit,
           max_completion_tokens:generationLimit,

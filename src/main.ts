@@ -5,11 +5,12 @@ import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, TURN_TICKS, type Tur
 import { key, unkey, type Frame, type ModuleManifest, type WorldEvent, type WorldState } from './core/types';
 import { knowledgeDescription } from './core/knowledge';
 import { PLAN_REVIEW_INTERVAL } from './core/memory';
+import { SAMPLING_TEMPLATES, type SamplingTemplateId } from './core/sampling-templates';
 
 interface ProviderHealth {state:'unknown'|'ok'|'bad';detail:string;inFlight?:boolean;}
 interface Metadata { module: ModuleManifest; mode: 'demo' | 'llm' | 'waiting'; model: string; providerStrategy:string; llmConfig?:LlmConfig; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
-interface LlmProvider {id:string;type:string;enabled:boolean;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKeyRemoved?:boolean;tokenless?:boolean;apiKeySource?:'own'|'provider';apiKeySavedType?:string;apiKeyCleared?:boolean;apiKey?:string;vastTokenConfigured?:boolean;vastTokenRemoved?:boolean;vastTokenCleared?:boolean;vastToken?:string;vastContainerLabel?:string;health?:ProviderHealth;}
+interface LlmProvider {id:string;type:string;enabled:boolean;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKeyRemoved?:boolean;tokenless?:boolean;apiKeySource?:'own'|'provider';apiKeySavedType?:string;apiKeyCleared?:boolean;apiKey?:string;vastTokenConfigured?:boolean;vastTokenRemoved?:boolean;vastTokenCleared?:boolean;vastToken?:string;vastContainerLabel?:string;samplingTemplate?:SamplingTemplateId;copyFromId?:string;health?:ProviderHealth;}
 type ReasoningProfile='default'|'minimum'|'medium'|'maximum';
 interface ReasoningSettings {movement:ReasoningProfile;action:ReasoningProfile;planning:ReasoningProfile;planCompaction:ReasoningProfile;journalCompaction:ReasoningProfile;}
 interface LlmConfig {strategy:string;reasoning:ReasoningSettings;currentStatus?:string;providers:LlmProvider[];}
@@ -97,13 +98,14 @@ function readModelRows():LlmProvider[]{
     const tokenless=(card.querySelector('[data-field="tokenless"]') as HTMLInputElement).checked;
     const apiKeySource=apiKey.dataset.keySource as LlmProvider['apiKeySource'];
     const apiKeySavedType=apiKey.dataset.savedType||undefined,apiKeyCleared=apiKey.dataset.clear==='true',apiKeyRemoved=apiKey.dataset.removed==='true';
-    return{id:(card as HTMLElement).dataset.id!,type:field('type'),enabled,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),apiKey:apiKey.value,apiKeyConfigured:!!apiKeySavedType||!!apiKeySource,apiKeyRemoved,tokenless,vastToken:vastToken.value,vastTokenConfigured:vastToken.dataset.configured==='true',vastTokenRemoved:vastToken.dataset.removed==='true',vastTokenCleared:vastToken.dataset.clear==='true',vastContainerLabel:field('vastContainerLabel'),...(apiKeySource?{apiKeySource}:{}),...(apiKeySavedType?{apiKeySavedType}:{}),...(apiKeyCleared?{apiKeyCleared:true}:{})};
+    const copyFromId=(card as HTMLElement).dataset.copyFromId;
+    return{id:(card as HTMLElement).dataset.id!,type:field('type'),enabled,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),samplingTemplate:field('samplingTemplate') as SamplingTemplateId||undefined,apiKey:apiKey.value,apiKeyConfigured:!!apiKeySavedType||!!apiKeySource,apiKeyRemoved,tokenless,vastToken:vastToken.value,vastTokenConfigured:vastToken.dataset.configured==='true',vastTokenRemoved:vastToken.dataset.removed==='true',vastTokenCleared:vastToken.dataset.clear==='true',vastContainerLabel:field('vastContainerLabel'),...(copyFromId?{copyFromId}:{}),...(apiKeySource?{apiKeySource}:{}),...(apiKeySavedType?{apiKeySavedType}:{}),...(apiKeyCleared?{apiKeyCleared:true}:{})};
   });
 }
 function renderModelRows(providers:LlmProvider[]){
   const list=$('model-list');list.replaceChildren();
   for(const provider of providers){
-    const card=document.createElement('fieldset');card.className='model-card';card.dataset.id=provider.id;
+    const card=document.createElement('fieldset');card.className='model-card';card.dataset.id=provider.id;card.dataset.copyFromId=provider.copyFromId??'';
     const heading=document.createElement('div');heading.className='model-card-heading';
     const expand=document.createElement('button');expand.type='button';expand.className='model-expand';expand.textContent='+';expand.title='Expand model settings';expand.setAttribute('aria-label',`Expand ${provider.name} settings`);expand.setAttribute('aria-expanded','false');heading.append(expand);
     const enabledLabel=document.createElement('label');enabledLabel.className='model-enabled';enabledLabel.title='Include this model in the selection strategy.';
@@ -138,6 +140,12 @@ function renderModelRows(providers:LlmProvider[]){
     const vastToken=settingField(grid,'Vast.ai token','vastToken',provider.vastToken??'', 'password');
     const vastContainerLabel=settingField(grid,'Vast container label','vastContainerLabel',provider.vastContainerLabel??'','text','C.12345');
     const region=settingField(grid,'AWS region','region',provider.region??'','text','e.g. eu-west-1');
+    const samplingTemplateField=document.createElement('label');samplingTemplateField.className='model-field';samplingTemplateField.textContent='Sampling template';
+    const samplingTemplate=document.createElement('select');samplingTemplate.dataset.field='samplingTemplate';samplingTemplate.add(new Option('Provider defaults',''));
+    for(const [id,template] of Object.entries(SAMPLING_TEMPLATES))samplingTemplate.add(new Option(template.label,id));
+    samplingTemplate.value=provider.samplingTemplate??'';samplingTemplateField.append(samplingTemplate);grid.append(samplingTemplateField);
+    const updateSamplingTemplateTitle=()=>{const template=SAMPLING_TEMPLATES[samplingTemplate.value as SamplingTemplateId];samplingTemplate.title=template?`Temperature ${template.parameters.temperature}, top-p ${template.parameters.top_p}, top-k ${template.parameters.top_k}, min-p ${template.parameters.min_p}, presence penalty ${template.parameters.presence_penalty}.`:'Use the inference provider sampling defaults.';};
+    samplingTemplate.onchange=updateSamplingTemplateTitle;updateSamplingTemplateTitle();
     const tokenlessField=document.createElement('label');tokenlessField.className='request-setting tokenless-setting';tokenlessField.title='Never send an Authorization header to this OpenAI-compatible server.';
     const tokenlessInput=document.createElement('input');tokenlessInput.type='checkbox';tokenlessInput.dataset.field='tokenless';tokenlessInput.checked=provider.tokenless===true;
     const tokenlessText=document.createElement('span');tokenlessText.textContent='Tokenless server';tokenlessField.append(tokenlessInput,tokenlessText);grid.append(tokenlessField);
@@ -149,7 +157,7 @@ function renderModelRows(providers:LlmProvider[]){
     const clearVastTokenButton=document.createElement('button');clearVastTokenButton.type='button';clearVastTokenButton.className='api-key-clear';
     const vastTokenStatus=document.createElement('small');vastTokenStatus.className='api-key-status';vastTokenField.append(clearVastTokenButton,vastTokenStatus);
     const updateProviderFields=()=>{
-      const bedrock=type.value==='amazon-bedrock',openaiCompatible=type.value==='openai-compatible',vast=type.value==='vast-ai';if(!openaiCompatible)tokenlessInput.checked=false;endpointField.classList.toggle('hidden',bedrock);apiKeyField.classList.toggle('hidden',openaiCompatible&&tokenlessInput.checked);vastTokenField.classList.toggle('hidden',!vast);vastContainerLabelField.classList.toggle('hidden',!vast);regionField.classList.toggle('hidden',!bedrock);tokenlessField.classList.toggle('hidden',!openaiCompatible);
+      const bedrock=type.value==='amazon-bedrock',openaiCompatible=type.value==='openai-compatible',vast=type.value==='vast-ai',samplingCompatible=openaiCompatible||vast;if(!openaiCompatible)tokenlessInput.checked=false;if(!samplingCompatible)samplingTemplate.value='';endpointField.classList.toggle('hidden',bedrock);apiKeyField.classList.toggle('hidden',openaiCompatible&&tokenlessInput.checked);vastTokenField.classList.toggle('hidden',!vast);vastContainerLabelField.classList.toggle('hidden',!vast);regionField.classList.toggle('hidden',!bedrock);tokenlessField.classList.toggle('hidden',!openaiCompatible);samplingTemplateField.classList.toggle('hidden',!samplingCompatible);updateSamplingTemplateTitle();
       const clearing=apiKey.dataset.clear==='true',removed=apiKey.dataset.removed==='true'&&type.value===provider.type,ownKey=!clearing&&!removed&&apiKey.dataset.savedType===type.value;
       const providerKey=!clearing&&!removed&&!ownKey&&llmConfig.providers.some(candidate=>candidate.type===type.value&&candidate.apiKeyConfigured);
       apiKey.dataset.keySource=ownKey?'own':providerKey?'provider':'';
@@ -162,6 +170,7 @@ function renderModelRows(providers:LlmProvider[]){
     };
     tokenlessInput.onchange=updateProviderFields;
     type.onchange=()=>{
+      if(type.value!=='vast-ai')card.dataset.copyFromId='';
       if(type.value==='openai')endpoint.value='https://api.openai.com/v1';else if(type.value==='openrouter')endpoint.value='https://openrouter.ai/api/v1';else if(!endpoint.value||endpoint.value.includes('api.openai.com')||endpoint.value.includes('openrouter.ai'))endpoint.value='';
       modelSelect.value='';modelOptions.replaceChildren();modelStatus.textContent='';updateProviderFields();summary.textContent=type.options[type.selectedIndex]?.text||type.value;void refreshModels(true);
     };
@@ -176,25 +185,26 @@ function renderModelRows(providers:LlmProvider[]){
     nameInput.oninput=()=>{title.textContent=nameInput.value||'Model';expand.setAttribute('aria-label',`Expand ${title.textContent} settings`);};
     modelSelect.oninput=()=>{summary.textContent=modelSelect.value||type.options[type.selectedIndex]?.text||type.value;};
     let discoveryRequest=0;
-    const applyModels=(models:ProviderModelOption[],selectFirst:boolean)=>{
+    const applyModels=(models:ProviderModelOption[],selectFirst:boolean,preserveEmpty=false)=>{
       const current=modelSelect.value;
       modelOptions.replaceChildren(...models.map(model=>new Option(model.label===model.id?model.id:`${model.label} (${model.id})`,model.id)));
-      if((selectFirst||!current)&&models[0])modelSelect.value=models[0].id;else modelSelect.value=current;
+      if(!preserveEmpty&&(selectFirst||!current)&&models[0])modelSelect.value=models[0].id;else modelSelect.value=current;
       summary.textContent=modelSelect.value||type.options[type.selectedIndex]?.text||type.value;
     };
     const refreshModels=async(automatic=false)=>{
       const bedrock=type.value==='amazon-bedrock';
       if((bedrock&&!region.value.trim())||(!bedrock&&!endpoint.value.trim())){if(!automatic)modelStatus.textContent=bedrock?'Enter an AWS region first.':'Enter a base URL first.';return;}
+      const preserveEmpty=automatic&&!!card.dataset.copyFromId&&!modelSelect.value;
       const cacheKey=JSON.stringify([provider.id,type.value,endpoint.value.trim(),region.value.trim(),vastContainerLabel.value.trim()]),cached=modelOptionsCache.get(cacheKey);
-      if(automatic&&cached){applyModels(cached,!modelSelect.value||modelSelect.value==='auto-detect loaded model');modelStatus.textContent=`${cached.length} models available.`;return;}
+      if(automatic&&cached){applyModels(cached,!modelSelect.value||modelSelect.value==='auto-detect loaded model',preserveEmpty);modelStatus.textContent=`${cached.length} models available.`;return;}
       const request=++discoveryRequest;refreshModelsButton.disabled=true;modelStatus.textContent='Loading models…';
       try{
-        const apiKeyValue=apiKey.value.trim(),vastTokenValue=vastToken.value.trim(),body={id:provider.id,type:type.value,baseUrl:endpoint.value,region:region.value,clearApiKey:apiKey.dataset.clear==='true',clearVastToken:vastToken.dataset.clear==='true',vastContainerLabel:vastContainerLabel.value,tokenless:tokenlessInput.checked,...(apiKeyValue?{apiKey:apiKeyValue}:{}),...(vastTokenValue?{vastToken:vastTokenValue}:{})};
+        const apiKeyValue=apiKey.value.trim(),vastTokenValue=vastToken.value.trim(),copyFromId=card.dataset.copyFromId,body={id:provider.id,type:type.value,baseUrl:endpoint.value,region:region.value,clearApiKey:apiKey.dataset.clear==='true',clearVastToken:vastToken.dataset.clear==='true',vastContainerLabel:vastContainerLabel.value,tokenless:tokenlessInput.checked,...(copyFromId?{copyFromId}:{}),...(apiKeyValue?{apiKey:apiKeyValue}:{}),...(vastTokenValue?{vastToken:vastTokenValue}:{})};
         const response=await fetch('/api/llm-models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
         const data=await response.json() as {models?:ProviderModelOption[];error?:string};
         if(!response.ok)throw new Error(data.error??'Could not load models.');
         const models=(data.models??[]).filter(model=>model&&typeof model.id==='string'&&typeof model.label==='string');if(!models.length)throw new Error('The provider returned no models.');
-        if(request!==discoveryRequest)return;modelOptionsCache.set(cacheKey,models);applyModels(models,!modelSelect.value||modelSelect.value==='auto-detect loaded model');modelStatus.textContent=`${models.length} models available.`;
+        if(request!==discoveryRequest)return;modelOptionsCache.set(cacheKey,models);applyModels(models,!modelSelect.value||modelSelect.value==='auto-detect loaded model',preserveEmpty);modelStatus.textContent=`${models.length} models available.`;
       }catch(error){if(request===discoveryRequest)modelStatus.textContent=error instanceof Error?error.message:'Could not load models.';}
       finally{if(request===discoveryRequest)refreshModelsButton.disabled=false;}
     };
@@ -539,8 +549,12 @@ $('focus-toggle').onclick=()=>{
   $('main').classList.toggle('focus-collapsed',!open);$('focus-toggle').setAttribute('aria-expanded',String(open));$('focus-toggle').setAttribute('aria-label',`${open?'Collapse':'Expand'} Properties panel`);$('focus-toggle').title=`${open?'Collapse':'Expand'} Properties panel`;
 };
 $('add-model').onclick=()=>{
-  const number=$('model-list').children.length+1;
-  renderModelRows([...readModelRows(),{id:`model-${Date.now()}-${number}`,type:'openai-compatible',enabled:true,name:`Model ${number}`,baseUrl:'',model:'',apiKeyConfigured:false}]);
+  const rows=readModelRows(),number=rows.length+1,id=`model-${Date.now()}-${number}`,source=rows.findLast(provider=>provider.type==='vast-ai');
+  let added:LlmProvider={id,type:'openai-compatible',enabled:true,name:`Model ${number}`,baseUrl:'',model:'',apiKeyConfigured:false};
+  if(source){
+    added=structuredClone(source);added.id=id;added.name='';added.model='';added.copyFromId=source.id;delete added.displayModel;delete added.health;
+  }
+  renderModelRows([...rows,added]);
 };
 $<HTMLSelectElement>('settings-strategy').onchange=updateStrategyControl;
 $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
@@ -551,7 +565,8 @@ $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
     const tokenless=(card.querySelector('[data-field="tokenless"]') as HTMLInputElement).checked;
     const apiKeyInput=card.querySelector('[data-field="apiKey"]') as HTMLInputElement,apiKey=apiKeyInput.value.trim();
     const vastTokenInput=card.querySelector('[data-field="vastToken"]') as HTMLInputElement,vastToken=vastTokenInput.value.trim();
-    return{id:(card as HTMLElement).dataset.id,type:field('type'),enabled,tokenless,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),vastContainerLabel:field('vastContainerLabel'),clearApiKey:apiKeyInput.dataset.clear==='true',clearVastToken:vastTokenInput.dataset.clear==='true',...(apiKey?{apiKey}:{}),...(vastToken?{vastToken}:{})};
+    const copyFromId=(card as HTMLElement).dataset.copyFromId;
+    return{id:(card as HTMLElement).dataset.id,type:field('type'),enabled,tokenless,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),samplingTemplate:field('samplingTemplate'),vastContainerLabel:field('vastContainerLabel'),clearApiKey:apiKeyInput.dataset.clear==='true',clearVastToken:vastTokenInput.dataset.clear==='true',...(copyFromId?{copyFromId}:{}),...(apiKey?{apiKey}:{}),...(vastToken?{vastToken}:{})};
   });
   const requestedStrategy=$<HTMLSelectElement>('settings-strategy').value,reasoning=readReasoningSettings();
   try{

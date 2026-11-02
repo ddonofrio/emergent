@@ -46,6 +46,7 @@ test('saved provider keys default by provider while existing entries keep their 
   assert.equal(savedApiKeyForProvider(providers,'openrouter','new-model'),'');
   assert.equal(resolveProviderApiKey(providers,'amazon-bedrock','new-model','',true),'','explicit removal must not inherit another provider token');
   assert.equal(resolveProviderApiKey(providers,'amazon-bedrock','new-model',' replacement ',true),'replacement','a replacement token wins over removal');
+  assert.equal(resolveProviderApiKey(providers,'amazon-bedrock','new-model','',false,'second-bedrock'),'second-key','a cloned model copies the selected provider token');
   const removed=[{...providers[0],apiKey:'',apiKeyRemoved:true},providers[1],providers[2]];
   assert.equal(resolveProviderApiKey(removed,'amazon-bedrock','first-bedrock',''),'','a removed model token must not be inherited again');
   assert.equal(resolveProviderApiKey(removed,'amazon-bedrock','second-bedrock',''),'second-key','removing one model token must preserve another model token');
@@ -81,7 +82,19 @@ test('Vast.ai uses its gateway token directly or as a cookie beside an upstream 
   assert.equal(providerHeaders(nested).Authorization,'Bearer upstream-key');
   assert.equal(providerHeaders(nested).Cookie,'C.12345_auth_token=vast-token');
   assert.equal(resolveProviderVastToken([nested],'vast',''),'vast-token');
+  assert.equal(resolveProviderVastToken([nested],'new-vast','',false,'vast'),'vast-token');
   assert.equal(resolveProviderVastToken([nested],'vast','',true),'');
+});
+
+test('Signal-3.8 sends its complete sampling template to compatible inference servers',async t=>{
+  const config={...provider('signal'),type:'openai-compatible' as const,samplingTemplate:'signal-3.8' as const};
+  t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{
+    const body=JSON.parse(String(init.body));
+    assert.deepEqual({temperature:body.temperature,top_p:body.top_p,top_k:body.top_k,min_p:body.min_p,presence_penalty:body.presence_penalty},
+      {temperature:0.6,top_p:0.95,top_k:20,min_p:0.05,presence_penalty:1});
+    return new Response(JSON.stringify({model:config.model,choices:[{finish_reason:'stop',message:{content:'ok',tool_calls:[]}}]}));
+  });
+  assert.equal((await new ProviderChain([config]).complete(request,AbortSignal.timeout(1000),()=>{})).content,'ok');
 });
 
 test('model discovery preserves provider order, labels models and removes duplicates',async t=>{

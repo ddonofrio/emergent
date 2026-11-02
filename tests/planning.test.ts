@@ -127,12 +127,15 @@ test('planning accepts a double-sized draft and compacts it without asking the p
   },async compact(request){
     compactorCalls++;
     assert.equal(request.reasoning,'medium');assert.equal(request.max_tokens,2200);
-    assert.match((request.messages[0] as any).content,/Merge redundant or overlapping wording/);
+    assert.match((request.messages[0] as any).content,/single concise line/);
+    assert.match((request.messages[0] as any).content,/Prefer the general lesson over the chronology/);
     const context=JSON.parse((request.messages[1] as any).content);assert.deepEqual(context.draft,{explanation:expanded.explanation,'project.progress':expanded.project.progress});
-    assert.ok(context.textErrors.some((error:string)=>/explanation.*maximum 500/.test(error)));
+    assert.equal(context.textErrors,undefined);
     const schema=(request.tools[0] as any).function.parameters;
     assert.deepEqual(Object.keys(schema.properties).sort(),['explanation','project.progress']);
-    assert.equal(schema.properties.explanation.maxLength,500);assert.equal(schema.properties['project.progress'].maxLength,1200);
+    assert.equal(schema.properties.explanation.maxLength,undefined);assert.equal(schema.properties['project.progress'].maxLength,undefined);
+    assert.match(schema.properties.explanation.description,/single-line learning/);
+    assert.doesNotMatch(JSON.stringify(request),/maximum 500|at least 500|maxLength/);
     return answer('submit_compacted_plan',{explanation:authored.explanation,'project.progress':projectFields.project.progress});
   }});
   assert.equal(plannerCalls,1);assert.equal(compactorCalls,1);assert.equal(next.explanation,authored.explanation);
@@ -202,7 +205,7 @@ test('plan compaction cannot overwrite the server-owned review outcome or eviden
       assert.ok(correction.errors.some((error:string)=>/outcome.*not a declared property/.test(error)));
       assert.ok(correction.errors.some((error:string)=>/evidenceEventIds.*not a declared property/.test(error)));
       assert.deepEqual(correction.previousAttempt.evidenceEventIds,[99]);
-      assert.match(correction.instruction,/Omit outcome and evidenceEventIds/);
+      assert.match(correction.instruction,/Return only the required fields/);
     }
     const compacted={...context.draft,explanation:'I observed and compared both sides.'};
     return answer('submit_compacted_plan',compactorCalls===1?{...compacted,outcome:'abandon',evidenceEventIds:[99]}:compacted);
@@ -226,6 +229,38 @@ test('a continued review can compact without inventing citations mentioned in pr
   }});
   assert.equal(plannerCalls,1);assert.equal(compactorCalls,1);assert.equal(next.status,'active');
   assert.equal(next.steps[0].evidenceEventIds,undefined);
+});
+
+test('plan compaction retries with a semantic one-line rewrite instead of numeric length feedback',async()=>{
+  const expanded={...structuredClone(projectFields),...authored,explanation:'At position [-15,4,-1], events 10, 11 and 12 repeated the same detailed observation. '.repeat(8)};
+  let compactorCalls=0;
+  const next=await planDecision({...base(),async complete(){return answer('set_plan',expanded);},async compact(request){
+    compactorCalls++;
+    assert.doesNotMatch(JSON.stringify(request),/maximum 500|maxLength/);
+    const context=JSON.parse((request.messages[1] as any).content);
+    assert.deepEqual(context.draft,{explanation:expanded.explanation});
+    if(compactorCalls===1)return answer('submit_compacted_plan',{explanation:expanded.explanation});
+    const correction=JSON.parse((request.messages.at(-1) as any).content);
+    assert.equal(correction.previousAttempt,undefined);
+    assert.match(correction.instruction,/durable learning or conclusion/);
+    assert.match(correction.instruction,/remove episodic specifics, coordinates, positions, event IDs/);
+    return answer('submit_compacted_plan',{explanation:'Repeated observations taught me that the same condition remains unchanged.'});
+  }});
+  assert.equal(compactorCalls,2);
+  assert.equal(next.explanation,'Repeated observations taught me that the same condition remains unchanged.');
+});
+
+test('plan compaction rejects line breaks',async()=>{
+  const expanded={...structuredClone(projectFields),...authored,explanation:'Detailed observation. '.repeat(30)};
+  let compactorCalls=0;
+  await planDecision({...base(),async complete(){return answer('set_plan',expanded);},async compact(request){
+    compactorCalls++;
+    if(compactorCalls===1)return answer('submit_compacted_plan',{explanation:'Durable learning.\nTransient detail.'});
+    const correction=JSON.parse((request.messages.at(-1) as any).content);
+    assert.ok(correction.errors.some((error:string)=>/one line with no line breaks/.test(error)));
+    return answer('submit_compacted_plan',{explanation:'Durable learning without transient detail.'});
+  }});
+  assert.equal(compactorCalls,2);
 });
 
 test('identical surroundings allow different model-authored goals without substitution',async()=>{

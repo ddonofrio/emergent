@@ -128,7 +128,7 @@ export async function planDecision(options:{
         const compactProblems=argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS,inherited);
         if(compactProblems.length){
           options.waiting('Compacting an expanded planning draft; world time is held.');
-          args=await compactPlanDraft({name:options.name,mode:name,draft:args,parameters:compactParameters,textErrors:compactProblems,signal:options.signal,retryDelayMs:options.retryDelayMs,
+          args=await compactPlanDraft({name:options.name,mode:name,draft:args,parameters:compactParameters,signal:options.signal,retryDelayMs:options.retryDelayMs,
             validate:value=>argumentProblems(compactParameters,value,strategic,reviewing,COMPACT_LIMITS,inherited),complete:options.compact??options.complete,waiting:options.waiting,reasoning:options.compactionReasoning});
           problems=argumentProblems(compactParameters,args,strategic,reviewing,COMPACT_LIMITS,inherited);
         }

@@ -10,6 +10,7 @@ import { AgentRuntime } from './agents/runtime';
 import { discoverProviderModels, enabledProviders, isReasoningSettings, normalizeReasoningSettings, normalizeSavedProvider, ProviderChain, providersFromEnv, resolveProviderApiKey, resolveProviderVastToken, type ProviderConfig, type ProviderStrategy, type ReasoningSettings } from './agents/providers';
 import { TurnClock } from './turn-clock';
 import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
+import { isSamplingTemplateId, type SamplingTemplateId } from '../src/core/sampling-templates';
 
 const port = Number(process.env.PORT ?? 3000);
 const worldModule = loadModule(process.env.EMERGENT_MODULE ?? 'first-shore');
@@ -58,7 +59,7 @@ const publicLlmConfig = () => ({
   strategy: agents.inference.providers.length < 2 ? 'first-only' : agents.inference.strategy,
   reasoning:agents.reasoningSettings,
   currentStatus:agents.inference.currentStatus,
-  providers: providers.map(({id,type,enabled,name,baseUrl,model,region,displayModel,apiKey,apiKeyRemoved,vastToken,vastTokenRemoved,vastContainerLabel,tokenless,maxOutputTokens,enableThinking})=>({id,type:type??'openai-compatible',enabled:enabled!==false,name,baseUrl,model,region,displayModel,maxOutputTokens,enableThinking,apiKeyConfigured:!!apiKey,apiKeyRemoved:apiKeyRemoved===true,vastTokenConfigured:!!vastToken,vastTokenRemoved:vastTokenRemoved===true,vastContainerLabel,tokenless:tokenless===true,health:enabled===false?{state:'unknown' as const,detail:'Disabled in settings.'}:agents.inference.healthFor(id)})),
+  providers: providers.map(({id,type,enabled,name,baseUrl,model,region,displayModel,apiKey,apiKeyRemoved,vastToken,vastTokenRemoved,vastContainerLabel,tokenless,maxOutputTokens,enableThinking,samplingTemplate})=>({id,type:type??'openai-compatible',enabled:enabled!==false,name,baseUrl,model,region,displayModel,maxOutputTokens,enableThinking,samplingTemplate,apiKeyConfigured:!!apiKey,apiKeyRemoved:apiKeyRemoved===true,vastTokenConfigured:!!vastToken,vastTokenRemoved:vastTokenRemoved===true,vastContainerLabel,tokenless:tokenless===true,health:enabled===false?{state:'unknown' as const,detail:'Disabled in settings.'}:agents.inference.healthFor(id)})),
 });
 const metadata = () => ({ module: worldModule.manifest, mode: agents.mode, model: agents.mode==='demo'?'Scripted demo':agents.inference.label, providerStrategy:publicLlmConfig().strategy, llmConfig:publicLlmConfig(), parallelRequests: agents.parallelRequests, agentsEnabled: turnClock.status().enabled, latestTick: engine.tick, maxTurns: agents.config.maxTurns, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS }, runtime: turnClock.status() });
 function broadcast(event: string, value: unknown) {
@@ -82,14 +83,15 @@ const server = createServer(async (req, res) => {
       if(url.pathname==='/api/llm-config'&&req.method==='GET'){json(res,publicLlmConfig());return;}
       if(url.pathname==='/api/llm-models'&&req.method==='POST'){
         let body='';for await(const chunk of req){body+=chunk;if(body.length>8192){json(res,{error:'Model discovery settings are too large.'},413);return;}}
-        const row=JSON.parse(body) as Record<string,unknown>,id=typeof row.id==='string'?row.id:'',type=String(row.type??''),bedrock=type==='amazon-bedrock',vast=type==='vast-ai',clearApiKey=row.clearApiKey===true,clearVastToken=row.clearVastToken===true,tokenless=row.tokenless===true;
+        const row=JSON.parse(body) as Record<string,unknown>,id=typeof row.id==='string'?row.id:'',type=String(row.type??''),bedrock=type==='amazon-bedrock',vast=type==='vast-ai',clearApiKey=row.clearApiKey===true,clearVastToken=row.clearVastToken===true,tokenless=row.tokenless===true,copyFromId=typeof row.copyFromId==='string'?row.copyFromId:'';
         if(!/^[a-zA-Z0-9_-]{1,64}$/.test(id)||!supportedProviderTypes.has(type)){json(res,{error:'Choose a supported provider before refreshing models.'},400);return;}
         if(row.clearApiKey!==undefined&&typeof row.clearApiKey!=='boolean'){json(res,{error:'Token removal must be true or false.'},400);return;}
         if(row.clearVastToken!==undefined&&typeof row.clearVastToken!=='boolean'){json(res,{error:'Vast.ai token removal must be true or false.'},400);return;}
         if(row.tokenless!==undefined&&typeof row.tokenless!=='boolean'){json(res,{error:'Tokenless server must be true or false.'},400);return;}
         if(tokenless&&type!=='openai-compatible'){json(res,{error:'Tokenless server is only supported for OpenAI-compatible providers.'},400);return;}
-        const providedKey=typeof row.apiKey==='string'?row.apiKey:'',apiKey=resolveProviderApiKey(providers,type as NonNullable<ProviderConfig['type']>,id,providedKey,clearApiKey);
-        const vastToken=vast?resolveProviderVastToken(providers,id,typeof row.vastToken==='string'?row.vastToken:'',clearVastToken):'';
+        if(copyFromId&&!vast){json(res,{error:'Only Vast.ai models can copy Vast.ai settings.'},400);return;}
+        const providedKey=typeof row.apiKey==='string'?row.apiKey:'',apiKey=resolveProviderApiKey(providers,type as NonNullable<ProviderConfig['type']>,id,providedKey,clearApiKey,copyFromId);
+        const vastToken=vast?resolveProviderVastToken(providers,id,typeof row.vastToken==='string'?row.vastToken:'',clearVastToken,copyFromId):'';
         const vastContainerLabel=vast&&typeof row.vastContainerLabel==='string'?row.vastContainerLabel.trim():'';
         if(!apiKey&&!vastToken&&type!=='openai-compatible'){json(res,{error:'Enter an API key before refreshing models.'},400);return;}
         if(vastContainerLabel&&!/^C\.\d+$/.test(vastContainerLabel)){json(res,{error:'The Vast.ai container label must look like C.12345.'},400);return;}
@@ -113,7 +115,7 @@ const server = createServer(async (req, res) => {
         const ids=new Set<string>();const next:ProviderConfig[]=[];
         for(const value of data.providers){
           if(!value||typeof value!=='object'){json(res,{error:'Each model needs valid settings.'},400);return;}
-          const row=value as Record<string,unknown>,id=typeof row.id==='string'?row.id:'',type=String(row.type??''),name=typeof row.name==='string'?row.name.trim():'',model=typeof row.model==='string'?row.model.trim():'';
+          const row=value as Record<string,unknown>,id=typeof row.id==='string'?row.id:'',type=String(row.type??''),name=typeof row.name==='string'?row.name.trim():'',model=typeof row.model==='string'?row.model.trim():'',copyFromId=typeof row.copyFromId==='string'?row.copyFromId:'';
           if(!/^[a-zA-Z0-9_-]{1,64}$/.test(id)||ids.has(id)){json(res,{error:`${name||'Each model'} needs a unique ID.`},400);return;}
           if(!supportedProviderTypes.has(type)){json(res,{error:`${name||'This model'} uses an unsupported provider: ${type||'none'}.`},400);return;}
           if(!name||name.length>80){json(res,{error:'Each model needs a name of 1 to 80 characters.'},400);return;}
@@ -132,21 +134,29 @@ const server = createServer(async (req, res) => {
           const region=typeof row.region==='string'?row.region.trim():'';
           if(bedrock&&!region){json(res,{error:`Enter an AWS region for ${name}.`},400);return;}
           if(bedrock&&!/^[a-zA-Z0-9-]{1,64}$/.test(region)){json(res,{error:`Enter a valid AWS region for ${name}.`},400);return;}
-          const old=previous.get(id),providedKey=typeof row.apiKey==='string'?row.apiKey:'',clearApiKey=row.clearApiKey===true,enabled=row.enabled!==false&&!!model;
+          const old=previous.get(id),copyCandidate=copyFromId?previous.get(copyFromId):undefined,copyFrom=copyCandidate?.type==='vast-ai'?copyCandidate:undefined,providedKey=typeof row.apiKey==='string'?row.apiKey:'',clearApiKey=row.clearApiKey===true,enabled=row.enabled!==false&&!!model;
           const vast=type==='vast-ai',providedVastToken=typeof row.vastToken==='string'?row.vastToken:'',clearVastToken=row.clearVastToken===true;
-          const vastToken=vast?resolveProviderVastToken(previousProviders,id,providedVastToken,clearVastToken):'';
+          if(copyFromId&&!vast){json(res,{error:`Only Vast.ai models such as ${name} can copy Vast.ai settings.`},400);return;}
+          const vastToken=vast?resolveProviderVastToken(previousProviders,id,providedVastToken,clearVastToken,copyFromId):'';
           const vastContainerLabel=vast&&typeof row.vastContainerLabel==='string'?row.vastContainerLabel.trim():'';
           if(vastContainerLabel&&!/^C\.\d+$/.test(vastContainerLabel)){json(res,{error:`The Vast.ai container label for ${name} must look like C.12345.`},400);return;}
-          const maxOutputTokens=row.maxOutputTokens??old?.maxOutputTokens;
-          const enableThinking=row.enableThinking??old?.enableThinking;
+          const maxOutputTokens=row.maxOutputTokens??old?.maxOutputTokens??copyFrom?.maxOutputTokens;
+          const enableThinking=row.enableThinking??old?.enableThinking??copyFrom?.enableThinking;
+          if(row.samplingTemplate!==undefined&&typeof row.samplingTemplate!=='string'){json(res,{error:`Sampling template for ${name} must be a string.`},400);return;}
+          const requestedSamplingTemplate=typeof row.samplingTemplate==='string'?row.samplingTemplate.trim():undefined;
+          const samplingTemplate=requestedSamplingTemplate===undefined?(old?.samplingTemplate??copyFrom?.samplingTemplate):requestedSamplingTemplate||undefined;
+          if(samplingTemplate&&!isSamplingTemplateId(samplingTemplate)){json(res,{error:`Choose a supported sampling template for ${name}.`},400);return;}
+          if(samplingTemplate&&!['openai-compatible','vast-ai'].includes(type)){json(res,{error:`Sampling templates are only supported for OpenAI-compatible and Vast.ai models such as ${name}.`},400);return;}
+          const samplingTemplateId=samplingTemplate as SamplingTemplateId|undefined;
           if(maxOutputTokens!==undefined&&(!Number.isInteger(maxOutputTokens)||Number(maxOutputTokens)<32||Number(maxOutputTokens)>32768)){json(res,{error:`Output tokens for ${name} must be an integer from 32 to 32768.`},400);return;}
           if(enableThinking!==undefined&&typeof enableThinking!=='boolean'){json(res,{error:`Thinking for ${name} must be true or false.`},400);return;}
-          const apiKey=resolveProviderApiKey(previousProviders,type as NonNullable<ProviderConfig['type']>,id,providedKey,clearApiKey);
+          const apiKey=resolveProviderApiKey(previousProviders,type as NonNullable<ProviderConfig['type']>,id,providedKey,clearApiKey,copyFromId);
           if(!apiKey&&!vastToken&&enabled&&type!=='openai-compatible'){json(res,{error:`Enter an API key or deactivate ${name}.`},400);return;}
           if(vast&&apiKey&&vastToken&&!vastContainerLabel){json(res,{error:`Enter the Vast.ai container label for ${name} when both credentials are configured.`},400);return;}
-          const sameOldType=(old?.type??'openai-compatible')===type,apiKeyRemoved=!providedKey.trim()&&(clearApiKey||(sameOldType&&old?.apiKeyRemoved===true));
-          const vastTokenRemoved=vast&&!providedVastToken.trim()&&(clearVastToken||(sameOldType&&old?.vastTokenRemoved===true));
-          next.push({id,type:type as ProviderConfig['type'],enabled,name,apiKey,...(apiKeyRemoved?{apiKeyRemoved:true}:{}),...(vastToken?{vastToken}:{}),...(vastTokenRemoved?{vastTokenRemoved:true}:{}),...(vastContainerLabel?{vastContainerLabel}:{}),...(tokenless?{tokenless:true}:{}),baseUrl,model,...(region?{region}:{}),timeoutMs:old?.timeoutMs,...(maxOutputTokens===undefined?{}:{maxOutputTokens:Number(maxOutputTokens)}),...(enableThinking===undefined?{}:{enableThinking:enableThinking as boolean}),headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined});
+          const sameOldType=(old?.type??'openai-compatible')===type,sameCopiedType=(copyFrom?.type??'openai-compatible')===type;
+          const apiKeyRemoved=!providedKey.trim()&&(clearApiKey||(sameOldType&&old?.apiKeyRemoved===true)||(!old&&sameCopiedType&&copyFrom?.apiKeyRemoved===true));
+          const vastTokenRemoved=vast&&!providedVastToken.trim()&&(clearVastToken||(sameOldType&&old?.vastTokenRemoved===true)||(!old&&sameCopiedType&&copyFrom?.vastTokenRemoved===true));
+          next.push({id,type:type as ProviderConfig['type'],enabled,name,apiKey,...(apiKeyRemoved?{apiKeyRemoved:true}:{}),...(vastToken?{vastToken}:{}),...(vastTokenRemoved?{vastTokenRemoved:true}:{}),...(vastContainerLabel?{vastContainerLabel}:{}),...(tokenless?{tokenless:true}:{}),baseUrl,model,...(region?{region}:{}),timeoutMs:old?.timeoutMs??copyFrom?.timeoutMs,...(maxOutputTokens===undefined?{}:{maxOutputTokens:Number(maxOutputTokens)}),...(enableThinking===undefined?{}:{enableThinking:enableThinking as boolean}),...(samplingTemplateId?{samplingTemplate:samplingTemplateId}:{}),headers:type==='openrouter'?{'X-Title':'Emergent'}:undefined});
         }
         const strategy=data.strategy as ProviderStrategy,tempPath=`${llmConfigPath}.tmp`;
         await writeFile(tempPath,JSON.stringify({strategy,reasoning:nextReasoning,providers:next}),{encoding:'utf8',mode:0o600});await rename(tempPath,llmConfigPath);
