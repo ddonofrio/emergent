@@ -17,6 +17,7 @@ import { inventoryAmounts, milestoneEvidence, taskEvidenceView, referencedGoalEv
 import { FORMAT_REPAIR } from './response-repair';
 import { auditedCompletion, InferenceAuditError } from './audit';
 import { applicableSuggestions } from './plan-context';
+import { describeConditionalPlanningCapabilities, describePlanningCapabilities, describePlanningLimitations, planningHandCondition } from './planning-capabilities';
 
 function physicalImpactMessages(observation:Observation) {
   const items=new Map<string,Set<string>>();
@@ -206,22 +207,21 @@ export class AgentRuntime {
     const staged:StagedPlan=cached??{plan:mind.plan!,events:[],modelCalls:0};
     if(!cached||staged.plan.status!=='active'||![2,3,4].includes(staged.plan.version??0)){
       const catalog=worldTools(this.engine,id,mind,{following,referenceTargets:true});
-      const unavailableCapabilities=catalog.filter(tool=>tool.unavailable).map(({name,unavailable})=>({name,requires:unavailable}));
-      const capabilities=catalog
-        .filter(tool=>!tool.unavailable)
-        .map(tool=>({name:tool.name,description:tool.description,parameters:tool.parameters}));
-      // Preview only capabilities of already owned items; never execute these tools or change hands.
-      const knownCapabilities=new Set(capabilities.map(tool=>tool.name));
-      const hands=[null,...(observation.self.inventory?.stacks.map((_,index)=>index)??[])];
-      const capabilitiesAfterChangingHands=hands.flatMap(hand=>{
+      const currentLimitations=describePlanningLimitations(catalog);
+      const available=catalog.filter(tool=>!tool.unavailable);
+      const currentCapabilities=describePlanningCapabilities(available);
+      // Describe latent local interactions and the abilities unlocked by already owned items.
+      // Building these catalogs never executes a tool or changes hands.
+      const selectedHand=observation.self.inventory?.selected??null;
+      const hands=[...new Set([selectedHand,null,...(observation.self.inventory?.stacks.map((_,index)=>index)??[])])];
+      const scenarios=hands.map(hand=>{
         const stack=hand===null?undefined:observation.self.inventory!.stacks[hand];
-        const tools=worldTools(this.engine,id,mind,{following:false,availableOnly:false,capabilityPreview:true,previewHand:hand})
-          .filter(tool=>!tool.unavailable&&!knownCapabilities.has(tool.name))
-          .map(tool=>({name:tool.name,description:tool.description,parameters:tool.parameters}));
-        return tools.length?[{requires:{holding:stack?.kind??'empty',...(stack?.contents?{contents:stack.contents}:{}),...(following?{stopFollowing:true}:{})},tools}]:[];
+        const tools=worldTools(this.engine,id,mind,{following:false,availableOnly:false,previewHand:hand}).filter(tool=>!tool.unavailable);
+        return {when:planningHandCondition(stack?.kind??'empty',stack?.contents,following,hand===selectedHand),tools};
       });
+      const conditionalCapabilities=describeConditionalPlanningCapabilities(currentCapabilities,scenarios);
       const experience=this.experience.get(id)!.read(observation.tick,cached?.plan??mind.plan);
-      const context={...abstractPlanningContext(this.engine,{...observation,following:following?observation.following:undefined},mind,capabilities,actions.slice(-PLAN_REVIEW_INTERVAL)),capabilitiesAfterChangingHands,unavailableCapabilities,decisionState:{following,stopFollowingPending:stopFollowing},experience};
+      const context={...abstractPlanningContext(this.engine,{...observation,following:following?observation.following:undefined},mind,currentCapabilities,actions.slice(-PLAN_REVIEW_INTERVAL)),conditionalCapabilities,currentLimitations,decisionState:{following,stopFollowingPending:stopFollowing},experience};
       staged.plan=await planDecision({name:observation.self.name,planningInstructions:this.engine.module.manifest.planningInstructions,turn:mind.turns,time:observation.time,plan:cached?.plan??mind.plan,upgrade:!cached&&upgrade,reviewReason,context,actions,observation,signal,retryDelayMs:this.config.retryDelayMs,reasoning:this.reasoningSettings.planning,compactionReasoning:this.reasoningSettings.planCompaction,
         complete:async(request,abort)=>{
           report(id,{state:'planning',message:'Planning a goal and reviewing steps; world time is held.'});
@@ -509,7 +509,7 @@ export class AgentRuntime {
   }
 }
 
-function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind,capabilities:unknown[],actions:ReturnType<typeof recentActions>) {
+function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind,currentCapabilities:string[],actions:ReturnType<typeof recentActions>) {
   const kinds=(values:string[])=>[...new Set(values)];
   const interactions=observation.interactions;
   return rounded({
@@ -530,7 +530,7 @@ function abstractPlanningContext(engine:Engine,observation:Observation,mind:Mind
         ...(interactions.close.length?{close:interactions.close}:{}),
       },
     },
-    capabilities,
+    currentCapabilities,
     inventory:inventoryContext(observation),
     learned:relevantKnowledge(engine,observation,true),
     notes:journalContext(mind),

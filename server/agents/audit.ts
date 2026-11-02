@@ -3,7 +3,7 @@ import type { CompletionRequest, CompletionResult } from './providers';
 import { InvalidCompletionError, ProviderUnavailableError } from './providers';
 import { normalizeTextToolCall } from './tool-normalization';
 
-export const PROMPT_VERSION='focused-context-v12';
+export const PROMPT_VERSION='focused-context-v13';
 export class InferenceAuditError extends Error {}
 
 function persist<T>(write:()=>T):T {

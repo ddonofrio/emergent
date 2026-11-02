@@ -5,7 +5,7 @@ import {island} from '../src/modules/island';
 import type {AgentPlan,Block,Entity} from '../src/core/types';
 import {Store} from '../server/store';
 import {AgentRuntime} from '../server/agents/runtime';
-import {worldTools} from '../server/agents/tools';
+import {impactPoints,worldTools} from '../server/agents/tools';
 import {applicableSuggestions,previousPlanContext,suggestionBasis} from '../server/agents/plan-context';
 import {planDecision} from '../server/agents/planning';
 import type {CompletionResult} from '../server/agents/providers';
@@ -108,6 +108,49 @@ test('a batched look keeps the normal field of view and rejects excess direction
   assert.deepEqual(engine.state(),before);
   const limited=worldTools(engine,'t1',{notes:[]},{lookBudget:1}).find(tool=>tool.name==='look')!;
   assert.equal((limited.invoke({angles:[-90,90]}) as any).ok,false);
+});
+
+test('every executor tool declares an adjacent schema-free planning capability',()=>{
+  const engine=fixture(),actor=engine.entity('t1');
+  actor.inventory={stacks:[
+    {kind:'wood',count:2},
+    {kind:'bucket',count:1},
+    {kind:'bucket',count:1,contents:'water'},
+    {kind:'shovel',count:1},
+    {kind:'door_half_up',count:1},
+    {kind:'door_half_down',count:1},
+    {kind:'door',count:1},
+    {kind:'stone',count:1},
+  ],selected:0,capacity:640};
+  const memory={notes:[]};
+  const handCatalogs=[null,...actor.inventory.stacks.map((_,index)=>index)].map(previewHand=>
+    worldTools(engine,'t1',memory,{availableOnly:false,previewHand}),
+  );
+  const observedHandCatalogs=[null,...actor.inventory.stacks.map((_,index)=>index)].map(previewHand=>
+    worldTools(engine,'t1',memory,{previewHand,referenceTargets:true}),
+  );
+  const controlCatalog=worldTools(engine,'t1',memory,{following:true,goalCriterion:{kind:'scan'},onFinishGoal:()=>({ok:true})});
+  const legacyControlCatalog=worldTools(engine,'t1',memory,{following:true,onFinishGoal:()=>({ok:true})});
+  const referenceCatalog=worldTools(engine,'t1',memory,{referenceTargets:true});
+  const tools=[...handCatalogs.flat(),...observedHandCatalogs.flat(),...controlCatalog,...legacyControlCatalog,...referenceCatalog];
+
+  assert.ok(tools.length>0);
+  for(const tool of tools){
+    assert.equal(typeof tool.planning.ability,'string',`${tool.name} must describe its planning capability.`);
+    assert.ok(tool.planning.ability.trim(),`${tool.name} must not expose an empty planning capability.`);
+    assert.doesNotMatch(JSON.stringify(tool.planning),/targetId|itemId|entityId|bottom_center|front_edge|door_half_|\[x,y,z\]/,`${tool.name} leaked execution details into planning metadata.`);
+    if(tool.unavailable&&tool.planning.expose!==false)assert.ok(tool.planning.requires?.trim(),`${tool.name} must explain its current limitation without reusing its executor error.`);
+  }
+  for(const name of ['open','close','hit','pickup','place','throw','strike_held','fill','empty','dig','join','hold','follow','inspect_jump'])
+    assert.ok(tools.some(tool=>tool.name===name),`The exhaustive planning fixture must exercise ${name}.`);
+  for(const name of ['finish_goal','complete_task','replan_task']){
+    const taskTool=tools.find(tool=>tool.name===name);
+    assert.ok(taskTool,`The exhaustive planning fixture must exercise ${name}.`);
+    assert.equal(taskTool.planning.expose,false,`${name} is a control operation, not a world capability.`);
+  }
+  const strike=tools.find(tool=>tool.name==='strike_held')!;
+  assert.match(strike.planning.ability,/different surface locations.*orientation/);
+  for(const point of Object.keys(impactPoints))assert.doesNotMatch(strike.planning.ability,new RegExp(point));
 });
 
 test('batched views survive corrections and a ready restart, including follow from the earlier view',async()=>{

@@ -330,7 +330,7 @@ test('a reached social goal can stop following and close before selecting the ne
         assert.equal((request.tools[0] as any).function.name,'set_plan');
         assert.equal(context(request).situation.following,undefined);
         assert.deepEqual(context(request).situation.decisionState,{following:false,stopFollowingPending:true});
-        assert.ok(context(request).situation.capabilities.some((tool:{name:string})=>tool.name==='look'));
+        assert.ok(context(request).situation.currentCapabilities.some((capability:string)=>/inspect up to two other directions/.test(capability)));
         assert.ok(engine.entity('t1').following,'Stopping remains staged even when the planner sees the new mode.');
         return answer('set_plan',{goal:'Inspect this place.',successCondition:'I have scanned this place.',explanation:'Inspect this place.'});
       }
@@ -365,7 +365,7 @@ test('closing a task while following preserves the next plan, local context and 
         assert.equal((request.tools[0] as any).function.name,'set_plan');
         assert.deepEqual(context(request).situation.decisionState,{following:true,stopFollowingPending:false});
         assert.equal(context(request).situation.following.name,'Moss');
-        assert.ok(!context(request).situation.capabilities.some((tool:any)=>tool.name==='walk'));
+        assert.ok(!context(request).situation.currentCapabilities.some((capability:string)=>/walk toward/.test(capability)));
         return answer('set_plan',{goal:'Observe Moss while staying nearby.',successCondition:'I have observed a change in direction.',explanation:'I want to understand the movement.'});
       }
       const prompt=context(request);
