@@ -39,11 +39,11 @@ export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander' | 'static' | 'automaton'; position: Vec3; yaw: number;
   enabled?: boolean;
   height: number; hitbox?: { radius: number; height: number; terrainRadius?:number }; color: string; inventory: Inventory | null;
-  status: string; speech?: { word: string; until: number };
+  status: string; speech?: { word: string; until: number }; speechResponseCooldownUntil?: number;
   speechBudget?: { turn: number; words: number };
   intent?: AgentIntent;
   following?: { entityId: string; blocked?: MovementIssue };
-  motion?: { kind?: 'walk' | 'run' | 'reverse' | 'jump' | 'bounce' | 'scan' | 'showcase'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number; scanType?: 'find_material' | 'find_entity'; result?: ActionResult };
+  motion?: { kind?: 'walk' | 'run' | 'reverse' | 'jump' | 'bounce' | 'scan' | 'showcase'; destination: Vec3; speed: number; currentSpeed?: number; inWater?: boolean; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number; scanType?: 'find_material' | 'find_entity'; result?: ActionResult };
   lastAction?: ActionResult;
   automation?: Record<string, unknown>;
   appearance?: { material?:string; widthScale?:number; metalness?:number; roughness?:number; powerModule?:'lithium-battery'|'nuclear-reactor' };
@@ -102,19 +102,24 @@ export interface WorldStateMigration {
   state: WorldState;
   events: { actor: string; type: string; message: string; data?: unknown }[];
 }
+export interface WanderContext { tick: number; clearDistance(yaw: number, distance: number): number; }
 export interface UniverseModule {
   manifest: UniverseManifest;
   generate(): { blocks: Block[]; entities: Entity[] };
   migrateState?(state: WorldState): WorldStateMigration | undefined;
   initializeAutomaton?(entity: Entity): void;
   automatonAction?(entity: Entity): Action | undefined;
+  wanderAction?(entity: Entity, context: WanderContext): Action | undefined;
   transformHit?(kind: string, impact: Vec3, orientation?: 'up' | 'down'): string | null;
-  canEnter?(entity: Entity, feet: Vec3): ActionResult;
-  movementSpeed?(entity:Entity,feet:Vec3,speed:number):number;
+  canEnter?(entity: Entity, feet: Vec3, inWater?: boolean): ActionResult;
+  waterSurfaceHeight?(entity: Entity, x: number, z: number): number | undefined;
+  movementStepHeight?(entity: Entity): number;
+  movementInertia?(entity: Entity): { acceleration: number; deceleration: number } | undefined;
+  movementSpeed?(entity:Entity,feet:Vec3,speed:number,inWater?:boolean):number;
   describeObstacle?(issue: MovementIssue): string | undefined;
   encounterMessage?(observer:Entity,other:Entity,metres:number):string|undefined;
   relevantKnowledge?(observation:Observation,knowledge:string):boolean;
-  respondToSpeech?(listener:Entity,speaker:Entity,word:string):string|{word:string;faceSpeaker?:boolean}|undefined;
+  respondToSpeech?(listener:Entity,speaker:Entity,word:string):string|{word:string;faceSpeaker?:boolean;cooldownSeconds?:number}|undefined;
 }
 export const key = (p: Vec3) => p.join(',');
 export const unkey = (value: string): Vec3 => value.split(',').map(Number) as Vec3;

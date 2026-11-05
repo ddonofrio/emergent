@@ -331,6 +331,9 @@ export class Engine {
     if(respond)for(const listener of recipients){
       const reply=this.module.respondToSpeech?.(listener,speaker,word);
       if(!reply)continue;
+      const cooldownSeconds=typeof reply==='string'?0:reply.cooldownSeconds??0;
+      if(cooldownSeconds>0&&this.time<(listener.speechResponseCooldownUntil??-Infinity))continue;
+      if(cooldownSeconds>0)listener.speechResponseCooldownUntil=this.time+cooldownSeconds;
       if(typeof reply!=='string'&&reply.faceSpeaker){
         listener.yaw=((Math.atan2(speaker.position[0]-listener.position[0],speaker.position[2]-listener.position[2])*180/Math.PI)%360+360)%360;
         if(listener.controller==='wander'){delete listener.motion;listener.status='idle';}
@@ -464,9 +467,16 @@ export class Engine {
       return vertical&&Math.hypot(other.position[0]-point[0],other.position[2]-point[2])<hitbox.radius+otherHitbox.radius;
     });
   }
-  private movementPoint(e: Entity, x: number, z: number, from: number, maxRise = 0): { point?: Vec3; issue?: MovementIssue } {
+  private waterSurface(e:Entity,x:number,z:number){return this.module.waterSurfaceHeight?.(e,x,z);}
+  private onWaterSurface(e:Entity,feet:Vec3){
+    const surface=this.waterSurface(e,feet[0],feet[2]);return surface!==undefined&&Math.abs(surface-feet[1])<.001;
+  }
+  private initialMovementState(e:Entity){return this.module.movementInertia?.(e)?{currentSpeed:0}:{};}
+  private movementPoint(e: Entity, x: number, z: number, from: number, maxRise = this.module.movementStepHeight?.(e) ?? 0): { point?: Vec3; issue?: MovementIssue } {
     if (!this.inside([x, from, z])) return { issue: { kind:'boundary',message:'The boundary of the world blocks that direction.' } };
-    const radius=e.hitbox?.terrainRadius??.23,point = this.footAt(x, z, from, e.height, maxRise,1,true,radius);
+    const radius=e.hitbox?.terrainRadius??.23,waterY=this.waterSurface(e,x,z);
+    let point = this.footAt(x, z, from, e.height, maxRise,1,true,radius);
+    if(waterY!==undefined&&waterY<=from+maxRise+.001&&waterY>=from-1-.001&&!this.blockingVoxel(e,x,z,waterY))point=[x,waterY,z];
     if (!point) {
       const target = this.blockingVoxel(e,x,z,from);
       if (target) {
@@ -482,12 +492,13 @@ export class Engine {
       // An underwater shore can lose its seabed before a walkable step is found.
       const lower=this.footAt(x,z,from,e.height,maxRise,Math.max(1,from-this.module.manifest.bounds.min[1]),false,radius);
       if(lower||from<=this.module.manifest.waterLevel){
-        const feet:Vec3=lower??[x,this.module.manifest.bounds.min[1],z],allowed=this.module.canEnter?.(e,feet)??ok('Safe terrain.');
+        const feet:Vec3=lower??[x,this.module.manifest.bounds.min[1],z],allowed=this.module.canEnter?.(e,feet,true)??ok('Safe terrain.');
         if(!allowed.ok)return {issue:{kind:'water',target:[Math.floor(x),Math.floor(feet[1]),Math.floor(z)],message:allowed.message}};
       }
       return { issue: { kind:'gap',target:[Math.floor(x),Math.floor(from-1),Math.floor(z)],message:'There is no safe ground ahead; the terrain drops away.' } };
     }
-    const allowed = this.module.canEnter?.(e, point)??ok('Safe terrain.');
+    const inWater=waterY!==undefined&&Math.abs(waterY-point[1])<.001;
+    const allowed = this.module.canEnter?.(e, point,inWater)??ok('Safe terrain.');
     if (!allowed.ok) return { issue: { kind:'water',target:[Math.floor(x),Math.floor(point[1]),Math.floor(z)],message:allowed.message } };
     const other = this.collidingEntity(e,point);
     if (other) return { issue: { kind:'entity',entity:other.name,entityId:other.id,message:`${other.name}'s body blocks your path.` } };
@@ -513,7 +524,7 @@ export class Engine {
     const angle=yaw*Math.PI/180,x=e.position[0]+Math.sin(angle)*jumpDistance,z=e.position[2]+Math.cos(angle)*jumpDistance;
     const landing=this.footAt(x,z,e.position[1],e.height,1,1,false,e.hitbox?.terrainRadius??.23);
     if(!landing)return {issue,message:'There is no safe landing within one block of your current height.'};
-    const allowed=this.module.canEnter?.(e,landing)??ok('Safe terrain.');
+    const allowed=this.module.canEnter?.(e,landing,this.onWaterSurface(e,landing))??ok('Safe terrain.');
     if(!allowed.ok)return {issue:{kind:'water',target:[Math.floor(x),Math.floor(landing[1]),Math.floor(z)],message:allowed.message},message:'The landing would put you in dangerously deep water.'};
     const other=this.collidingEntity(e,landing);
     if(other)return {issue:{kind:'entity',entity:other.name,entityId:other.id,message:`${other.name} occupies the landing point.`},message:`${other.name} occupies the landing point.`};
@@ -684,10 +695,10 @@ export class Engine {
         if(route.clearance<.15){this.learnMovementIssue(e,route.issue!);return fail(`${route.issue!.message} You cannot move forward. Available responses: ${this.options(e,route.issue).join(', ')}.`,navigation);}
         const safe=this.traceMovement(e,e.yaw,route.clearance).destination;
         if(!safe)return fail(`${route.issue!.message} You cannot find a safe step toward it.`,navigation);
-        e.motion={kind:running?'run':'walk',destination:safe,speed:running?4:e.controller==='wander'?1:2,origin:clone(e.position),stopIssue:route.issue,requestedDistance};e.status=running?'running':'walking';
+        e.motion={kind:running?'run':'walk',destination:safe,speed:running?4:e.controller==='wander'?1:2,origin:clone(e.position),stopIssue:route.issue,requestedDistance,...this.initialMovementState(e)};e.status=running?'running':'walking';
         return {ok:true,message:`You start ${running?'running':'walking'}, with an obstacle about ${route.clearance.toFixed(1)} metres ahead.`,navigation,feedback:{outcome:'started',from:clone(e.position),destination:clone(safe),requestedDistance,...(mapTarget?{requestedTarget:clone(a.target!)}:{}),expectedStop:route.issue}};
       }
-      e.motion = { kind:running?'run':'walk',destination:route.destination,speed:running?4:e.controller==='wander'?1:2,origin:clone(e.position),requestedDistance }; e.status = running?'running':'walking';
+      e.motion = { kind:running?'run':'walk',destination:route.destination,speed:running?4:e.controller==='wander'?1:2,origin:clone(e.position),requestedDistance,...this.initialMovementState(e) }; e.status = running?'running':'walking';
       return { ok:true,message:mapTarget?`You start walking toward [${a.target!.join(',')}]; foot height follows terrain.`:`You start ${running?'running':'walking'} toward a point ${requestedDistance.toFixed(1)} metres ahead.`,feedback:{outcome:'started',from:clone(e.position),destination:clone(route.destination),requestedDistance,...(mapTarget?{requestedTarget:clone(a.target!)}:{})} };
     }
     if (a.action === 'jump') {
@@ -946,7 +957,7 @@ export class Engine {
     const dx=target.position[0]-e.position[0],dz=target.position[2]-e.position[2],metres=Math.hypot(dx,dz);
     e.yaw=((Math.atan2(dx,dz)*180/Math.PI)%360+360)%360;
     if(metres<=1.0001||following.blocked){delete e.motion;e.status='following';return;}
-    const speed=this.module.movementSpeed?.(e,e.position,2)??2;
+    const speed=this.module.movementSpeed?.(e,e.position,2,this.onWaterSurface(e,e.position))??2;
     const step=Math.min(speed/TICKS_PER_SECOND,metres-1),next=this.movementPoint(e,e.position[0]+dx/metres*step,e.position[2]+dz/metres*step,e.position[1]);
     if(!next.point){
       following.blocked=next.issue;if(next.issue?.kind==='entity'){this.collide(e,next.issue);return;}delete e.motion;this.learnMovementIssue(e,next.issue!);
@@ -968,10 +979,14 @@ export class Engine {
       if(e.controller==='automaton'&&!e.motion&&this.tick%TURN_TICKS===0){
         const action=this.module.automatonAction?.(e);if(action)this.act(e.id,action,'automaton');
       }
-      if (e.controller === 'wander' && !e.motion && !e.speech && this.tick % 60 === 0) {
-        e.yaw = (this.tick * 13.37) % 360;
-        // The NPC uses the same collision and depth rules, without adding agent journal noise.
-        this.execute(e, { action: 'walk', distance: 1.5 });
+      if (e.controller === 'wander' && !e.motion && !e.speech) {
+        if(this.module.wanderAction&&this.tick%TICKS_PER_SECOND===0){
+          const action=this.module.wanderAction(e,{tick:this.tick,clearDistance:(yaw,distance)=>this.traceMovement(e,yaw,distance).clearance});
+          if(action)e.lastAction=clone(this.execute(e,action));
+        }else if(!this.module.wanderAction&&this.tick%60===0){
+          e.yaw=(this.tick*13.37)%360;
+          e.lastAction=clone(this.execute(e,{action:'walk',distance:1.5}));
+        }
       }
       if (!e.motion) continue;
       if(e.motion.kind==='scan'){
@@ -1011,7 +1026,16 @@ export class Engine {
         if(progress>=1){e.position=clone(motion.destination);delete e.motion;e.status='idle';e.lastAction={ok:true,message:`You land safely after jumping ${distance(origin,e.position).toFixed(1)} metres.`,feedback:{outcome:'arrived',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position)}};this.event(e.id,'arrived',e.lastAction.message,e.lastAction.feedback);}
         continue;
       }
-      const [x, , z] = e.position, dest = e.motion.destination, d = Math.hypot(dest[0] - x, dest[2] - z), speed=this.module.movementSpeed?.(e,e.position,e.motion.speed)??e.motion.speed, step = Math.min(d, speed / 20);
+      const [x, , z] = e.position, dest = e.motion.destination, d = Math.hypot(dest[0] - x, dest[2] - z),inWater=this.onWaterSurface(e,e.position);
+      e.motion.inWater=inWater;
+      const topSpeed=this.module.movementSpeed?.(e,e.position,e.motion.speed,inWater)??e.motion.speed,inertia=this.module.movementInertia?.(e);
+      let speed=topSpeed;
+      if(inertia){
+        const current=e.motion.currentSpeed??0,braking=Math.sqrt(Math.max(0,2*inertia.deceleration*d)),target=Math.min(topSpeed,braking);
+        speed=current<target?Math.min(target,current+inertia.acceleration/TICKS_PER_SECOND):Math.max(target,current-inertia.deceleration/TICKS_PER_SECOND);
+        e.motion.currentSpeed=speed;
+      }
+      const step = Math.min(d, speed / TICKS_PER_SECOND);
       const next = this.movementPoint(e, x + (dest[0] - x) * step / Math.max(d, .0001), z + (dest[2] - z) * step / Math.max(d, .0001), e.position[1]);
       if (!next.point) { const origin=e.motion.origin??clone(e.position),issue=next.issue!;if(issue.kind==='entity'){this.collide(e,issue);continue;}delete e.motion;e.status='idle';this.learnMovementIssue(e,issue);e.lastAction={ok:false,message:`You stop after ${distance(origin,e.position).toFixed(1)} metres. ${issue.message}`,feedback:{outcome:'blocked',from:origin,to:clone(e.position),distanceTravelled:distance(origin,e.position),issue,availableResponses:this.options(e,issue)}};this.event(e.id,'blocked',e.lastAction.message,e.lastAction.feedback);continue; }
       e.position = next.point;

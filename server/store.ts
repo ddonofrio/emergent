@@ -93,6 +93,24 @@ export class Store {
     const rows = (actor ? this.db.prepare('SELECT data FROM events WHERE tick <= ? AND actor = ? ORDER BY id DESC LIMIT ?').all(tick, actor, limit) : this.db.prepare('SELECT data FROM events WHERE tick <= ? ORDER BY id DESC LIMIT ?').all(tick, limit)) as { data: string }[];
     return rows.map(r => JSON.parse(r.data)).reverse();
   }
+  metricsAt(tick: number) {
+    const row = this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = 'world' AND type = 'llm-metrics' ORDER BY id DESC LIMIT 1").get(tick) as {data:string} | undefined;
+    if(row)return (JSON.parse(row.data) as WorldEvent).data;
+    const rows=this.db.prepare("SELECT actor,response FROM inference_audit WHERE tick <= ? AND status = 'completed' AND response IS NOT NULL ORDER BY id").all(tick) as {actor:string;response:Uint8Array}[];
+    if(!rows.length)return undefined;
+    const totals:Record<string,{inputTokens:number;outputTokens:number;cachedInputTokens:number}>={};
+    for(const audit of rows){
+      const usage=unpack<{usage?:{inputTokens?:number;outputTokens?:number;cachedInputTokens?:number}}>(audit.response).usage;
+      if(!usage)continue;
+      const metrics=totals[audit.actor]??={inputTokens:0,outputTokens:0,cachedInputTokens:0};
+      metrics.inputTokens+=usage.inputTokens??0;metrics.outputTokens+=usage.outputTokens??0;metrics.cachedInputTokens+=usage.cachedInputTokens??0;
+    }
+    return Object.keys(totals).length?totals:undefined;
+  }
+  secondsPerTurnAt(tick: number) {
+    const row=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = 'world' AND type = 'turn-speed' ORDER BY id DESC LIMIT 1").get(tick) as {data:string} | undefined;
+    return row?((JSON.parse(row.data) as WorldEvent).data as {secondsPerTurn:number}).secondsPerTurn:undefined;
+  }
   memoryAt(tick: number, actor: string) {
     const row = this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type = 'memory' ORDER BY id DESC LIMIT 1").get(tick, actor) as {data: string} | undefined;
     return row ? ((JSON.parse(row.data) as WorldEvent).data as {notes: string[]}).notes : [];

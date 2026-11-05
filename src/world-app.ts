@@ -1,13 +1,14 @@
 import { WorldView } from './view/world-view';
 import { advancePlayback, fastScrubSpeed } from './view/playback-clock';
-import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, type TurnStatus } from './core/time';
+import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, TURN_TICKS, type TurnStatus } from './core/time';
 import { key, unkey, type Frame, type UniverseManifest, type WorldEvent, type WorldState } from './core/types';
 import { knowledgeDescription } from './core/knowledge';
 import { entityDisplayStatus } from './view/entity-status';
 
+interface AgentMetrics { llmCalls?:number; inputTokens?:number; outputTokens?:number; cachedInputTokens?:number; }
 interface ModelRequestStatus { state:'unknown'|'ok'|'bad'; inFlight:number; detail?:string; }
-interface Metadata { universe: UniverseManifest; mode: 'llm' | 'waiting'; model: string; inferenceConfig?:InferenceConfig; providerStatus?:Record<string,ModelRequestStatus>; latestTick: number; runtime: TurnStatus; }
-interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
+interface Metadata { universe: UniverseManifest; mode: 'llm' | 'waiting'; model: string; inferenceConfig?:InferenceConfig; metrics?:Record<string,AgentMetrics>; providerStatus?:Record<string,ModelRequestStatus>; latestTick: number; runtime: TurnStatus; secondsPerTurn?:number; }
+interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; recordedMetrics?:Record<string,AgentMetrics>; recordedSecondsPerTurn?:number; }
 interface ModelProvider { id:string; type:string; name:string; enabled?:boolean; baseUrl:string; model:string; region?:string; tokenless?:boolean; contextWindow?:number; maxOutputTokens?:number; reasoning?:string; hasApiKey?:boolean; apiKey?:string; clearApiKey?:boolean; hasVastToken?:boolean; vastToken?:string; clearVastToken?:boolean; vastContainerLabel?:string; }
 interface InferenceConfig { version:1; parallelRequests?:boolean; providers:ModelProvider[]; }
 interface ProviderModelOption { id:string; label:string; contextWindow?:number; maxOutputTokens?:number; }
@@ -35,7 +36,8 @@ app.innerHTML = `
     <aside id="debug-panel" class="debug-panel collapsed" aria-label="Debug and journal">
       <header class="panel-heading"><button id="debug-toggle" class="panel-toggle" type="button" aria-expanded="false" aria-label="Expand debug panel" title="Expand debug panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg><span>Debug</span></button></header>
       <div class="debug-content">
-        <section class="turn-status-section"><h2>Turn status</h2><ul id="provider-status-list" class="provider-status-list" aria-label="Configured models"></ul><p id="provider-algorithm" class="provider-algorithm"></p><p id="provider-current-status" class="provider-current-status empty" role="status" aria-hidden="true"></p><p id="turn-status" role="status">One turn = one world second</p><div id="toast" role="status"></div></section>
+        <section class="turn-status-section"><h2>Turn status</h2><ul id="provider-status-list" class="provider-status-list" aria-label="Configured models"></ul><p id="turn-status" role="status">One turn = one world second</p><div id="toast" role="status"></div></section>
+        <section class="stats-section" aria-label="Stats"><h2>Stats</h2><div id="stats-rows"></div></section>
         <section class="journal-section"><header class="journal-heading"><h2>Journal</h2><span id="event-count">0</span></header><div id="journal" class="journal"><p class="empty">Waiting for the first trace.</p></div></section>
       </div>
     </aside>
@@ -74,8 +76,10 @@ let liveDynamic: Omit<WorldState,'blocks'>;
 const liveCells = new Map<string,string>();
 const liveRemoved = new Set<string>();
 let latest = 0, selected = 't1', isLive = true, playing = false, cursor = 0, scrubTarget: number | null = null, events: WorldEvent[] = [], liveEvents: WorldEvent[] = [];
+let shownMetrics:Record<string,AgentMetrics>|undefined;
+let shownSecondsPerTurn:number|undefined;
 let epoch = 0, seekTimer: ReturnType<typeof setTimeout>, replayFrames: Frame[] = [], fetching = false, replayClock = 0, replayRequest = 0, lastPlayback = performance.now(), lastUi = 0, nextReplayFetch = 0, seeking = false;
-let dayCount = 0,detailsSignature='';
+let dayCount = 0,detailsSignature='',statsSignature='';
 let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[]}|undefined;
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
@@ -164,10 +168,6 @@ function minerRobotPortrait(entity:WorldState['entities'][number]){
     :entity.appearance?.powerModule==='nuclear-reactor'?'<path d="M5 25h38v19H5z" fill="#303638"/><circle cx="7" cy="34" r="5" fill="#77817e"/><circle cx="7" cy="34" r="2.5" fill="#d7eea3"/><circle cx="41" cy="34" r="5" fill="#77817e"/><circle cx="41" cy="34" r="2.5" fill="#d7eea3"/>':'';
   return `<svg class="miner-robot-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><g transform="translate(${offset} 0) scale(${width} 1)">${moduleVisual}<path d="M9 41h30v7H9z" fill="${palette.dark}"/><path d="M5 39h10v12H5zm28 0h10v12H33z" fill="${palette.black}"/><circle cx="10" cy="43" r="3" fill="${palette.mid}"/><circle cx="10" cy="48" r="2" fill="${palette.light}"/><circle cx="38" cy="43" r="3" fill="${palette.mid}"/><circle cx="38" cy="48" r="2" fill="${palette.light}"/><path d="M11 27h26v16H11z" fill="${palette.base}"/><path d="M16 23h16v5H16z" fill="${palette.dark}"/><path d="M8 10h32v15H8z" fill="${palette.mid}"/><path d="M11 14h26v8H11z" fill="${palette.black}"/><path d="M14 16h7v4h-7zm13 0h7v4h-7z" fill="#e2bd70"/><path d="M21 5h6v6h-6z" fill="${palette.dark}"/><path d="M22 6h4v3h-4z" fill="#f0d994"/><path d="M7 30h4v11H7zm30 0h4v11h-4z" fill="${palette.mid}"/></g></svg>`;
 }
-async function loadProviderStatus(){
-  try{const response=await fetch(`${worldApi}/inference-config`);if(!response.ok)return;inferenceConfig=await response.json() as InferenceConfig;if(meta){meta.inferenceConfig=inferenceConfig;renderProviderStatus();}}
-  catch{/* Runtime status remains available while settings are unavailable. */}
-}
 async function loadLlmSettings(){
   $('settings-status').textContent='Loading current configuration...';
   try{const response=await fetch(`${worldApi}/inference-config`);if(!response.ok)throw new Error();inferenceConfig=await response.json() as InferenceConfig;$<HTMLInputElement>('parallel-requests').checked=inferenceConfig.parallelRequests!==false;renderModelRows(inferenceConfig.providers);renderProviderStatus(inferenceConfig);$('settings-status').textContent='';}
@@ -178,6 +178,10 @@ function showSettings(open:boolean){
   if(open)void loadLlmSettings();
 }
 function dayOf(tick:number){return worldTime(tick).day;}
+async function loadProviderStatus(){
+  try{const response=await fetch(`${worldApi}/inference-config`);if(!response.ok)return;inferenceConfig=await response.json() as InferenceConfig;if(meta){meta.inferenceConfig=inferenceConfig;renderProviderStatus();}}
+  catch{/* Runtime status remains available while settings are unavailable. */}
+}
 function renderProviderStatus(config:InferenceConfig|undefined=meta?.inferenceConfig??inferenceConfig){
   const active=(config?.providers??[]).filter(provider=>provider.enabled!==false),list=$('provider-status-list');list.replaceChildren();
   for(const provider of active){
@@ -189,9 +193,6 @@ function renderProviderStatus(config:InferenceConfig|undefined=meta?.inferenceCo
     const name=document.createElement('span');name.className='provider-status-name';name.textContent=provider.name.trim()||'Unnamed model';
     row.title=[label,status?.detail,provider.model].filter(Boolean).join('\n');row.append(dot,name);list.append(row);
   }
-  $('provider-algorithm').textContent=active.length?`Ordered fallback · ${config?.parallelRequests===false?'One request at a time':'Parallel requests'}`:'No active model';
-  const waiting=Object.entries(meta?.runtime.agents??{}).find(([,status])=>status.state==='waiting'&&status.message);
-  const current=$('provider-current-status');current.textContent=waiting?`${shown?.entities.find(entity=>entity.id===waiting[0])?.name??waiting[0]}: ${waiting[1].message}`:'';current.classList.toggle('empty',!current.textContent);current.setAttribute('aria-hidden',String(!current.textContent));
 }
 function selectEntity(id: string) { selected = id; detailsSignature='';view.select(id);renderInspector();void loadMemory(); }
 async function loadMemory(){
@@ -200,13 +201,12 @@ async function loadMemory(){
   catch{if(request===memoryRequest){memoryView={actor,tick,notes:[]};renderDetails();}}
 }
 function setBoot(boot: Boot) {
-  meta = boot; latest = boot.latestTick; liveDynamic = boot.state; liveCells.clear();liveRemoved.clear();
+  meta = boot; latest = boot.latestTick; liveDynamic = boot.state;shownMetrics=boot.metrics;shownSecondsPerTurn=boot.secondsPerTurn; liveCells.clear();liveRemoved.clear();
   for (const [x,y,z,kind] of boot.state.blocks) liveCells.set(key([x,y,z]),kind);
   for(const voxel of boot.state.removedBlocks??[])liveRemoved.add(voxel);
   if(!boot.state.entities.some(entity=>entity.id===selected)&&boot.state.entities[0]){selected=boot.state.entities[0].id;view.select(selected);}
   liveEvents = boot.events; $('loading').classList.add('hidden');
-  renderProviderStatus(meta.inferenceConfig);
-  if(!meta.inferenceConfig)void loadProviderStatus();
+  renderProviderStatus(meta.inferenceConfig);if(!meta.inferenceConfig)void loadProviderStatus();
   $('module-name').textContent = meta.universe.name;
   renderWorldControls();
   if (isLive) goLive(); else renderTimeline();
@@ -218,8 +218,8 @@ stream.addEventListener('inference-config',event=>{
 });
 stream.addEventListener('status', event => {
   if (!meta) return;
-  const packet=JSON.parse((event as MessageEvent).data) as {runtime:TurnStatus;inferenceConfig?:InferenceConfig;providerStatus?:Record<string,ModelRequestStatus>};
-  meta.runtime=packet.runtime;if(packet.inferenceConfig)meta.inferenceConfig=packet.inferenceConfig;if(packet.providerStatus)meta.providerStatus=packet.providerStatus;renderProviderStatus();
+  const packet=JSON.parse((event as MessageEvent).data) as {runtime:TurnStatus;inferenceConfig?:InferenceConfig;metrics?:Record<string,AgentMetrics>;providerStatus?:Record<string,ModelRequestStatus>};
+  meta.runtime=packet.runtime;if(packet.inferenceConfig)meta.inferenceConfig=packet.inferenceConfig;if(packet.metrics){meta.metrics=packet.metrics;if(isLive)shownMetrics=packet.metrics;}if(packet.providerStatus)meta.providerStatus=packet.providerStatus;renderProviderStatus();
   renderTimeline(); renderInspector();renderWorldControls();
 });
 stream.addEventListener('frame', event => {
@@ -229,6 +229,8 @@ stream.addEventListener('frame', event => {
   for (const [k,kind] of frame.changes) { if (kind){liveCells.set(k,kind);liveRemoved.delete(k);}else{liveCells.delete(k);if(meta.universe.terrain)liveRemoved.add(k);} }
   liveEvents = [...liveEvents,...frame.events].slice(-200);
   if (isLive) {
+    const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;
+    const turnEvent=frame.events.findLast(event=>event.type==='turn-speed');if(turnEvent)shownSecondsPerTurn=(turnEvent.data as {secondsPerTurn:number}).secondsPerTurn;
     shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);
     if (frame.events.length) renderJournal();
   }
@@ -240,7 +242,7 @@ function goLive() {
   if (!meta || !liveDynamic) return;
   epoch++; replayRequest++; fetching = false; seeking = false; clearTimeout(seekTimer); isLive = true; playing = false; scrubTarget = null; replayFrames = [];
   shown = { ...liveDynamic, blocks: [...liveCells].map(([k,kind]) => [...unkey(k),kind]), ...(liveRemoved.size?{removedBlocks:[...liveRemoved]}:{}) };
-  cursor = latest; events = liveEvents; view.load(shown,meta.universe); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
+  cursor = latest; shownMetrics=meta.metrics;shownSecondsPerTurn=meta.secondsPerTurn;events = liveEvents; view.load(shown,meta.universe); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
 }
 async function seek(tick: number) {
   const request = ++epoch; replayRequest++; fetching = false; seeking = true; isLive = false; playing = false; scrubTarget = null; replayFrames = []; view.hold();
@@ -248,7 +250,7 @@ async function seek(tick: number) {
   try {
     const response = await fetch(`${worldApi}/state?tick=${cursor}`); if (!response.ok) throw new Error('Could not load recorded history.');
     const data = await response.json() as Boot; if (request !== epoch) return;
-    shown = data.state; cursor = shown.tick; replayClock = cursor; seeking = false; events = data.events; view.load(shown,meta.universe); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
+    shown = data.state; cursor = shown.tick; replayClock = cursor;shownMetrics=data.recordedMetrics;shownSecondsPerTurn=data.recordedSecondsPerTurn;seeking = false; events = data.events; view.load(shown,meta.universe); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
   } catch (error) { if (request === epoch) toast(error instanceof Error ? error.message : 'History unavailable.'); }
   finally { if (request === epoch) seeking = false; }
 }
@@ -274,7 +276,7 @@ function playback(now: number) {
       replayClock = advancePlayback(replayClock, dt, speed, Math.min(destination,replayFrames.at(-1)!.tick));
       let changed = false,memoryChanged=false;
       while (replayFrames.length && replayFrames[0].tick <= replayClock) {
-        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] }; view.update(frame,false,speed); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
+        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] };const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;const turnEvent=frame.events.findLast(event=>event.type==='turn-speed');if(turnEvent)shownSecondsPerTurn=(turnEvent.data as {secondsPerTurn:number}).secondsPerTurn;view.update(frame,false,speed); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
       }
       if (changed) { renderTimeline(); renderInspector(); renderJournal(); }
       if(memoryChanged)void loadMemory();
@@ -296,19 +298,6 @@ function renderTimeline() {
   const count = dayOf(latest);
   if (count !== dayCount) { const day = $<HTMLSelectElement>('day'); day.replaceChildren(); for (let i = 1;i<=count;i++) { const option = new Option(`Day ${String(i).padStart(3,'0')}`,String(i)); day.add(option); } dayCount = count; }
   $<HTMLSelectElement>('day').value = String(dayOf(cursor));
-  const waitingEntries=Object.entries(meta.runtime.agents).filter(([,status])=>['thinking','waiting'].includes(status.state));
-  const waiting=waitingEntries.map(([id])=>shown?.entities.find(e=>e.id===id)?.name??id);
-  const diagnostic=waitingEntries.find(([,status])=>status.state==='waiting'&&status.message&&/model error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}/i.test(status.message))??waitingEntries.find(([,status])=>status.state==='waiting'&&status.message);
-  const turnStatus=$('turn-status');
-  const diagnosticText=diagnostic?.[1].message??'';
-  turnStatus.classList.toggle('error',/error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}/i.test(diagnosticText));
-  if(meta.runtime.phase==='thinking'){
-    const [id,status]=diagnostic??[];
-    const name=id?shown?.entities.find(e=>e.id===id)?.name??id:'';
-    turnStatus.textContent=diagnostic&&name?`Turn ${meta.runtime.turn} · ${name}: ${status?.message??''}`:`Turn ${meta.runtime.turn} · Waiting for ${waiting.join(', ')||'decisions'}`;
-    turnStatus.title=status?.message??'';
-  }else if(meta.runtime.phase==='paused'){turnStatus.textContent='World paused';turnStatus.title='';}
-  else{turnStatus.textContent=`Turn ${meta.runtime.turn} · One world second`;turnStatus.title='';}
   const marks = $('event-marks'); marks.replaceChildren();
   for (const event of liveEvents.filter(e => ['discovery','lost','memory','encounter','agent-error'].includes(e.type))) {
     const mark = document.createElement('i'); mark.style.left = `${event.tick/Math.max(1,latest)*100}%`; mark.className = event.type; mark.title = event.message; marks.append(mark);
@@ -346,6 +335,7 @@ function renderInspector() {
     button.append(avatar,text,status);button.onclick=()=>selectEntity(e.id);button.ondblclick=()=>view.focus(e.id);row.append(button,...(e.kind==='miner-robot'?[mode]:[]),toggle);list.append(row);
   }
   renderDetails();
+  renderStats();
 }
 function renderWorldControls(){
   if(!rosterLayout||!meta)return;
@@ -448,9 +438,26 @@ function renderDetails() {
   if(!learned.length){const p=document.createElement('p');p.className='muted';p.textContent='Nothing discovered yet.';recordPanel.append(p);}
   else for(const knowledge of learned){const p=document.createElement('p');p.textContent=knowledge;recordPanel.append(p);}
 }
+function renderStats(){
+  if(!shown||!meta)return;
+  const totals=Object.values(shownMetrics??{}).reduce((sum,metrics)=>({
+    output:sum.output+(metrics.outputTokens??0),input:sum.input+(metrics.inputTokens??0),cache:sum.cache+(metrics.cachedInputTokens??0),
+  }),{output:0,input:0,cache:0});
+  const rows:[string,string][]=[
+    ['Turns/Speed',`${Math.floor(cursor/TURN_TICKS)} turns (${shownSecondsPerTurn===undefined?'—':shownSecondsPerTurn.toFixed(2)} sec/turn)`],
+    ['Tokens out',shownMetrics?`${totals.output.toLocaleString('en-US')} tok`:'— tok'],
+    ['Tokens in',shownMetrics?`${totals.input.toLocaleString('en-US')} tok`:'— tok'],
+    ['Cached tokens',shownMetrics?`${totals.cache.toLocaleString('en-US')} tok`:'— tok'],
+    ['Cache hit',shownMetrics&&totals.input>0?`${(totals.cache/totals.input*100).toFixed(1)}%`:'—%'],
+  ];
+  const signature=JSON.stringify({rows,hasSnapshot:shownMetrics!==undefined});if(signature===statsSignature)return;
+  statsSignature=signature;
+  const panel=$('stats-rows');panel.replaceChildren();
+  for(const [label,value] of rows){const row=document.createElement('div');row.className='detail-row';row.dataset.detail=label;const name=document.createElement('span');name.textContent=label;const detail=document.createElement('span');detail.className='detail-value';detail.textContent=value;row.append(name,detail);panel.append(row);}
+}
 function renderJournal() {
   const journal = $('journal'), wasAtTop = journal.scrollTop < 20; journal.replaceChildren();
-  const visible = events.filter(e => !['observation','tool-result','decision','turn'].includes(e.type)).reverse(); $('event-count').textContent = String(visible.length);
+  const visible = events.filter(e => !['observation','tool-result','decision','turn','llm-metrics','turn-speed'].includes(e.type)).reverse(); $('event-count').textContent = String(visible.length);
   for (const event of visible) {
     const row = document.createElement('article'); row.className = `journal-entry ${event.type}`;
     const time = document.createElement('button'); time.className = 'event-time'; time.textContent = formatWorldDuration(event.tick); time.title = 'Jump to this recorded moment'; time.onclick = () => void seek(event.tick);
@@ -501,7 +508,7 @@ $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
     const data=await response.json() as Metadata&{inferenceConfig?:InferenceConfig;error?:string};if(!response.ok)throw new Error(data.error??'Could not save configuration.');
     if(meta){meta.mode=data.mode;meta.model=data.model;}
     if(data.inferenceConfig){inferenceConfig=data.inferenceConfig;if(meta)meta.inferenceConfig=inferenceConfig;}
-    $<HTMLInputElement>('parallel-requests').checked=inferenceConfig.parallelRequests!==false;renderModelRows(inferenceConfig.providers);renderProviderStatus();status.textContent='Configuration saved.';
+    $<HTMLInputElement>('parallel-requests').checked=inferenceConfig.parallelRequests!==false;renderModelRows(inferenceConfig.providers);renderProviderStatus(inferenceConfig);status.textContent='Configuration saved.';
   }catch(error){status.textContent=error instanceof Error?error.message:'Could not save configuration.';}
 };
 $('live').onclick = goLive;

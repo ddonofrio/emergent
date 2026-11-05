@@ -428,8 +428,9 @@ export class WorldView {
         group.position.set(...previous.position).lerp(new THREE.Vector3(...e.position),alpha);
         const turn = Math.atan2(Math.sin((e.yaw-previous.yaw)*Math.PI/180),Math.cos((e.yaw-previous.yaw)*Math.PI/180)); group.rotation.y = previous.yaw*Math.PI/180+turn*alpha;
         const walking = e.motion && distanceSquared(e.position,previous.position) > .00001;
-        const gait=Math.sin(visualTime*9);
-        for (const name of ['leg-left','leg-right']) { const leg = group.getObjectByName(name); if (leg) leg.rotation.x = walking ? gait*(name === 'leg-left' ? .32 : -.32) : 0; }
+        const duckInWater=e.kind==='duck'&&!!e.motion?.inWater,gait=Math.sin(visualTime*(duckInWater?18:9));
+        const stride=e.kind==='duck'&&e.motion?Math.min(1,(e.motion.currentSpeed??0)/Math.max(.001,e.motion.speed)):1;
+        for (const name of ['leg-left','leg-right']) { const leg = group.getObjectByName(name); if (leg) leg.rotation.x = walking ? gait*stride*(name === 'leg-left' ? .32 : -.32) : 0; }
         const leftArm=group.getObjectByName('arm-left'),rightArm=group.getObjectByName('arm-right'),punch=this.punches.get(e.id),miner=e.kind==='miner-robot',showcase=e.motion?.kind==='showcase';
         if(miner){
           const progress=showcase?e.motion?.progress??0:0,extension=showcase?(progress<.2?progress/.2:progress>.8?(1-progress)/.2:1):0,pitch=e.motion?.kind==='reverse'?Math.PI/4:walking?-Math.PI/4:0;
