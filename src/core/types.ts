@@ -28,33 +28,12 @@ export type ProceduralTerrain = LayeredTerrain | NoiseTerrain;
 export interface Stack { kind: string; count: number; contents?: string; water?: boolean; }
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; itemId?: string; }
-export interface MilestoneCriterion { kind:'scan'|'locate'|'collect'|'place'|'strike'|'move'|'approach'|'communicate'|'shape'; subject?:string; entityId?:string; }
-export interface TaskAssessment { conditionMet:boolean; remaining:string; }
-export interface AgentProject {
-  goal:string; successCondition:string; progress:string; openQuestions:string[];
-  status?:'active'|'completed'|'suspended'|'abandoned';
-  assessment?:string; evidenceEventIds?:number[];
-}
-export interface AgentPlan {
-  version?: 2 | 3 | 4;
+export interface AgentIntent {
   identity?: string;
-  direction?: string;
-  project?: AgentProject;
-  projectHistory?: AgentProject[];
-  suggestedActions?: string[];
-  suggestionBasis?: { turn:number; tick:number; position:Vec3; yaw:number; holding:string; following:boolean; invalidated?:boolean };
   goal: string;
+  successCondition: string;
+  assessment?: string;
   status: 'active' | 'completed' | 'abandoned' | 'blocked';
-  steps: { task: string; status: 'pending' | 'completed' | 'abandoned' | 'blocked'; evidence?: string; criterion?:MilestoneCriterion; evidenceEventIds?:number[]; assessment?:'agent' }[];
-  explanation: string;
-  createdTurn: number;
-  reviewedTurn: number;
-  stalledReviews?: number;
-  startedAtSecond?: number;
-  inventoryBaseline?: Record<string,number>;
-  reviewedEventId?: number;
-  intention?: string;
-  taskAssessment?: TaskAssessment;
 }
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander' | 'static' | 'automaton'; position: Vec3; yaw: number;
@@ -62,11 +41,9 @@ export interface Entity {
   height: number; hitbox?: { radius: number; height: number; terrainRadius?:number }; color: string; inventory: Inventory | null;
   status: string; speech?: { word: string; until: number };
   speechBudget?: { turn: number; words: number };
-  plan?: AgentPlan;
-  movementPrompt?: { messages:{speakerId:string;speakerName:string;word:string;tick:number;direction:string;distance:number}[] };
-  followInvitation?: { speakerId:string; speakerName:string; tick:number; untilTick:number };
+  intent?: AgentIntent;
   following?: { entityId: string; blocked?: MovementIssue };
-  motion?: { kind?: 'walk' | 'run' | 'reverse' | 'jump' | 'bounce' | 'scan' | 'showcase'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number };
+  motion?: { kind?: 'walk' | 'run' | 'reverse' | 'jump' | 'bounce' | 'scan' | 'showcase'; destination: Vec3; speed: number; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number; scanType?: 'find_material' | 'find_entity'; result?: ActionResult };
   lastAction?: ActionResult;
   automation?: Record<string, unknown>;
   appearance?: { material?:string; widthScale?:number; metalness?:number; roughness?:number; powerModule?:'lithium-battery'|'nuclear-reactor' };
@@ -77,7 +54,7 @@ export interface WorldEvent { id: number; tick: number; time: number; day: numbe
 export interface EncounterNotice { eventId:number; tick:number; otherId:string; otherName:string; message:string; }
 export interface TerrainNotice { eventId:number; tick:number; target:Vec3; kind:string; message:string; }
 export interface BlockImpactNotice { eventId:number; tick:number; itemId:string; kind:string; message:string; }
-export interface HeardVoice { from: string; word: string; tick: number; speakerId?: string; direction?: string; distance?: number; }
+export interface HeardVoice { eventId: number; from: string; word: string; tick: number; speakerId?: string; direction?: string; distance?: number; }
 export interface EntitySighting extends Pick<Entity,'id'|'name'|'kind'|'position'> { holding: Pick<Stack,'kind'|'contents'> | null; }
 export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, HeardVoice[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; terrainNotices:Record<string,TerrainNotice[]>; impactNotices?:Record<string,BlockImpactNotice[]>; }
 export interface WorldState extends DynamicState { blocks: Block[]; removedBlocks?: string[]; }
@@ -91,7 +68,6 @@ export interface UniverseManifest {
   daySeconds: number; materials: Record<string, Material>; vocabulary: string[];
   perception: { range: number; fieldOfView: number; maxBlocks: number };
   agentInstructions: string;
-  planningInstructions?: string;
 }
 export interface Action { action: 'walk' | 'run' | 'reverse' | 'jump' | 'turn' | 'wait' | 'find_material' | 'find_entity' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'open' | 'close' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; x?: number; y?: number; z?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
 export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: number; clearance: number; approach?: { distance:number; angle:number }; jump?: { distance:number; angle:number }; }

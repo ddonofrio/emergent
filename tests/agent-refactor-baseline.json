@@ -1,0 +1,71 @@
+{
+  "architecture": "legacy",
+  "measurement": "Deterministic stub provider with 5ms artificial delay. No real LLM inference or tokenizer. Input tokens are ceil(JSON chars/4), including tool schemas; UTF-8 bytes are exact. Execution is unpaced headless physics.",
+  "scenarios": [
+    {
+      "scenario": "uninterrupted-walk-next-decision",
+      "worldTicks": 80,
+      "inferenceCalls": 3,
+      "inputBytes": 38148,
+      "estimatedInputTokens": 9538,
+      "providerLatencyMs": 21.961,
+      "executionLatencyMs": 145.529,
+      "requests": [
+        {
+          "phase": "set_plan",
+          "inputBytes": 9530,
+          "estimatedInputTokens": 2383,
+          "latencyMs": 4.385
+        },
+        {
+          "phase": "walk",
+          "inputBytes": 14404,
+          "estimatedInputTokens": 3601,
+          "latencyMs": 5.029
+        },
+        {
+          "phase": "say",
+          "inputBytes": 14214,
+          "estimatedInputTokens": 3554,
+          "latencyMs": 12.547
+        }
+      ]
+    },
+    {
+      "scenario": "walk-hear-reply-after-arrival",
+      "worldTicks": 80,
+      "interruptionAt": 40,
+      "inferenceCalls": 4,
+      "inputBytes": 39400,
+      "estimatedInputTokens": 9851,
+      "providerLatencyMs": 44.625,
+      "executionLatencyMs": 131.708,
+      "requests": [
+        {
+          "phase": "set_plan",
+          "inputBytes": 9530,
+          "estimatedInputTokens": 2383,
+          "latencyMs": 17.587
+        },
+        {
+          "phase": "walk",
+          "inputBytes": 14404,
+          "estimatedInputTokens": 3601,
+          "latencyMs": 7.938
+        },
+        {
+          "phase": "continue_moving",
+          "inputBytes": 1087,
+          "estimatedInputTokens": 272,
+          "latencyMs": 11.493
+        },
+        {
+          "phase": "say",
+          "inputBytes": 14379,
+          "estimatedInputTokens": 3595,
+          "latencyMs": 7.607
+        }
+      ]
+    }
+  ]
+}

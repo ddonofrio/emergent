@@ -11,13 +11,17 @@
     "start": "tsx --env-file-if-exists=.env server/index.ts --production",
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "check:startup": "tsx scripts/check-startup.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "benchmark:agents": "tsx scripts/benchmark-agents.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock": "^3.1158.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1158.0",
+    "@earendil-works/pi-ai": "0.82.1",
     "fastnoise-lite": "1.1.1",
-    "three": "0.186.1"
+    "three": "0.186.1",
+    "typebox": "1.1.38"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

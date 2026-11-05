@@ -1,19 +1,16 @@
 import { WorldView } from './view/world-view';
 import { advancePlayback, fastScrubSpeed } from './view/playback-clock';
-import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, TURN_TICKS, type TurnStatus } from './core/time';
+import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, type TurnStatus } from './core/time';
 import { key, unkey, type Frame, type UniverseManifest, type WorldEvent, type WorldState } from './core/types';
 import { knowledgeDescription } from './core/knowledge';
-import { PLAN_REVIEW_INTERVAL } from './core/memory';
-import { SAMPLING_TEMPLATES, type SamplingTemplateId } from './core/sampling-templates';
+import { entityDisplayStatus } from './view/entity-status';
 
-interface ProviderHealth {state:'unknown'|'ok'|'bad';detail:string;inFlight?:boolean;}
-interface Metadata { universe: UniverseManifest; mode: 'demo' | 'llm' | 'waiting'; model: string; providerStrategy:string; llmConfig?:LlmConfig; parallelRequests: boolean; latestTick: number; maxTurns: number | null; runtime: TurnStatus; }
+interface ModelRequestStatus { state:'unknown'|'ok'|'bad'; inFlight:number; detail?:string; }
+interface Metadata { universe: UniverseManifest; mode: 'llm' | 'waiting'; model: string; inferenceConfig?:InferenceConfig; providerStatus?:Record<string,ModelRequestStatus>; latestTick: number; runtime: TurnStatus; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; }
-interface LlmProvider {id:string;type:string;enabled:boolean;name:string;baseUrl:string;model:string;region?:string;displayModel?:string;apiKeyConfigured:boolean;apiKeyRemoved?:boolean;tokenless?:boolean;apiKeySource?:'own'|'provider';apiKeySavedType?:string;apiKeyCleared?:boolean;apiKey?:string;vastTokenConfigured?:boolean;vastTokenRemoved?:boolean;vastTokenCleared?:boolean;vastToken?:string;vastContainerLabel?:string;samplingTemplate?:SamplingTemplateId;copyFromId?:string;health?:ProviderHealth;}
-type ReasoningProfile='default'|'minimum'|'medium'|'maximum';
-interface ReasoningSettings {movement:ReasoningProfile;action:ReasoningProfile;planning:ReasoningProfile;planCompaction:ReasoningProfile;journalCompaction:ReasoningProfile;}
-interface LlmConfig {strategy:string;reasoning:ReasoningSettings;currentStatus?:string;providers:LlmProvider[];}
-interface ProviderModelOption {id:string;label:string;}
+interface ModelProvider { id:string; type:string; name:string; enabled?:boolean; baseUrl:string; model:string; region?:string; tokenless?:boolean; contextWindow?:number; maxOutputTokens?:number; reasoning?:string; hasApiKey?:boolean; apiKey?:string; clearApiKey?:boolean; hasVastToken?:boolean; vastToken?:string; clearVastToken?:boolean; vastContainerLabel?:string; }
+interface InferenceConfig { version:1; parallelRequests?:boolean; providers:ModelProvider[]; }
+interface ProviderModelOption { id:string; label:string; contextWindow?:number; maxOutputTokens?:number; }
 const universeId=/^\/universes\/([a-z0-9-]+)\/?$/.exec(window.location.pathname)?.[1];
 if(!universeId)throw new Error('A universe route is required.');
 const worldApi=`/api/universes/${universeId}`;
@@ -46,7 +43,7 @@ app.innerHTML = `
       <header class="panel-heading"><h2>Properties</h2><button id="focus-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-label="Collapse Properties panel" title="Collapse Properties panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span>Properties</span></button></header>
       <section class="roster-world-controls" aria-label="World control"><div class="section-heading"><h2>World control</h2><span id="roster-world-state">Stopped</span></div><div class="roster-control-actions"><button id="roster-play" type="button">Play</button><button id="roster-stop" type="button">Stop</button><button id="roster-reset" class="danger" type="button">Restart from zero</button></div><p id="roster-control-message" role="status"></p></section>
       <section id="roster-view-controls" class="roster-view-controls" aria-label="World view controls"><div class="section-heading"><h2>View</h2></div></section>
-      <section class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">09</span></div><p class="roster-keyboard-hint">Select a stationary character and use the arrow keys to move it.</p><div id="entity-list"></div><p id="roster-move-message" class="roster-move-message" role="status"></p></section>
+      <section class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">09</span></div><div id="entity-list"></div><p id="roster-move-message" class="roster-move-message" role="status"></p></section>
       <section id="record-knowledge" class="record-knowledge" aria-label="Private notes and learned knowledge"></section>
       <section class="focus-section"><div id="details" class="details"></div></section>
     </aside>
@@ -55,16 +52,8 @@ app.innerHTML = `
     <header class="settings-header"><button id="settings-back" class="settings-back">Back</button><div><span class="eyebrow">EMERGENT / SETTINGS</span><h1 id="settings-title">Settings</h1></div></header>
     <div class="settings-content">
       <form id="llm-settings-form">
-        <section class="settings-section reasoning-section"><h2>Reasoning levels</h2><p>Choose the reasoning profile for each inference phase. Default leaves the effort to the provider.</p><div class="reasoning-grid">
-          <label class="reasoning-field">Movement<select id="reasoning-movement"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum">Maximum</option></select></label>
-          <label class="reasoning-field">Action<select id="reasoning-action"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum">Maximum</option></select></label>
-          <label class="reasoning-field">Planning<select id="reasoning-planning"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum" selected>Maximum</option></select></label>
-          <label class="reasoning-field">Plan compaction<select id="reasoning-plan-compaction"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum">Maximum</option></select></label>
-          <label class="reasoning-field">Journal compaction<select id="reasoning-journal-compaction"><option value="default">Default</option><option value="minimum">Minimum</option><option value="medium">Medium</option><option value="maximum">Maximum</option></select></label>
-        </div></section>
-        <section class="settings-section"><h2>Request settings</h2><label class="request-setting" title="Changes apply from the next turn."><input id="parallel-requests" type="checkbox" checked disabled>Parallel requests</label></section>
-        <section class="settings-section"><div class="settings-section-heading"><div><h2>LLM configuration</h2><p>Choose one or more providers and models for agent requests.</p></div><button id="add-model" class="secondary-button" type="button">Add model</button></div><div id="model-list" class="model-list"></div><p class="settings-note">Amazon Bedrock uses an API key and AWS region. Anthropic's native adapter is not connected yet.</p></section>
-        <section class="settings-section algorithm-section"><label for="settings-strategy"><h2>Selection algorithm</h2></label><select id="settings-strategy"><option value="first-only">Single model</option><option value="round-robin">Round robin</option><option value="fallback">Fallback</option><option value="master-slaves">Master / slaves</option></select><p id="strategy-description" class="settings-note">Use only the first active model in the list.</p></section>
+        <section class="settings-section"><h2>Request settings</h2><label class="request-setting"><input id="parallel-requests" type="checkbox" checked>Parallel requests</label><p class="settings-note">Allow multiple model requests at once. Uncheck to send one request at a time.</p></section>
+        <section class="settings-section"><div class="settings-section-heading"><div><h2>Models</h2><p>Each inhabitant keeps one ongoing conversation. Active models are tried in this order when inference is unavailable. World time stays frozen while an agent is thinking or retrying.</p></div><button id="add-model" class="secondary-button" type="button">Add model</button></div><div id="model-list" class="model-list"></div><p class="settings-note">Credentials stay on the server. Context limits control LittleWhale conversation compaction. Provider changes apply to the next request in each existing conversation.</p></section>
         <div class="settings-actions"><span id="settings-status" role="status"></span><button class="save-button" type="submit">Save configuration</button></div>
       </form>
     </div>
@@ -90,141 +79,70 @@ let dayCount = 0,detailsSignature='';
 let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[]}|undefined;
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
-const defaultReasoning:ReasoningSettings={movement:'default',action:'default',planning:'maximum',planCompaction:'default',journalCompaction:'default'};
-let llmConfig:LlmConfig={strategy:'first-only',reasoning:{...defaultReasoning},providers:[]};
-const modelOptionsCache=new Map<string,ProviderModelOption[]>();
-const reasoningControlIds:Record<keyof ReasoningSettings,string>={movement:'reasoning-movement',action:'reasoning-action',planning:'reasoning-planning',planCompaction:'reasoning-plan-compaction',journalCompaction:'reasoning-journal-compaction'};
-function applyReasoningSettings(settings:ReasoningSettings=defaultReasoning){for(const [key,id] of Object.entries(reasoningControlIds))$<HTMLSelectElement>(id).value=settings[key as keyof ReasoningSettings]??defaultReasoning[key as keyof ReasoningSettings];}
-function readReasoningSettings(){return Object.fromEntries(Object.entries(reasoningControlIds).map(([key,id])=>[key,$<HTMLSelectElement>(id).value])) as unknown as ReasoningSettings;}
+let inferenceConfig:InferenceConfig={version:1,parallelRequests:true,providers:[]};
 function settingField(parent:HTMLElement,title:string,field:string,value:string,type='text',placeholder=''){
   const label=document.createElement('label');label.className='model-field';label.textContent=title;
   const input=document.createElement('input');input.type=type;input.dataset.field=field;input.value=value;input.placeholder=placeholder;input.autocomplete=type==='password'?'new-password':'off';label.append(input);parent.append(label);return input;
 }
-function readModelRows():LlmProvider[]{
+function readModelRows():ModelProvider[]{
   return Array.from($('model-list').children).map(card=>{
     const field=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement|HTMLSelectElement).value;
-    const enabled=(card.querySelector('[data-field="enabled"]') as HTMLInputElement).checked;
-    const apiKey=card.querySelector('[data-field="apiKey"]') as HTMLInputElement;
-    const vastToken=card.querySelector('[data-field="vastToken"]') as HTMLInputElement;
-    const tokenless=(card.querySelector('[data-field="tokenless"]') as HTMLInputElement).checked;
-    const apiKeySource=apiKey.dataset.keySource as LlmProvider['apiKeySource'];
-    const apiKeySavedType=apiKey.dataset.savedType||undefined,apiKeyCleared=apiKey.dataset.clear==='true',apiKeyRemoved=apiKey.dataset.removed==='true';
-    const copyFromId=(card as HTMLElement).dataset.copyFromId;
-    return{id:(card as HTMLElement).dataset.id!,type:field('type'),enabled,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),samplingTemplate:field('samplingTemplate') as SamplingTemplateId||undefined,apiKey:apiKey.value,apiKeyConfigured:!!apiKeySavedType||!!apiKeySource,apiKeyRemoved,tokenless,vastToken:vastToken.value,vastTokenConfigured:vastToken.dataset.configured==='true',vastTokenRemoved:vastToken.dataset.removed==='true',vastTokenCleared:vastToken.dataset.clear==='true',vastContainerLabel:field('vastContainerLabel'),...(copyFromId?{copyFromId}:{}),...(apiKeySource?{apiKeySource}:{}),...(apiKeySavedType?{apiKeySavedType}:{}),...(apiKeyCleared?{apiKeyCleared:true}:{})};
+    const checked=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement).checked;
+    const apiKey=field('apiKey').trim(),vastToken=field('vastToken').trim();
+    const contextWindow=Number(field('contextWindow')),maxOutputTokens=Number(field('maxOutputTokens'));
+    return {id:(card as HTMLElement).dataset.id!,type:field('type'),name:field('name'),enabled:checked('enabled'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),tokenless:checked('tokenless'),contextWindow,maxOutputTokens,
+      ...(field('reasoning')?{reasoning:field('reasoning')}:{ }),hasApiKey:(card as HTMLElement).dataset.hasApiKey==='true',clearApiKey:checked('clearApiKey'),...(apiKey?{apiKey}:{}),
+      hasVastToken:(card as HTMLElement).dataset.hasVastToken==='true',clearVastToken:checked('clearVastToken'),...(vastToken?{vastToken}:{}),vastContainerLabel:field('vastContainerLabel')};
   });
 }
-function renderModelRows(providers:LlmProvider[]){
+function renderModelRows(providers:ModelProvider[]){
   const list=$('model-list');list.replaceChildren();
   for(const provider of providers){
-    const card=document.createElement('fieldset');card.className='model-card';card.dataset.id=provider.id;card.dataset.copyFromId=provider.copyFromId??'';
+    const card=document.createElement('fieldset');card.className='model-card expanded';card.dataset.id=provider.id;card.dataset.hasApiKey=String(provider.hasApiKey===true);card.dataset.hasVastToken=String(provider.hasVastToken===true);
     const heading=document.createElement('div');heading.className='model-card-heading';
-    const expand=document.createElement('button');expand.type='button';expand.className='model-expand';expand.textContent='+';expand.title='Expand model settings';expand.setAttribute('aria-label',`Expand ${provider.name} settings`);expand.setAttribute('aria-expanded','false');heading.append(expand);
-    const enabledLabel=document.createElement('label');enabledLabel.className='model-enabled';enabledLabel.title='Include this model in the selection strategy.';
-    const enabledInput=document.createElement('input');enabledInput.type='checkbox';enabledInput.dataset.field='enabled';enabledInput.checked=provider.enabled!==false;
-    const enabledText=document.createElement('span');enabledText.textContent='Active';enabledLabel.append(enabledInput,enabledText);
-    const titleBlock=document.createElement('span');titleBlock.className='model-title';
-    const title=document.createElement('strong');title.textContent=provider.name||'Model';
-    const summary=document.createElement('small');summary.textContent=provider.model||provider.type;titleBlock.append(title,summary);heading.append(titleBlock);
-    const order=document.createElement('div');order.className='model-order-controls';
+    const title=document.createElement('strong');title.textContent=provider.name||'Model';heading.append(title);
+    const checkbox=(parent:HTMLElement,title:string,field:string,checked:boolean)=>{const label=document.createElement('label');label.className='request-setting';const input=document.createElement('input');input.type='checkbox';input.dataset.field=field;input.checked=checked;label.append(input,document.createTextNode(title));parent.append(label);return input;};
+    checkbox(heading,'Active','enabled',provider.enabled!==false);
     const move=(delta:number)=>{const rows=readModelRows(),from=rows.findIndex(row=>row.id===provider.id),to=from+delta;if(to<0||to>=rows.length)return;[rows[from],rows[to]]=[rows[to],rows[from]];renderModelRows(rows);};
-    const up=document.createElement('button');up.type='button';up.className='model-order-button';up.textContent='↑';up.title='Move model up';up.setAttribute('aria-label',`Move ${provider.name} up`);up.disabled=providers.indexOf(provider)===0;up.onclick=()=>move(-1);
-    const down=document.createElement('button');down.type='button';down.className='model-order-button';down.textContent='↓';down.title='Move model down';down.setAttribute('aria-label',`Move ${provider.name} down`);down.disabled=providers.indexOf(provider)===providers.length-1;down.onclick=()=>move(1);
-    order.append(up,down);heading.append(order);
-    heading.append(enabledLabel);
-    const remove=document.createElement('button');remove.type='button';remove.className='remove-model';remove.textContent='Remove';remove.onclick=()=>{card.remove();updateStrategyControl();};heading.append(remove);card.append(heading);
+    for(const [label,delta] of [['Up',-1],['Down',1]] as const){const button=document.createElement('button');button.type='button';button.className='model-order-button';button.textContent=label;button.disabled=providers.indexOf(provider)+delta<0||providers.indexOf(provider)+delta>=providers.length;button.onclick=()=>move(delta);heading.append(button);}
+    const remove=document.createElement('button');remove.type='button';remove.className='remove-model';remove.textContent='Remove';remove.onclick=()=>card.remove();heading.append(remove);card.append(heading);
     const grid=document.createElement('div');grid.className='model-fields';
-    grid.hidden=true;
-    const typeLabel=document.createElement('label');typeLabel.className='model-field';typeLabel.textContent='Provider';
-    const type=document.createElement('select');type.dataset.field='type';
-    for(const [value,labelText,disabled] of [['openai-compatible','OpenAI Compatible',false],['vast-ai','Vast.ai',false],['openai','OpenAI',false],['openrouter','OpenRouter',false],['amazon-bedrock','Amazon Bedrock',false],['anthropic','Anthropic (adapter pending)',true]] as [string,string,boolean][]){const option=new Option(labelText,value);option.disabled=disabled;type.add(option);}
+    const typeLabel=document.createElement('label');typeLabel.className='model-field';typeLabel.textContent='Provider';const type=document.createElement('select');type.dataset.field='type';
+    for(const [value,label] of [['openai-compatible','OpenAI Compatible'],['openai','OpenAI'],['openrouter','OpenRouter'],['vast-ai','Vast.ai'],['amazon-bedrock','Amazon Bedrock']])type.add(new Option(label,value));
     type.value=provider.type;typeLabel.append(type);grid.append(typeLabel);
-    const nameInput=settingField(grid,'Name','name',provider.name);
+    const name=settingField(grid,'Name','name',provider.name);name.oninput=()=>title.textContent=name.value||'Model';
     const endpoint=settingField(grid,'Base URL','baseUrl',provider.baseUrl,'url','https://...');
-    const modelField=document.createElement('div');modelField.className='model-field';
-    const modelLabel=document.createElement('label');modelLabel.textContent='Model';modelLabel.htmlFor=`model-picker-${provider.id}`;
-    const modelControl=document.createElement('div');modelControl.className='model-picker-control';
-    const modelSelect=document.createElement('input');modelSelect.id=modelLabel.htmlFor;modelSelect.dataset.field='model';modelSelect.value=provider.model;modelSelect.placeholder='Enter a model ID or refresh';
-    const modelOptions=document.createElement('datalist');modelOptions.id=`model-options-${provider.id}`;modelSelect.setAttribute('list',modelOptions.id);
-    const refreshModelsButton=document.createElement('button');refreshModelsButton.type='button';refreshModelsButton.className='model-refresh';refreshModelsButton.textContent='Refresh';refreshModelsButton.title='Refresh available models';
-    const modelStatus=document.createElement('small');modelStatus.className='model-discovery-status';modelControl.append(modelSelect,modelOptions,refreshModelsButton);modelField.append(modelLabel,modelControl,modelStatus);grid.append(modelField);
-    const apiKey=settingField(grid,'API key','apiKey',provider.apiKey??'', 'password');
-    const vastToken=settingField(grid,'Vast.ai token','vastToken',provider.vastToken??'', 'password');
-    const vastContainerLabel=settingField(grid,'Vast container label','vastContainerLabel',provider.vastContainerLabel??'','text','C.12345');
-    const region=settingField(grid,'AWS region','region',provider.region??'','text','e.g. eu-west-1');
-    const samplingTemplateField=document.createElement('label');samplingTemplateField.className='model-field';samplingTemplateField.textContent='Sampling template';
-    const samplingTemplate=document.createElement('select');samplingTemplate.dataset.field='samplingTemplate';samplingTemplate.add(new Option('Provider defaults',''));
-    for(const [id,template] of Object.entries(SAMPLING_TEMPLATES))samplingTemplate.add(new Option(template.label,id));
-    samplingTemplate.value=provider.samplingTemplate??'';samplingTemplateField.append(samplingTemplate);grid.append(samplingTemplateField);
-    const updateSamplingTemplateTitle=()=>{const template=SAMPLING_TEMPLATES[samplingTemplate.value as SamplingTemplateId];samplingTemplate.title=template?`Temperature ${template.parameters.temperature}, top-p ${template.parameters.top_p}, top-k ${template.parameters.top_k}, min-p ${template.parameters.min_p}, presence penalty ${template.parameters.presence_penalty}.`:'Use the inference provider sampling defaults.';};
-    samplingTemplate.onchange=updateSamplingTemplateTitle;updateSamplingTemplateTitle();
-    const tokenlessField=document.createElement('label');tokenlessField.className='request-setting tokenless-setting';tokenlessField.title='Never send an Authorization header to this OpenAI-compatible server.';
-    const tokenlessInput=document.createElement('input');tokenlessInput.type='checkbox';tokenlessInput.dataset.field='tokenless';tokenlessInput.checked=provider.tokenless===true;
-    const tokenlessText=document.createElement('span');tokenlessText.textContent='Tokenless server';tokenlessField.append(tokenlessInput,tokenlessText);grid.append(tokenlessField);
-    const endpointField=endpoint.closest('.model-field')!,apiKeyField=apiKey.closest('.model-field')!,vastTokenField=vastToken.closest('.model-field')!,vastContainerLabelField=vastContainerLabel.closest('.model-field')!,regionField=region.closest('.model-field')!;
-    const savedKeyType=provider.apiKeySavedType??(provider.apiKeyConfigured&&provider.apiKeySource!=='provider'?provider.type:'');apiKey.dataset.savedType=savedKeyType;apiKey.dataset.clear=String(provider.apiKeyCleared===true);apiKey.dataset.removed=String(provider.apiKeyRemoved===true);
-    const clearKeyButton=document.createElement('button');clearKeyButton.type='button';clearKeyButton.className='api-key-clear';
-    const apiKeyStatus=document.createElement('small');apiKeyStatus.className='api-key-status';apiKeyField.append(clearKeyButton,apiKeyStatus);
-    vastToken.dataset.configured=String(provider.vastTokenConfigured===true);vastToken.dataset.clear=String(provider.vastTokenCleared===true);vastToken.dataset.removed=String(provider.vastTokenRemoved===true);
-    const clearVastTokenButton=document.createElement('button');clearVastTokenButton.type='button';clearVastTokenButton.className='api-key-clear';
-    const vastTokenStatus=document.createElement('small');vastTokenStatus.className='api-key-status';vastTokenField.append(clearVastTokenButton,vastTokenStatus);
-    const updateProviderFields=()=>{
-      const bedrock=type.value==='amazon-bedrock',openaiCompatible=type.value==='openai-compatible',vast=type.value==='vast-ai',samplingCompatible=openaiCompatible||vast;if(!openaiCompatible)tokenlessInput.checked=false;if(!samplingCompatible)samplingTemplate.value='';endpointField.classList.toggle('hidden',bedrock);apiKeyField.classList.toggle('hidden',openaiCompatible&&tokenlessInput.checked);vastTokenField.classList.toggle('hidden',!vast);vastContainerLabelField.classList.toggle('hidden',!vast);regionField.classList.toggle('hidden',!bedrock);tokenlessField.classList.toggle('hidden',!openaiCompatible);samplingTemplateField.classList.toggle('hidden',!samplingCompatible);updateSamplingTemplateTitle();
-      const clearing=apiKey.dataset.clear==='true',removed=apiKey.dataset.removed==='true'&&type.value===provider.type,ownKey=!clearing&&!removed&&apiKey.dataset.savedType===type.value;
-      const providerKey=!clearing&&!removed&&!ownKey&&llmConfig.providers.some(candidate=>candidate.type===type.value&&candidate.apiKeyConfigured);
-      apiKey.dataset.keySource=ownKey?'own':providerKey?'provider':'';
-      apiKeyField.firstChild!.textContent=vast?'Upstream API key (optional)':'API key';
-      apiKey.placeholder=clearing?'Token will be removed when saved':removed?'No token saved for this model':ownKey?'Saved on server; blank keeps it':providerKey?'Saved provider key; blank reuses it':vast?'Enter an upstream API key only if the service also requires one':type.value==='openai-compatible'?'Enter API key (optional for local models)':'Enter API key';
-      clearKeyButton.hidden=apiKey.dataset.savedType!==type.value&&!clearing;clearKeyButton.textContent=clearing?'Undo token removal':'Remove saved token';apiKeyStatus.textContent=clearing?'The model is inactive until a token is configured.':'';
-      const vastClearing=vastToken.dataset.clear==='true',vastRemoved=vastToken.dataset.removed==='true',vastConfigured=vastToken.dataset.configured==='true'&&!vastClearing&&!vastRemoved;
-      vastToken.placeholder=vastClearing?'Vast.ai token will be removed when saved':vastRemoved?'No Vast.ai token saved':vastConfigured?'Saved on server; blank keeps it':'Enter the Bearer token from onstart.log';
-      clearVastTokenButton.hidden=!vastConfigured&&!vastClearing;clearVastTokenButton.textContent=vastClearing?'Undo token removal':'Remove saved token';vastTokenStatus.textContent=vastClearing?'The Vast.ai token will be removed when saved.':'';
-    };
-    tokenlessInput.onchange=updateProviderFields;
-    type.onchange=()=>{
-      if(type.value!=='vast-ai')card.dataset.copyFromId='';
-      if(type.value==='openai')endpoint.value='https://api.openai.com/v1';else if(type.value==='openrouter')endpoint.value='https://openrouter.ai/api/v1';else if(!endpoint.value||endpoint.value.includes('api.openai.com')||endpoint.value.includes('openrouter.ai'))endpoint.value='';
-      modelSelect.value='';modelOptions.replaceChildren();modelStatus.textContent='';updateProviderFields();summary.textContent=type.options[type.selectedIndex]?.text||type.value;void refreshModels(true);
-    };
-    updateProviderFields();
-    const updateActive=()=>{card.classList.toggle('disabled-model',!enabledInput.checked);updateStrategyControl();};
-    enabledInput.onchange=updateActive;updateActive();
-    const restoreAfterTokenRemoval=()=>{apiKey.dataset.clear='false';apiKey.dataset.removed='false';if(apiKey.dataset.wasEnabled==='true')enabledInput.checked=true;updateActive();updateProviderFields();};
-    clearKeyButton.onclick=event=>{event.preventDefault();event.stopPropagation();if(apiKey.dataset.clear==='true'){restoreAfterTokenRemoval();return;}apiKey.dataset.wasEnabled=String(enabledInput.checked);apiKey.dataset.clear='true';apiKey.value='';enabledInput.checked=false;updateActive();updateProviderFields();};
-    apiKey.oninput=()=>{if(apiKey.value.trim()&&apiKey.dataset.clear==='true')restoreAfterTokenRemoval();};
-    clearVastTokenButton.onclick=event=>{event.preventDefault();event.stopPropagation();const clearing=vastToken.dataset.clear==='true';vastToken.dataset.clear=String(!clearing);vastToken.value='';if(clearing)vastToken.dataset.removed='false';updateProviderFields();};
-    vastToken.oninput=()=>{if(vastToken.value.trim()){vastToken.dataset.clear='false';vastToken.dataset.removed='false';}updateProviderFields();};
-    nameInput.oninput=()=>{title.textContent=nameInput.value||'Model';expand.setAttribute('aria-label',`Expand ${title.textContent} settings`);};
-    modelSelect.oninput=()=>{summary.textContent=modelSelect.value||type.options[type.selectedIndex]?.text||type.value;};
-    let discoveryRequest=0;
-    const applyModels=(models:ProviderModelOption[],selectFirst:boolean,preserveEmpty=false)=>{
-      const current=modelSelect.value;
-      modelOptions.replaceChildren(...models.map(model=>new Option(model.label===model.id?model.id:`${model.label} (${model.id})`,model.id)));
-      if(!preserveEmpty&&(selectFirst||!current)&&models[0])modelSelect.value=models[0].id;else modelSelect.value=current;
-      summary.textContent=modelSelect.value||type.options[type.selectedIndex]?.text||type.value;
-    };
-    const refreshModels=async(automatic=false)=>{
-      const bedrock=type.value==='amazon-bedrock';
-      if((bedrock&&!region.value.trim())||(!bedrock&&!endpoint.value.trim())){if(!automatic)modelStatus.textContent=bedrock?'Enter an AWS region first.':'Enter a base URL first.';return;}
-      const preserveEmpty=automatic&&!!card.dataset.copyFromId&&!modelSelect.value;
-      const cacheKey=JSON.stringify([provider.id,type.value,endpoint.value.trim(),region.value.trim(),vastContainerLabel.value.trim()]),cached=modelOptionsCache.get(cacheKey);
-      if(automatic&&cached){applyModels(cached,!modelSelect.value||modelSelect.value==='auto-detect loaded model',preserveEmpty);modelStatus.textContent=`${cached.length} models available.`;return;}
-      const request=++discoveryRequest;refreshModelsButton.disabled=true;modelStatus.textContent='Loading models…';
+    const model=settingField(grid,'Model ID','model',provider.model,'text','Enter a model ID or refresh');
+    const modelList=document.createElement('datalist');modelList.id=`model-options-${provider.id}`;model.setAttribute('list',modelList.id);grid.append(modelList);
+    const refresh=document.createElement('button');refresh.type='button';refresh.className='model-refresh';refresh.textContent='Refresh models';grid.append(refresh);
+    const modelStatus=document.createElement('small');modelStatus.className='model-discovery-status';grid.append(modelStatus);
+    const apiKey=settingField(grid,'API key','apiKey',provider.apiKey??'','password',provider.hasApiKey?'Saved on server; blank keeps it':'Enter API key');
+    const clearKey=checkbox(grid,'Remove saved API key','clearApiKey',provider.clearApiKey===true);
+    const tokenless=checkbox(grid,'Tokenless server','tokenless',provider.tokenless===true);
+    const region=settingField(grid,'AWS region','region',provider.region??'','text','eu-west-1');
+    const vastToken=settingField(grid,'Vast.ai gateway token','vastToken',provider.vastToken??'','password',provider.hasVastToken?'Saved on server; blank keeps it':'Optional gateway token');
+    const clearVast=checkbox(grid,'Remove saved gateway token','clearVastToken',provider.clearVastToken===true);
+    const vastLabel=settingField(grid,'Vast.ai container label','vastContainerLabel',provider.vastContainerLabel??'','text','C.12345');
+    const context=settingField(grid,'Context window (tokens)','contextWindow',String(provider.contextWindow??49152),'number');context.min='8192';context.step='1';
+    const output=settingField(grid,'Maximum output tokens','maxOutputTokens',String(provider.maxOutputTokens??4096),'number');output.min='32';output.step='1';
+    const reasoningLabel=document.createElement('label');reasoningLabel.className='model-field';reasoningLabel.textContent='Reasoning';const reasoning=document.createElement('select');reasoning.dataset.field='reasoning';reasoning.add(new Option('Provider default',''));for(const value of ['off','minimal','low','medium','high','xhigh'])reasoning.add(new Option(value,value));reasoning.value=provider.reasoning??'';reasoningLabel.append(reasoning);grid.append(reasoningLabel);
+    const updateFields=()=>{const bedrock=type.value==='amazon-bedrock',vast=type.value==='vast-ai';endpoint.parentElement!.hidden=bedrock;region.parentElement!.hidden=!bedrock;vastToken.parentElement!.hidden=!vast;clearVast.parentElement!.hidden=!vast;vastLabel.parentElement!.hidden=!vast;tokenless.parentElement!.hidden=type.value!=='openai-compatible';};
+    type.onchange=()=>{if(type.value==='openai')endpoint.value='https://api.openai.com/v1';else if(type.value==='openrouter')endpoint.value='https://openrouter.ai/api/v1';updateFields();};updateFields();
+    refresh.onclick=async()=>{
+      refresh.disabled=true;modelStatus.textContent='Discovering models...';
       try{
-        const apiKeyValue=apiKey.value.trim(),vastTokenValue=vastToken.value.trim(),copyFromId=card.dataset.copyFromId,body={id:provider.id,type:type.value,baseUrl:endpoint.value,region:region.value,clearApiKey:apiKey.dataset.clear==='true',clearVastToken:vastToken.dataset.clear==='true',vastContainerLabel:vastContainerLabel.value,tokenless:tokenlessInput.checked,...(copyFromId?{copyFromId}:{}),...(apiKeyValue?{apiKey:apiKeyValue}:{}),...(vastTokenValue?{vastToken:vastTokenValue}:{})};
-        const response=await fetch('/api/llm-models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-        const data=await response.json() as {models?:ProviderModelOption[];error?:string};
-        if(!response.ok)throw new Error(data.error??'Could not load models.');
-        const models=(data.models??[]).filter(model=>model&&typeof model.id==='string'&&typeof model.label==='string');if(!models.length)throw new Error('The provider returned no models.');
-        if(request!==discoveryRequest)return;modelOptionsCache.set(cacheKey,models);applyModels(models,!modelSelect.value||modelSelect.value==='auto-detect loaded model',preserveEmpty);modelStatus.textContent=`${models.length} models available.`;
-      }catch(error){if(request===discoveryRequest)modelStatus.textContent=error instanceof Error?error.message:'Could not load models.';}
-      finally{if(request===discoveryRequest)refreshModelsButton.disabled=false;}
+        const row=readModelRows().find(row=>row.id===provider.id)!;
+        const response=await fetch(`${worldApi}/models`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(row)});
+        const data=await response.json() as {models?:ProviderModelOption[];error?:string};if(!response.ok)throw new Error(data.error??'Model discovery failed.');
+        const models=data.models??[];modelList.replaceChildren(...models.map(value=>new Option(value.label,value.id)));
+        if(!model.value&&models.length){model.value=models[0].id;if(models[0].contextWindow)context.value=String(models[0].contextWindow);if(models[0].maxOutputTokens)output.value=String(models[0].maxOutputTokens);}
+        modelStatus.textContent=`${models.length} models available.`;
+      }catch(error){modelStatus.textContent=error instanceof Error?error.message:'Model discovery failed.';}
+      finally{refresh.disabled=false;}
     };
-    refreshModelsButton.onclick=()=>void refreshModels();
-    queueMicrotask(()=>void refreshModels(true));
-    expand.onclick=()=>{const open=grid.hidden;grid.hidden=!open;card.classList.toggle('expanded',open);expand.textContent=open?'−':'+';expand.title=`${open?'Collapse':'Expand'} model settings`;expand.setAttribute('aria-label',`${open?'Collapse':'Expand'} ${title.textContent} settings`);expand.setAttribute('aria-expanded',String(open));};
+    apiKey.oninput=()=>{if(apiKey.value.trim())clearKey.checked=false;};vastToken.oninput=()=>{if(vastToken.value.trim())clearVast.checked=false;};
     card.append(grid);list.append(card);
   }
-  updateStrategyControl();
 }
 const inhabitantPortraits:Record<string,string>={
   Flint:new URL('./assets/flint.png',import.meta.url).href,
@@ -246,67 +164,34 @@ function minerRobotPortrait(entity:WorldState['entities'][number]){
     :entity.appearance?.powerModule==='nuclear-reactor'?'<path d="M5 25h38v19H5z" fill="#303638"/><circle cx="7" cy="34" r="5" fill="#77817e"/><circle cx="7" cy="34" r="2.5" fill="#d7eea3"/><circle cx="41" cy="34" r="5" fill="#77817e"/><circle cx="41" cy="34" r="2.5" fill="#d7eea3"/>':'';
   return `<svg class="miner-robot-portrait" viewBox="0 0 48 52" aria-hidden="true"><rect width="48" height="52" rx="4" fill="#2c3b30"/><g transform="translate(${offset} 0) scale(${width} 1)">${moduleVisual}<path d="M9 41h30v7H9z" fill="${palette.dark}"/><path d="M5 39h10v12H5zm28 0h10v12H33z" fill="${palette.black}"/><circle cx="10" cy="43" r="3" fill="${palette.mid}"/><circle cx="10" cy="48" r="2" fill="${palette.light}"/><circle cx="38" cy="43" r="3" fill="${palette.mid}"/><circle cx="38" cy="48" r="2" fill="${palette.light}"/><path d="M11 27h26v16H11z" fill="${palette.base}"/><path d="M16 23h16v5H16z" fill="${palette.dark}"/><path d="M8 10h32v15H8z" fill="${palette.mid}"/><path d="M11 14h26v8H11z" fill="${palette.black}"/><path d="M14 16h7v4h-7zm13 0h7v4h-7z" fill="#e2bd70"/><path d="M21 5h6v6h-6z" fill="${palette.dark}"/><path d="M22 6h4v3h-4z" fill="#f0d994"/><path d="M7 30h4v11H7zm30 0h4v11h-4z" fill="${palette.mid}"/></g></svg>`;
 }
-function updateStrategyControl(){
-  const control=$<HTMLSelectElement>('settings-strategy'),count=Array.from($('model-list').querySelectorAll<HTMLInputElement>('[data-field="enabled"]')).filter(input=>input.checked).length,description=$('strategy-description');
-  control.disabled=count<2;
-  if(count===0){control.value='first-only';description.textContent='No active models are configured.';return;}
-  if(count===1){control.value='first-only';description.textContent='Only one model is active.';return;}
-  const messages:Record<string,string>={'first-only':'Use only the first active model in the list.','round-robin':'Rotate to the next model for each request; try others if one fails.','fallback':'Keep using the last successful model; move to the next when it fails.','master-slaves':'Contact the primary model every time; try the remaining models only if it fails.'};
-  description.textContent=messages[control.value]??messages.fallback;
-}
 async function loadProviderStatus(){
-  try{
-    const response=await fetch('/api/llm-config');if(!response.ok)return;llmConfig=await response.json() as LlmConfig;
-    if(llmConfig.providers.some(provider=>!provider.health||provider.health.state==='unknown')){
-      const eventResponse=await fetch(`${worldApi}/events?tick=${meta?.latestTick??latest}`);
-      if(eventResponse.ok){
-        const events=await eventResponse.json() as WorldEvent[];let mostRecent:{provider:string;turn:number}|undefined;
-        for(const event of events){
-          if(event.type!=='decision'&&event.type!=='movement-decision')continue;
-          const providerId=(event.data as {provider?:unknown}|undefined)?.provider;if(typeof providerId!=='string')continue;
-          const provider=llmConfig.providers.find(candidate=>candidate.id===providerId);if(!provider)continue;
-          const turn=Math.floor(event.tick/TURN_TICKS)+1;
-          if(!provider.health||provider.health.state==='unknown')provider.health={state:'ok',detail:`Successful inference in turn ${turn}.`};
-          mostRecent={provider:provider.name,turn};
-        }
-        if(!llmConfig.currentStatus&&mostRecent)llmConfig.currentStatus=`${mostRecent.provider}: last successful inference in turn ${mostRecent.turn}.`;
-      }
-    }
-    if(meta){meta.llmConfig=llmConfig;renderProviderStatus();}
-  }catch{/* The turn status remains available if provider details cannot be loaded. */}
+  try{const response=await fetch(`${worldApi}/inference-config`);if(!response.ok)return;inferenceConfig=await response.json() as InferenceConfig;if(meta){meta.inferenceConfig=inferenceConfig;renderProviderStatus();}}
+  catch{/* Runtime status remains available while settings are unavailable. */}
 }
 async function loadLlmSettings(){
-  $('settings-status').textContent='Loading current configuration…';
-  try{
-    const response=await fetch('/api/llm-config');if(!response.ok)throw new Error();
-    llmConfig=await response.json() as LlmConfig;$<HTMLSelectElement>('settings-strategy').value=llmConfig.strategy;applyReasoningSettings(llmConfig.reasoning);renderProviderStatus(llmConfig);
-    renderModelRows(llmConfig.providers);if(meta)$<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
-    $('settings-status').textContent='';
-  }catch{$('settings-status').textContent='Could not load LLM configuration.';}
+  $('settings-status').textContent='Loading current configuration...';
+  try{const response=await fetch(`${worldApi}/inference-config`);if(!response.ok)throw new Error();inferenceConfig=await response.json() as InferenceConfig;$<HTMLInputElement>('parallel-requests').checked=inferenceConfig.parallelRequests!==false;renderModelRows(inferenceConfig.providers);renderProviderStatus(inferenceConfig);$('settings-status').textContent='';}
+  catch{$('settings-status').textContent='Could not load inference configuration.';}
 }
 function showSettings(open:boolean){
   $('main').classList.toggle('hidden',open);$('llm-settings').classList.toggle('hidden',!open);$('llm-settings').setAttribute('aria-hidden',String(!open));
   if(open)void loadLlmSettings();
 }
-function dayOf(tick: number) { return worldTime(tick).day; }
-function renderProviderStatus(config:LlmConfig|undefined=meta?.llmConfig??llmConfig){
-  const providers=(config?.providers??[]).filter(provider=>provider.enabled!==false),list=$('provider-status-list');list.replaceChildren();
-  for(const provider of providers){
+function dayOf(tick:number){return worldTime(tick).day;}
+function renderProviderStatus(config:InferenceConfig|undefined=meta?.inferenceConfig??inferenceConfig){
+  const active=(config?.providers??[]).filter(provider=>provider.enabled!==false),list=$('provider-status-list');list.replaceChildren();
+  for(const provider of active){
+    const status=meta?.providerStatus?.[provider.id];
+    const state=status?.inFlight?'in-flight':status?.state??'unknown';
+    const label=state==='in-flight'?'Request in progress':state==='ok'?'Last request succeeded':state==='bad'?'Last request failed':'No request result yet';
     const row=document.createElement('li');row.className='provider-status-row';
-    const state=provider.health?.state??'unknown',detail=provider.health?.detail??'No inference result recorded yet.',inFlight=provider.health?.inFlight===true,tooltip=`${state.toUpperCase()}${inFlight?' · REQUEST IN PROGRESS':''}: ${detail}`,dot=document.createElement('span');dot.className=`provider-status-dot ${state}${inFlight?' in-flight':''}`;dot.setAttribute('aria-label',`${state}${inFlight?', request in progress':''}: ${detail}`);dot.title=tooltip;
-    const name=document.createElement('span');name.className='provider-status-name';name.textContent=provider.name;
-    row.title=tooltip;name.title=tooltip;row.append(dot,name);list.append(row);
+    const dot=document.createElement('span');dot.className=`provider-status-dot ${state}`;dot.setAttribute('role','img');dot.setAttribute('aria-label',label);
+    const name=document.createElement('span');name.className='provider-status-name';name.textContent=provider.name.trim()||'Unnamed model';
+    row.title=[label,status?.detail,provider.model].filter(Boolean).join('\n');row.append(dot,name);list.append(row);
   }
-  const names:Record<string,string>={'first-only':'Single model','round-robin':'Round robin','fallback':'Fallback','master-slaves':'Master / slaves'};
-  $('provider-algorithm').textContent=providers.length?(names[config?.strategy??'']??config?.strategy??''):'';
-  const current=$('provider-current-status');
+  $('provider-algorithm').textContent=active.length?`Ordered fallback · ${config?.parallelRequests===false?'One request at a time':'Parallel requests'}`:'No active model';
   const waiting=Object.entries(meta?.runtime.agents??{}).find(([,status])=>status.state==='waiting'&&status.message);
-  const waitingName=waiting?shown?.entities.find(entity=>entity.id===waiting[0])?.name??waiting[0]:'';
-  const providerError=config?.currentStatus&&/error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}|earlier provider failures|unsupported|access denied/i.test(config.currentStatus);
-  current.textContent=providerError?config!.currentStatus!:waiting?`${waitingName}: ${waiting[1].message}`:config?.currentStatus||'';
-  current.classList.toggle('empty',!current.textContent);
-  current.setAttribute('aria-hidden',String(!current.textContent));
-  current.classList.toggle('error',/error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}/i.test(current.textContent));
+  const current=$('provider-current-status');current.textContent=waiting?`${shown?.entities.find(entity=>entity.id===waiting[0])?.name??waiting[0]}: ${waiting[1].message}`:'';current.classList.toggle('empty',!current.textContent);current.setAttribute('aria-hidden',String(!current.textContent));
 }
 function selectEntity(id: string) { selected = id; detailsSignature='';view.select(id);renderInspector();void loadMemory(); }
 async function loadMemory(){
@@ -320,29 +205,21 @@ function setBoot(boot: Boot) {
   for(const voxel of boot.state.removedBlocks??[])liveRemoved.add(voxel);
   if(!boot.state.entities.some(entity=>entity.id===selected)&&boot.state.entities[0]){selected=boot.state.entities[0].id;view.select(selected);}
   liveEvents = boot.events; $('loading').classList.add('hidden');
-  renderProviderStatus(meta.llmConfig);
-  if(!meta.llmConfig||meta.llmConfig.providers.some(provider=>!provider.health||provider.health.state==='unknown'))void loadProviderStatus();
-  $<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
-  $<HTMLInputElement>('parallel-requests').disabled=false;
+  renderProviderStatus(meta.inferenceConfig);
+  if(!meta.inferenceConfig)void loadProviderStatus();
   $('module-name').textContent = meta.universe.name;
   renderWorldControls();
   if (isLive) goLive(); else renderTimeline();
 }
 const stream = new EventSource(`${worldApi}/stream`);
 stream.addEventListener('boot', event => { setBoot(JSON.parse((event as MessageEvent).data)); });
-stream.addEventListener('settings',event=>{
-  if(!meta)return;
-  meta.parallelRequests=JSON.parse((event as MessageEvent).data).parallelRequests;
-  $<HTMLInputElement>('parallel-requests').checked=meta.parallelRequests;
-});
-stream.addEventListener('llm-config',event=>{
-  if(!meta)return;
-  meta.llmConfig=JSON.parse((event as MessageEvent).data) as LlmConfig;meta.providerStrategy=meta.llmConfig.strategy;llmConfig=meta.llmConfig;applyReasoningSettings(llmConfig.reasoning);renderProviderStatus();
+stream.addEventListener('inference-config',event=>{
+  if(!meta)return;meta.inferenceConfig=JSON.parse((event as MessageEvent).data) as InferenceConfig;inferenceConfig=meta.inferenceConfig;renderProviderStatus();
 });
 stream.addEventListener('status', event => {
   if (!meta) return;
-  const packet=JSON.parse((event as MessageEvent).data) as {runtime:TurnStatus;llmConfig?:LlmConfig};
-  meta.runtime=packet.runtime;if(packet.llmConfig)meta.llmConfig=packet.llmConfig;renderProviderStatus();
+  const packet=JSON.parse((event as MessageEvent).data) as {runtime:TurnStatus;inferenceConfig?:InferenceConfig;providerStatus?:Record<string,ModelRequestStatus>};
+  meta.runtime=packet.runtime;if(packet.inferenceConfig)meta.inferenceConfig=packet.inferenceConfig;if(packet.providerStatus)meta.providerStatus=packet.providerStatus;renderProviderStatus();
   renderTimeline(); renderInspector();renderWorldControls();
 });
 stream.addEventListener('frame', event => {
@@ -419,7 +296,7 @@ function renderTimeline() {
   const count = dayOf(latest);
   if (count !== dayCount) { const day = $<HTMLSelectElement>('day'); day.replaceChildren(); for (let i = 1;i<=count;i++) { const option = new Option(`Day ${String(i).padStart(3,'0')}`,String(i)); day.add(option); } dayCount = count; }
   $<HTMLSelectElement>('day').value = String(dayOf(cursor));
-  const waitingEntries=Object.entries(meta.runtime.agents).filter(([,status])=>['planning','thinking','waiting'].includes(status.state));
+  const waitingEntries=Object.entries(meta.runtime.agents).filter(([,status])=>['thinking','waiting'].includes(status.state));
   const waiting=waitingEntries.map(([id])=>shown?.entities.find(e=>e.id===id)?.name??id);
   const diagnostic=waitingEntries.find(([,status])=>status.state==='waiting'&&status.message&&/model error|failed|unavailable|invalid|timed out|connection|HTTP \d{3}/i.test(status.message))??waitingEntries.find(([,status])=>status.state==='waiting'&&status.message);
   const turnStatus=$('turn-status');
@@ -445,14 +322,14 @@ function renderInspector() {
   for(const child of [...list.children])if(!visibleIds.has(child.id))child.remove();
   for(const e of shown.entities){
     const enabled=e.enabled!==false;
-    const displayStatus=enabled?isLive&&meta.runtime.phase==='thinking'?meta.runtime.agents[e.id]?.state??'held':e.status:'disabled';
+    const activity=entityDisplayStatus(e,meta.runtime,isLive),displayStatus=activity.text;
     const existing=document.getElementById(`entity-${e.id}`);
     if(existing){
       existing.classList.toggle('selected',e.id===selected);existing.classList.toggle('disabled',!enabled);
       const select=existing.querySelector<HTMLButtonElement>('.inhabitant-select')!;select.setAttribute('aria-pressed',String(e.id===selected));
       const toggle=existing.querySelector<HTMLInputElement>('.entity-toggle')!;toggle.checked=enabled;toggle.disabled=!isLive;
       const mode=existing.querySelector<HTMLSelectElement>('.entity-control-mode');if(mode){mode.value=e.controller==='automaton'?'automaton':'manual';mode.disabled=!isLive;}
-      const status=existing.querySelector<HTMLElement>('.entity-status')!;status.textContent=displayStatus;status.classList.toggle('thinking',['planning','thinking','waiting'].includes(displayStatus));status.classList.toggle('error',displayStatus==='error');continue;
+      const status=existing.querySelector<HTMLElement>('.entity-status')!;status.textContent=displayStatus;status.title=activity.title??'';status.classList.toggle('thinking',activity.thinking);status.classList.toggle('error',displayStatus==='error');continue;
     }
     const row=document.createElement('div');row.className=`inhabitant ${e.id===selected?'selected':''} ${enabled?'':'disabled'}`;row.id=`entity-${e.id}`;
     const button=document.createElement('button');button.className='inhabitant-select';button.setAttribute('aria-pressed',String(e.id===selected));
@@ -463,7 +340,7 @@ function renderInspector() {
     }else avatar.innerHTML=e.kind==='troglodyte'?troglodytePortrait(e.id):e.kind==='miner-robot'?minerRobotPortrait(e):'<i></i>';
     const text=document.createElement('span');text.className='inhabitant-text';const name=document.createElement('strong');name.textContent=e.name;
     const kind=document.createElement('small');kind.textContent=e.kind==='troglodyte'?'Troglodyte':e.kind==='miner-robot'?`${robotMaterial(e).replace(/^./,letter=>letter.toUpperCase())} Miner Robot${robotPowerModuleLabel(e)}`:'Duck · NPC';text.append(name,kind);
-    const status=document.createElement('span');status.className=`entity-status ${['planning','thinking','waiting'].includes(displayStatus)?'thinking':''} ${displayStatus==='error'?'error':''}`;status.textContent=displayStatus;
+    const status=document.createElement('span');status.className=`entity-status ${activity.thinking?'thinking':''} ${displayStatus==='error'?'error':''}`;status.textContent=displayStatus;status.title=activity.title??'';
     const mode=document.createElement('select');mode.className='entity-control-mode';mode.setAttribute('aria-label',`${e.name} control mode`);mode.append(new Option('Manual','manual'),new Option('Automaton','automaton'));mode.value=e.controller==='automaton'?'automaton':'manual';mode.disabled=!isLive;mode.onchange=()=>void setEntityControlMode(e.id,mode.value as 'manual'|'automaton',mode);
     const toggle=document.createElement('input');toggle.type='checkbox';toggle.className='entity-toggle';toggle.checked=enabled;toggle.disabled=!isLive;toggle.title=`Enable ${e.name}`;toggle.setAttribute('aria-label',`Enable ${e.name}`);toggle.onchange=()=>void setEntityEnabled(e.id,toggle.checked,toggle);
     button.append(avatar,text,status);button.onclick=()=>selectEntity(e.id);button.ondblclick=()=>view.focus(e.id);row.append(button,...(e.kind==='miner-robot'?[mode]:[]),toggle);list.append(row);
@@ -542,7 +419,7 @@ async function setEntityControlMode(id:string,controlMode:'manual'|'automaton',s
 }
 function renderDetails() {
   const e = shown.entities.find(e => e.id === selected); if (!e) return;
-  const signature=JSON.stringify({id:e.id,name:e.name,kind:e.kind,status:e.status,enabled:e.enabled,inventory:e.inventory,plan:e.plan,memory:memoryView,knowledge:shown.discoveries?.[selected]});
+  const signature=JSON.stringify({id:e.id,name:e.name,kind:e.kind,status:e.status,enabled:e.enabled,inventory:e.inventory,intent:e.intent,memory:memoryView,knowledge:shown.discoveries?.[selected]});
   const panel = $('details'),recordPanel=$('record-knowledge');
   if(signature===detailsSignature){
     const position=panel.querySelector<HTMLElement>('[data-detail="Position"] .detail-value');if(position)position.textContent=`${e.position.map(v=>v.toFixed(1)).join(' / ')} / ${Math.round(e.yaw)}º`;
@@ -551,35 +428,15 @@ function renderDetails() {
   detailsSignature=signature;panel.replaceChildren();recordPanel.replaceChildren();
   const held=e.inventory?.selected===null||!e.inventory?undefined:e.inventory.stacks[e.inventory.selected];
   const inventory=e.inventory?.stacks.map((stack,index)=>`${index}: ${stack.count} × ${stack.kind}${stack.contents?` (${stack.contents})`:''}`).join(', ')??'Empty';
-  const pairs = [['Position',`${e.position.map(v => v.toFixed(1)).join(' / ')} / ${Math.round(e.yaw)}º`],['Hands',held?`${held.kind}${held.contents?` · ${held.contents}`:''}`:'Empty'],['Inventory',inventory],['Perception',`${meta.universe.perception.range} m · ${meta.universe.perception.fieldOfView}°`],['Speech','10 m · clear line of sight']];
+  const pairs = [['Position',`${e.position.map(v => v.toFixed(1)).join(' / ')} / ${Math.round(e.yaw)}º`],['Hands',held?`${held.kind}${held.contents?` · ${held.contents}`:''}`:'Empty'],['Inventory',inventory],['Perception',`${meta.universe.perception.range} m · ${meta.universe.perception.fieldOfView}°`],['Speech',`${meta.universe.perception.range} m · clear line of sight`]];
   for (const [label,value] of pairs) { const row = document.createElement('div'); row.className = 'detail-row';row.dataset.detail=label; const a = document.createElement('span'); a.textContent = label; const b = document.createElement('span');b.className='detail-value'; b.textContent = value; row.append(a,b); panel.append(row); }
   if(e.controller==='agent'){
-    const section=document.createElement('section');section.className='agent-plan';section.setAttribute('aria-label','Recorded goal and steps');
-    const planLabel=document.createElement('h4');planLabel.textContent='PROJECT AND TASK IN THIS RECORD';section.append(planLabel);
-    if(e.plan){
-      if(e.plan.identity){const identity=document.createElement('p');identity.className='plan-goal';identity.textContent=`Identity: ${e.plan.identity}`;section.append(identity);}
-      if(e.plan.direction){const direction=document.createElement('p');direction.className='muted';direction.textContent=`Direction: ${e.plan.direction}`;section.append(direction);}
-      if(e.plan.project){
-        const project=document.createElement('p');project.className='plan-goal';project.textContent=`Project (${e.plan.project.status??'active'}): ${e.plan.project.goal}`;
-        const progress=document.createElement('p');progress.textContent=`Agent's progress assessment: ${e.plan.project.progress}`;
-        const success=document.createElement('p');success.className='muted';success.textContent=`Project success condition: ${e.plan.project.successCondition}`;section.append(project,progress,success);
-        if(e.plan.project.openQuestions.length){const questions=document.createElement('p');questions.className='muted';questions.textContent=`Open questions: ${e.plan.project.openQuestions.join(' ')}`;section.append(questions);}
-      }
-      const goal=document.createElement('p');goal.className='plan-goal';goal.textContent=e.plan.goal;section.append(goal);
-      const steps=document.createElement('ol');
-      for(const step of e.plan.steps){
-        const item=document.createElement('li');item.dataset.status=step.status;
-        const status=document.createElement('span');status.className='plan-step-status';status.textContent=step.assessment==='agent'?`${step.status} (agent assessment)`:step.status;
-        const task=document.createElement('div');task.textContent=step.task;item.append(status,task);
-        if(step.evidence){const evidence=document.createElement('p');evidence.className='muted';evidence.textContent=step.evidence;item.append(evidence);}
-        steps.append(item);
-      }
-      section.append(steps);
-      if(e.plan.projectHistory?.length){const history=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Earlier project assessments';history.append(summary);for(const project of e.plan.projectHistory){const item=document.createElement('p');item.textContent=`${project.status}: ${project.goal} ${project.assessment??''}`;history.append(item);}section.append(history);}
-      if(e.plan.suggestedActions?.length){const approach=document.createElement('p');approach.className='muted';approach.textContent=`Conditional suggestions${e.plan.suggestionBasis?` recorded at decision ${e.plan.suggestionBasis.turn}`:' from an earlier plan'} (may be stale): ${e.plan.suggestedActions.join(' Then, if still applicable: ')}`;section.append(approach);}
-      const explanation=document.createElement('p');explanation.textContent=`Agent explanation: ${e.plan.explanation}`;section.append(explanation);
-      const review=document.createElement('p');review.className='muted';review.textContent=`${e.plan.status} · Reviewed at decision ${e.plan.reviewedTurn} · Review by decision ${e.plan.reviewedTurn+PLAN_REVIEW_INTERVAL}, or earlier after new evidence or obstacles`;section.append(review);
-    }else{const empty=document.createElement('p');empty.className='muted';empty.textContent='No plan recorded yet.';section.append(empty);}
+    const section=document.createElement('section');section.className='agent-intent';section.setAttribute('aria-label','Agent-authored intent');
+    const label=document.createElement('h4');label.textContent='Intent in this record';section.append(label);
+    if(e.intent){
+      const rows=[...(e.intent.identity?[`Identity: ${e.intent.identity}`]:[]),`Goal: ${e.intent.goal}`,`Success condition: ${e.intent.successCondition}`,`Status: ${e.intent.status} (agent assessment)`,...(e.intent.assessment?[`Assessment: ${e.intent.assessment}`]:[])];
+      for(const text of rows){const paragraph=document.createElement('p');paragraph.textContent=text;section.append(paragraph);}
+    }else{const paragraph=document.createElement('p');paragraph.className='muted';paragraph.textContent='No intent recorded yet.';section.append(paragraph);}
     panel.append(section);
   }
   const label = document.createElement('h4'); label.textContent = 'Private Notes in This Record'; recordPanel.append(label);
@@ -608,13 +465,13 @@ function renderJournal() {
   if (wasAtTop) journal.scrollTop = 0;
 }
 function journalEventLabel(event:WorldEvent) {
-  if(event.type==='plan')return 'Goal and plan review';
+  if(event.type==='intent')return 'Agent intent';
   if(event.type==='action'||event.type==='rejected'){
     const action=(event.data as {action?:{action?:string}}|undefined)?.action?.action??'action';
     const labels:Record<string,string>={walk:'Walking',run:'Running',jump:'Jumping',turn:'Turning',wait:'Waiting',find_material:'Scanning for materials',find_entity:'Searching for living beings',hit:'Striking a block',dig:'Digging with a shovel',strike_held:'Crafting with wood',join:'Joining door halves',open:'Opening a door',close:'Closing a door',place:'Placing an item',throw:'Throwing an item',pickup:'Picking up an item',hold:'Taking an item in hand',store:'Putting an item away',fill:'Filling a bucket',empty:'Emptying a bucket',say:'Speaking',follow:'Following',stop_follow:'Stopping following'};
     const label=labels[action]??'Action';return event.type==='rejected'?`${label} failed`:label;
   }
-  const labels:Record<string,string>={damage:'Block damaged',discovery:'Learned',memory:'Journal note',arrived:'Movement complete',scanned:'Material scan complete',blocked:'Movement blocked',collision:'Collision',settled:'Block settled',lost:'Item lost',speech:'Speech',encounter:'Encounter',collapse:'Tree collapse',reflection:'Reflection','journal-compaction':'Journal condensed','agent-error':'Agent paused','entity-control':'Entity control','entity-arrival':'Entity arrival','knowledge-correction':'Knowledge update','follow-ended':'Follow ended','follow-blocked':'Follow blocked',splash:'Water splashed'};
+  const labels:Record<string,string>={damage:'Block damaged',discovery:'Learned',memory:'Private note',arrived:'Movement complete',scanned:'Material scan complete',blocked:'Movement blocked',collision:'Collision',settled:'Block settled',lost:'Item lost',speech:'Speech',encounter:'Encounter',collapse:'Tree collapse',reflection:'Reflection','context-compacted':'Conversation compacted','agent-error':'Agent paused','entity-control':'Entity control','entity-arrival':'Entity arrival','knowledge-correction':'Knowledge update','follow-ended':'Follow ended','follow-blocked':'Follow blocked',splash:'Water splashed'};
   return labels[event.type]??event.type.replaceAll('-',' ');
 }
 function journalEventMessage(event:WorldEvent) {
@@ -635,36 +492,16 @@ $('focus-toggle').onclick=()=>{
   $('main').classList.toggle('focus-collapsed',!open);$('focus-toggle').setAttribute('aria-expanded',String(open));$('focus-toggle').setAttribute('aria-label',`${open?'Collapse':'Expand'} Properties panel`);$('focus-toggle').title=`${open?'Collapse':'Expand'} Properties panel`;
 };
 $('add-model').onclick=()=>{
-  const rows=readModelRows(),number=rows.length+1,id=`model-${Date.now()}-${number}`,source=rows.findLast(provider=>provider.type==='vast-ai');
-  let added:LlmProvider={id,type:'openai-compatible',enabled:true,name:`Model ${number}`,baseUrl:'',model:'',apiKeyConfigured:false};
-  if(source){
-    added=structuredClone(source);added.id=id;added.name='';added.model='';added.copyFromId=source.id;delete added.displayModel;delete added.health;
-  }
-  renderModelRows([...rows,added]);
+  const rows=readModelRows(),number=rows.length+1;renderModelRows([...rows,{id:`model-${Date.now()}-${number}`,type:'openai-compatible',name:`Model ${number}`,enabled:false,baseUrl:'',model:'',contextWindow:49152,maxOutputTokens:4096}]);
 };
-$<HTMLSelectElement>('settings-strategy').onchange=updateStrategyControl;
 $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
-  event.preventDefault();const status=$('settings-status');status.textContent='Saving configuration…';
-  const providers=Array.from($('model-list').children).map(card=>{
-    const field=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement|HTMLSelectElement).value;
-    const enabled=(card.querySelector('[data-field="enabled"]') as HTMLInputElement).checked;
-    const tokenless=(card.querySelector('[data-field="tokenless"]') as HTMLInputElement).checked;
-    const apiKeyInput=card.querySelector('[data-field="apiKey"]') as HTMLInputElement,apiKey=apiKeyInput.value.trim();
-    const vastTokenInput=card.querySelector('[data-field="vastToken"]') as HTMLInputElement,vastToken=vastTokenInput.value.trim();
-    const copyFromId=(card as HTMLElement).dataset.copyFromId;
-    return{id:(card as HTMLElement).dataset.id,type:field('type'),enabled,tokenless,name:field('name'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),samplingTemplate:field('samplingTemplate'),vastContainerLabel:field('vastContainerLabel'),clearApiKey:apiKeyInput.dataset.clear==='true',clearVastToken:vastTokenInput.dataset.clear==='true',...(copyFromId?{copyFromId}:{}),...(apiKey?{apiKey}:{}),...(vastToken?{vastToken}:{})};
-  });
-  const requestedStrategy=$<HTMLSelectElement>('settings-strategy').value,reasoning=readReasoningSettings();
+  event.preventDefault();const status=$('settings-status');status.textContent='Saving configuration...';
   try{
-    const response=await fetch('/api/llm-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({providers,strategy:requestedStrategy,reasoning})});
-    const data=await response.json() as Metadata&{llmConfig?:LlmConfig;error?:string};
-    if(!response.ok)throw new Error(data.error??'Could not save configuration.');
-    if(meta){meta.mode=data.mode;meta.model=data.model;meta.providerStrategy=data.providerStrategy;}
-    if(data.llmConfig)llmConfig=data.llmConfig;
-    if(data.llmConfig){if(meta)meta.llmConfig=data.llmConfig;renderProviderStatus(data.llmConfig);}
-    renderModelRows(llmConfig.providers);$<HTMLSelectElement>('settings-strategy').value=llmConfig.strategy;applyReasoningSettings(llmConfig.reasoning);
-    const incomplete=llmConfig.providers.filter(provider=>!provider.model.trim()).map(provider=>provider.name);
-    status.textContent=incomplete.length?`Configuration saved. ${incomplete.join(', ')} will remain inactive until a model is selected.`:'Configuration saved.';
+    const response=await fetch(`${worldApi}/inference-config`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:1,parallelRequests:$<HTMLInputElement>('parallel-requests').checked,providers:readModelRows()})});
+    const data=await response.json() as Metadata&{inferenceConfig?:InferenceConfig;error?:string};if(!response.ok)throw new Error(data.error??'Could not save configuration.');
+    if(meta){meta.mode=data.mode;meta.model=data.model;}
+    if(data.inferenceConfig){inferenceConfig=data.inferenceConfig;if(meta)meta.inferenceConfig=inferenceConfig;}
+    $<HTMLInputElement>('parallel-requests').checked=inferenceConfig.parallelRequests!==false;renderModelRows(inferenceConfig.providers);renderProviderStatus();status.textContent='Configuration saved.';
   }catch(error){status.textContent=error instanceof Error?error.message:'Could not save configuration.';}
 };
 $('live').onclick = goLive;
@@ -690,14 +527,4 @@ window.addEventListener('keydown',event=>{
   if(!direction||shown?.entities.find(entity=>entity.id===selected)?.controller!=='static')return;
   event.preventDefault();void moveSelected(direction);
 });
-$<HTMLInputElement>('parallel-requests').onchange=async event=>{
-  if(!meta)return;
-  const input=event.target as HTMLInputElement,parallelRequests=input.checked;input.disabled=true;
-  try{
-    const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parallelRequests})});
-    if(!response.ok)throw new Error();
-    meta.parallelRequests=(await response.json() as Metadata).parallelRequests;
-  }catch{toast('Could not change request mode. Check the connection.');}
-  finally{input.checked=meta.parallelRequests;input.disabled=false;}
-};
 window.addEventListener('beforeunload', () => { stream.close(); view.dispose(); });

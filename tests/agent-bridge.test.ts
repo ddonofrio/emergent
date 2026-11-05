@@ -1,0 +1,271 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { Engine } from '../src/core/engine';
+import type { Block, Entity, Vec3 } from '../src/core/types';
+import { island } from '../src/universes/first-shore';
+import { AgentBridge } from '../server/simulation/agent-bridge';
+
+function fixture(other?: Vec3) {
+  const blocks: Block[] = [];
+  for (let x = -10; x <= 10; x++) for (let z = -10; z <= 20; z++) blocks.push([x, 0, z, 'stone']);
+  const entity = (id: string, position: Vec3): Entity => ({
+    id, name: id, kind: 'troglodyte', controller: id === 'a' ? 'agent' : 'static',
+    position, yaw: 0, height: 2, color: '#ffffff', inventory: null, status: 'idle',
+  });
+  const engine = new Engine({ ...island, encounterMessage: undefined,
+    generate: () => ({ blocks, entities: [entity('a', [.5, 1, .5]), ...(other ? [entity('b', other)] : [])] }) });
+  const bridge = new AgentBridge(engine), port = bridge.ports()[0], signal = new AbortController().signal;
+  const advance = (ticks: number) => { for (let tick = 0; tick < ticks; tick++) { engine.step(); bridge.afterStep(); } };
+  return { engine, bridge, port, signal, advance };
+}
+
+test('movement progress uses the committed terrain destination and scoped world tick', async () => {
+  const { engine, bridge, port, signal, advance } = fixture();
+  try {
+    const pending = port.submit('walk', { action: 'walk', target: [.5, 50, 4.5] }, signal);
+    bridge.commit();
+    assert.deepEqual(bridge.snapshot().entities.a.actions[0].target, [.5, 1, 4.5]);
+    assert.equal(bridge.snapshot().entities.a.actions[0].remainingDistance, 4);
+    advance(40);
+    const result = await pending;
+    assert.equal(result.action?.status, 'completed');
+    assert.ok(Math.abs(result.action!.distanceTravelled - 4) < 1e-8);
+    assert.equal(result.action?.remainingDistance, 0);
+    assert.equal(port.tick, engine.tick);
+    assert.equal(bridge.tick, engine.tick);
+  } finally { bridge.close(); }
+});
+
+test('body completion remains observable after speech returned its first tool result', async () => {
+  const { engine, bridge, port, signal, advance } = fixture([3.5, 1, .5]);
+  try {
+    const pending = port.submit('turn', { action: 'turn', angle: 90 }, signal);
+    bridge.commit();
+    assert.equal(engine.act('b', { action: 'say', word: 'Hello' }, 'manual').ok, true);
+    bridge.flush();
+    const heard = await pending;
+    assert.equal(heard.reason, 'event');
+    assert.equal(heard.action?.status, 'running');
+    const following = port.wait('next-event', {}, signal);
+    advance(20);
+    const completed = await following;
+    assert.ok(completed.events.some(event => event.type === 'action-completed'
+      && (event.data as { actionId: string }).actionId === heard.action!.id));
+  } finally { bridge.close(); }
+});
+
+test('cancellation and subsequent discoveries use distinct authoritative event IDs', async () => {
+  const { engine, bridge, port, signal } = fixture();
+  try {
+    const pending = port.submit('walk', { action: 'walk', distance: 8 }, signal);
+    bridge.commit();
+    engine.event('a', 'discovery', 'First fact'); bridge.flush();
+    const started = await pending;
+    const cancellation = port.cancel('cancel', started.action!.id, signal);
+    bridge.commit();
+    const cancelled = await cancellation;
+    assert.ok(cancelled.events.some(event => event.type === 'action-cancelled'));
+    for (const event of cancelled.events) {
+      const recorded = engine.recentEvents.find(recorded => recorded.id === event.id);
+      assert.equal(recorded?.type, event.type);
+    }
+    const discovery = engine.event('a', 'discovery', 'Next fact');
+    const next = await port.wait('next', {}, signal);
+    assert.ok(next.events.some(event => event.id === discovery.id));
+    assert.equal(new Set([...cancelled.events, ...next.events].map(event => event.id)).size, cancelled.events.length + next.events.length);
+  } finally { bridge.close(); }
+});
+
+test('collision results report the rebound and its persistent action remains cancellable', async () => {
+  const { engine, bridge, port, signal, advance } = fixture([4.5, 1, 2.5]);
+  try {
+    const pending = port.submit('walk', { action: 'walk', distance: 8 }, signal);
+    bridge.commit();
+    engine.entity('b').position = [.5, 1, 1.35];
+    advance(2);
+    const collision = await pending;
+    assert.equal(collision.action?.status, 'blocked');
+    assert.equal(collision.action?.physicalActive, true);
+    assert.equal(collision.motion?.kind, 'bounce');
+    const pendingCancel = port.cancel('cancel-rebound', collision.action!.id, signal);
+    bridge.commit();
+    const cancelled = await pendingCancel;
+    assert.equal(cancelled.action?.status, 'completed');
+    assert.equal(engine.entity('a').motion, undefined);
+    assert.equal(cancelled.actions.some(action => action.id === collision.action!.id), false);
+  } finally { bridge.close(); }
+});
+
+test('bounded receipt retention preserves an older ongoing action and all undelivered events', async () => {
+  const { engine, bridge, port, signal } = fixture();
+  try {
+    const pending = port.submit('original-walk', { action: 'walk', distance: 8 }, signal);
+    bridge.commit();
+    engine.event('a', 'discovery', 'Initial fact'); bridge.flush();
+    const started = await pending;
+    for (let index = 0; index < 1100; index++) {
+      const event = engine.event('a', 'discovery', `Fact ${index}`);
+      const outcome = await port.wait(`event-${index}`, {}, signal);
+      assert.ok(outcome.events.some(queued => queued.id === event.id));
+    }
+    const snapshot = bridge.snapshot().entities.a;
+    assert.ok(Object.keys(snapshot.receipts).length <= 1025);
+    assert.ok(snapshot.receipts['original-walk']);
+    assert.ok(snapshot.actions.some(action => action.id === started.action!.id && action.status === 'running'));
+    assert.ok(snapshot.seen.length <= 1024);
+    const pendingCancel = port.cancel('cancel-old-walk', started.action!.id, signal);
+    bridge.commit();
+    assert.equal((await pendingCancel).action?.status, 'completed');
+  } finally { bridge.close(); }
+});
+
+test('body operations are exclusive while speech remains concurrent', async () => {
+  const { engine, bridge, port, signal, advance } = fixture();
+  try {
+    const first = port.submit('first-turn', { action: 'turn', angle: 90 }, signal);
+    const second = port.submit('second-turn', { action: 'turn', angle: 90 }, signal);
+    const walking = port.submit('walk-while-turning', { action: 'walk', distance: 2 }, signal);
+    const speaking = port.submit('speak-while-turning', { action: 'say', word: 'Hello' }, signal);
+    bridge.commit();
+    assert.equal((await second).action?.status, 'rejected');
+    assert.equal((await walking).action?.status, 'rejected');
+    assert.equal(engine.entity('a').yaw, 90);
+    assert.equal(engine.entity('a').motion, undefined);
+    assert.equal(engine.entity('a').speech?.word, 'Hello');
+    advance(20);
+    assert.notEqual((await first).action?.status, 'rejected');
+    assert.notEqual((await speaking).action?.status, 'rejected');
+    await port.wait('completion-notices', {}, signal);
+    const next = port.submit('turn-next-second', { action: 'turn', angle: 90 }, signal);
+    bridge.commit(); advance(20);
+    assert.equal((await next).action?.status, 'completed');
+    assert.equal(engine.entity('a').yaw, 180);
+  } finally { bridge.close(); }
+});
+
+test('concurrent movement calls do not silently replace one another in the same batch', async () => {
+  const { engine, bridge, port, signal, advance } = fixture();
+  try {
+    const first = port.submit('first-walk', { action: 'walk', distance: 4 }, signal);
+    const second = port.submit('conflicting-walk', { action: 'walk', distance: 8 }, signal);
+    bridge.commit();
+    assert.equal((await second).action?.status, 'rejected');
+    assert.deepEqual(engine.entity('a').motion?.destination, [.5, 1, 4.5]);
+    advance(40);
+    const result = await first;
+    assert.notEqual(result.action?.status, 'cancelled');
+    assert.deepEqual(engine.entity('a').position, [.5, 1, 4.5]);
+  } finally { bridge.close(); }
+});
+
+test('every perceived settlement is delivered when one tick exceeds the notice snapshot limit', async () => {
+  const { engine, bridge, port, signal } = fixture();
+  try {
+    for (let x = -5; x <= 5; x++) engine.bodies.push({ id: `falling-${x}`, kind: 'stone',
+      position: [x + .5, 1.32, 4.5], velocity: [0, 0, 0], resting: true, settleAfter: 0 });
+    const pending = port.wait('settlements', {}, signal);
+    engine.step();
+    const perceived = engine.recentEvents.filter(event => event.actor === 'a' && event.type === 'terrain-perceived');
+    assert.ok(perceived.length > 8);
+    assert.equal(engine.notices('a').terrainChanges.length, 8);
+    bridge.afterStep();
+    const result = await pending;
+    const events = result.events.filter(event => event.type === 'terrain');
+    assert.equal(events.length, perceived.length);
+    assert.deepEqual(events.map(event => event.id), perceived.map(event => event.id));
+    assert.equal(engine.notices('a').terrainChanges.length, 0);
+  } finally { bridge.close(); }
+});
+
+test('one observed speech batch releases every parallel wait and is delivered once', async () => {
+  const { engine, bridge, port, signal } = fixture([3.5, 1, .5]);
+  try {
+    engine.act('b', { action: 'say', word: 'Hello' }, 'manual');
+    const first = port.wait('first-wait', {}, signal);
+    const second = port.wait('second-wait', {}, signal);
+    const results = await Promise.all([first, second]);
+    assert.ok(results.every(result => result.reason === 'event'));
+    assert.equal(results.flatMap(result => result.events).filter(event => event.type === 'speech').length, 1);
+    assert.equal(results[0].events[0].type, 'speech');
+    assert.deepEqual(results[1].events, []);
+    assert.ok(bridge.snapshot().entities.a.receipts['first-wait']);
+    assert.ok(bridge.snapshot().entities.a.receipts['second-wait']);
+    assert.equal(engine.tick, 0);
+  } finally { bridge.close(); }
+});
+
+test('walk and a parallel event wait both return on speech without stopping movement', async () => {
+  const { engine, bridge, port, signal, advance } = fixture([3.5, 1, .5]);
+  try {
+    const walking = port.submit('walk', { action: 'walk', distance: 8 }, signal);
+    const waiting = port.wait('also-wait', {}, signal);
+    bridge.commit(); advance(5);
+    engine.act('b', { action: 'say', word: 'Hello' }, 'manual');
+    const results = await Promise.all([walking, waiting]);
+    assert.ok(results.every(result => result.reason === 'event'));
+    assert.equal(results.flatMap(result => result.events).filter(event => event.type === 'speech').length, 1);
+    assert.equal(results[0].action?.status, 'running');
+    assert.deepEqual(engine.entity('a').motion?.destination, [.5, 1, 8.5]);
+    assert.equal(engine.tick, 5);
+  } finally { bridge.close(); }
+});
+
+test('scans require a stationary body and retain their results through concurrent speech', async () => {
+  const { engine, bridge, port, signal, advance } = fixture([3.5, 1, .5]);
+  try {
+    const walking = port.submit('walk', { action: 'walk', distance: 8 }, signal);
+    bridge.commit(); advance(5);
+    const destination = structuredClone(engine.entity('a').motion!.destination);
+    const invalidScan = port.submit('scan-while-walking', { action: 'find_material' }, signal);
+    bridge.commit();
+    assert.equal((await invalidScan).action?.status, 'rejected');
+    assert.deepEqual(engine.entity('a').motion?.destination, destination);
+    const walk = await walking;
+    const stop = port.cancel('stop-walk', walk.action!.id, signal); bridge.commit(); await stop;
+    const scanning = port.submit('scan', { action: 'find_material' }, signal);
+    const speaking = port.submit('speak', { action: 'say', word: 'Hello' }, signal);
+    bridge.commit(); advance(15);
+    const scan = await scanning;
+    await speaking;
+    assert.equal(scan.action?.channel, 'body');
+    assert.equal(scan.action?.status, 'running');
+    assert.equal(engine.entity('a').motion?.kind, 'scan');
+    const finished = port.wait('finish-scan', { actionId: scan.action!.id }, signal);
+    advance(5);
+    const result = await finished;
+    assert.equal(result.action?.status, 'completed');
+    assert.equal(result.action?.result?.feedback?.scanType, 'find_material');
+    assert.ok((result.action?.result?.feedback?.materials as unknown[]).length > 0);
+    assert.ok(engine.discoveries.get('a')?.has('observed-material:stone'));
+  } finally { bridge.close(); }
+});
+
+test('closing a bridge revokes pending waits and prevents deferred checkpoints', async () => {
+  const setup = fixture(); setup.bridge.close();
+  let checkpoints = 0;
+  const bridge = new AgentBridge(setup.engine, undefined, () => { checkpoints++; });
+  const port = bridge.ports()[0];
+  const waiting = port.wait('pending-close', {}, setup.signal);
+  bridge.close();
+  await assert.rejects(waiting, /connection closed/);
+  await Promise.resolve();
+  assert.equal(checkpoints, 0);
+  await assert.rejects(port.wait('after-close', {}, setup.signal), /connection is closed/);
+});
+
+test('a failed receipt checkpoint rejects released waits and revokes the bridge', async () => {
+  const setup = fixture(); setup.bridge.close();
+  let checkpoints = 0;
+  const bridge = new AgentBridge(setup.engine, undefined, () => { checkpoints++; throw new Error('Cannot record receipt.'); });
+  const port = bridge.ports()[0];
+  const waiting = port.wait('pending-checkpoint', {}, setup.signal);
+  const rejection = assert.rejects(waiting, /Cannot record receipt/);
+  setup.engine.event('a', 'discovery', 'Observed before checkpoint');
+  assert.throws(() => bridge.flush(), /Cannot record receipt/);
+  await rejection;
+  await Promise.resolve();
+  assert.equal(checkpoints, 1);
+  assert.equal(setup.engine.tick, 0);
+  await assert.rejects(port.submit('after-failure', { action: 'walk', distance: 2 }, setup.signal), /connection is closed/);
+  bridge.close();
+});

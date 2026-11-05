@@ -26,6 +26,7 @@ export class Engine {
   readonly discoveries = new Map<string, Set<string>>();
   private nextBody = 1;
   private pendingEvents: WorldEvent[] = [];
+  private eventListeners = new Set<(event: WorldEvent) => void>();
   readonly recentEvents: WorldEvent[] = [];
   readonly inbox = new Map<string, HeardVoice[]>();
   private contacts=new Map<string,Set<string>>();
@@ -47,11 +48,6 @@ export class Engine {
       for(const [id,notices] of Object.entries(state.terrainNotices??{}))this.terrainNotices.set(id,clone(notices));
       for(const [id,notices] of Object.entries(state.impactNotices??{}))this.impactNotices.set(id,clone(notices));
     }
-    // Old recordings may contain follow chains. Repair them without creating a new replay event during load.
-    for(const entity of [...this.entities].sort((a,b)=>a.id.localeCompare(b.id)))if(entity.following&&this.followersOf(entity).length){
-      const followers=this.followersOf(entity),names=followers.map(follower=>follower.name).join(', ');
-      delete entity.following;delete entity.motion;entity.status='idle';entity.lastAction={ok:false,message:`${names} ${followers.length===1?'is':'are'} following you, so you stop following and choose your own actions.`};
-    }
   }
   get time() { return this.tick / TICKS_PER_SECOND; }
   get day() { return Math.floor(this.time / this.module.manifest.daySeconds) + 1; }
@@ -61,7 +57,7 @@ export class Engine {
   setEntityEnabled(id: string, enabled: boolean) {
     const entity = this.entity(id);
     if (this.active(entity) === enabled) return false;
-    entity.enabled = enabled; delete entity.motion; delete entity.speech; delete entity.following; delete entity.movementPrompt; delete entity.followInvitation;
+    entity.enabled = enabled; delete entity.motion; delete entity.speech; delete entity.following;
     if(!enabled)for(const follower of this.entities)if(follower.following?.entityId===id)this.endFollowing(follower,`${entity.name} is no longer available to follow.`);
     if(!enabled){this.contacts.delete(id);this.encounterNotices.delete(id);this.terrainNotices.delete(id);this.impactNotices.delete(id);for(const contacts of this.contacts.values())contacts.delete(id);for(const [actor,notices] of this.encounterNotices)this.encounterNotices.set(actor,notices.filter(notice=>notice.otherId!==id));}
     entity.status = enabled ? 'idle' : 'disabled';
@@ -79,7 +75,28 @@ export class Engine {
     const event: WorldEvent = { id: this.nextEvent++, tick: this.tick, time: this.time, day: this.day, actor, type, message, ...(data === undefined ? {} : { data: clone(data) }) };
     this.pendingEvents.push(event); this.recentEvents.push(event);
     if (this.recentEvents.length > 200) this.recentEvents.shift();
+    for (const listener of this.eventListeners) listener(clone(event));
     return event;
+  }
+  /** Subscribe synchronously to committed events. Listeners must only enqueue notifications. */
+  subscribeEvents(listener: (event: WorldEvent) => void) {
+    this.eventListeners.add(listener);
+    return () => { this.eventListeners.delete(listener); };
+  }
+  cancelMotion(id: string): ActionResult {
+    const entity = this.entity(id);
+    if (!this.active(entity)) return fail('This entity is disabled.');
+    const origin = clone(entity.motion?.origin ?? entity.position);
+    const wasMoving = !!entity.motion || !!entity.following;
+    delete entity.motion; delete entity.following; entity.status = 'idle';
+    const result: ActionResult = {
+      ok: true,
+      message: wasMoving ? 'You cancel your movement at your current position.' : 'There is no movement to cancel.',
+      feedback: { outcome: 'cancelled', from: origin, to: clone(entity.position), distanceTravelled: distance(origin, entity.position), facing: entity.yaw },
+    };
+    entity.lastAction = clone(result);
+    this.event(id, 'motion-cancelled', result.message, result.feedback);
+    return result;
   }
   discover(actor:string,knowledge:string,message:string,data?:unknown) {
     const learned=this.discoveries.get(actor)??new Set<string>();
@@ -246,9 +263,6 @@ export class Engine {
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
     const obstacles=new Set(navigation.paths.flatMap(path=>path.issue?.target?[key(path.issue.target)]:[]));
     const held=this.held(e),emptyHands=!held,hasShovel=held?.kind==='shovel';
-    const followCandidates=[...entities];
-    const invited=e.followInvitation&&e.followInvitation.untilTick>=this.tick?this.entities.find(other=>other.id===e.followInvitation!.speakerId&&this.active(other)):undefined;
-    if(invited&&!followCandidates.some(other=>other.id===invited.id)){const holding=this.held(invited);followCandidates.push({id:invited.id,name:invited.name,kind:invited.kind,position:clone(invited.position),holding:holding?{kind:holding.kind,...(holding.contents?{contents:holding.contents}:{})}:null});}
     const interactions = {
       hit: emptyHands||hasShovel ? blocks.filter(block=>{
         const target=block.slice(0,3) as Vec3;
@@ -259,14 +273,14 @@ export class Engine {
       pickup: emptyHands ? items.filter(item=>(!item.door||item.door.angle===0)&&distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
         .sort((a,b)=>distance(eye,a.position)-distance(eye,b.position)).map(item=>({itemId:item.id,kind:item.kind,metres:Math.round(distance(eye,item.position)*10)/10})) : [],
       speak: entities.filter(other=>this.canSpeakTo(e,this.entity(other.id))).map(({id,name})=>({id,name})),
-      follow: followCandidates.filter(other=>this.canFollow(e,this.entity(other.id))).map(({id,name,position})=>({id,name,metres:Math.round(distance(e.position,position)*10)/10})),
+      follow: entities.filter(other=>this.canFollow(e,this.entity(other.id))).map(({id,name,position})=>({id,name,metres:Math.round(distance(e.position,position)*10)/10})),
       ...this.containerTargets(e),
       open:doors.filter(door=>door.angle===0).map(({angle:_,...door})=>({...door,angle:0 as const})),
       close:doors.filter(door=>door.angle===90).map(({angle:_,...door})=>({...door,angle:90 as const})),
     };
     const followed=e.following&&this.entities.find(other=>other.id===e.following!.entityId);
     const tracking=followed&&this.active(followed)&&distance(e.position,followed.position)<=20&&this.voxels.clearLine(eye,this.eye(followed));
-    const following=followed?{entityId:followed.id,name:followed.name,...(tracking?{metres:Math.round(distance(e.position,followed.position)*10)/10,direction:this.direction(e,followed.position)}:{}),message:!tracking?'Direct contact has been lost. Stop following to choose another action.':e.following!.blocked?`${e.following!.blocked.message} Stop following to choose another action.`:'Automatically following, stopping one metre away. Choose follow to continue, say to speak while following, or stop_follow to stop and act immediately.'}:undefined;
+    const following=followed?{entityId:followed.id,name:followed.name,...(tracking?{metres:Math.round(distance(e.position,followed.position)*10)/10,direction:this.direction(e,followed.position)}:{}),message:!tracking?'Direct contact has been lost. Stop following to choose another action.':e.following!.blocked?`${e.following!.blocked.message} Stop following to choose another action.`:'Automatically following, stopping one metre away. Following continues while you speak or wait for events. Use stop_follow or cancel your movement to stop.'}:undefined;
     const beingFollowed=this.followersOf(e).map(follower=>({id:follower.id,name:follower.name,message:`${follower.name} is following you. You cannot follow another creature while they follow you; continue choosing your own actions.`}));
     return { tick: this.tick, time: this.time, self: clone(e), blocks: [...samples.values()].slice(0,maxBlocks), surfaces: [...surfaces.values()], entities,
       items, heard: clone((this.inbox.get(id) ?? []).filter(m => this.tick - m.tick < 1200)),
@@ -278,6 +292,15 @@ export class Engine {
       ...(following?{following}:{}),
       ...(beingFollowed.length?{beingFollowed}:{}),
       description, truncated: blocks.length > maxBlocks };
+  }
+  notices(id: string) {
+    this.entity(id);
+    return clone({
+      heard: this.inbox.get(id) ?? [],
+      encounters: this.encounterNotices.get(id) ?? [],
+      terrainChanges: this.terrainNotices.get(id) ?? [],
+      impacts: this.impactNotices.get(id) ?? [],
+    });
   }
   acknowledgeEncounters(id:string,notices:EncounterNotice[]){
     const seen=new Set(notices.map(notice=>notice.eventId));
@@ -293,17 +316,16 @@ export class Engine {
   }
   private canSpeakTo(speaker:Entity,listener:Entity){return speaker.id!==listener.id&&this.active(speaker)&&this.active(listener)&&distance(this.eye(speaker),this.eye(listener))<=this.module.manifest.perception.range&&this.voxels.clearLine(this.eye(speaker),this.eye(listener));}
   canFollow(follower:Entity,target:Entity,viewAngle=0){
-    const invited=follower.followInvitation?.speakerId===target.id&&follower.followInvitation.untilTick>=this.tick&&this.voxels.clearLine(this.eye(follower),this.eye(target));
-    return follower.id!==target.id&&this.active(follower)&&this.active(target)&&!this.followersOf(follower).length&&distance(follower.position,target.position)<=20&&(invited||this.visible({...follower,yaw:follower.yaw+viewAngle},this.eye(target),false,20));
+    return follower.id!==target.id&&this.active(follower)&&this.active(target)&&!this.followersOf(follower).length&&distance(follower.position,target.position)<=20&&this.visible({...follower,yaw:follower.yaw+viewAngle},this.eye(target),false,20);
   }
   private speak(speaker:Entity,word:string,respond=true):Entity[]{
     const recipients=this.entities.filter(other=>this.canSpeakTo(speaker,other));
+    const eventId=this.nextEvent;
     speaker.speech={word,until:this.time+4};
     for(const listener of recipients){
       const inbox=this.inbox.get(listener.id)??[];
-      inbox.push({from:speaker.name,speakerId:speaker.id,word,tick:this.tick,direction:this.direction(listener,speaker.position),distance:Math.round(distance(this.eye(listener),this.eye(speaker))*10)/10});
+      inbox.push({eventId,from:speaker.name,speakerId:speaker.id,word,tick:this.tick,direction:this.direction(listener,speaker.position),distance:Math.round(distance(this.eye(listener),this.eye(speaker))*10)/10});
       this.inbox.set(listener.id,inbox.slice(-16));
-      if(/^follow me[.!?]*$/i.test(word)&&listener.controller==='agent')listener.followInvitation={speakerId:speaker.id,speakerName:speaker.name,tick:this.tick,untilTick:this.tick+1200};
     }
     this.event(speaker.id,'speech',`${speaker.name} says "${word}".`,{word,recipientIds:recipients.map(other=>other.id),facing:speaker.yaw});
     if(respond)for(const listener of recipients){
@@ -316,38 +338,6 @@ export class Engine {
       this.speak(listener,typeof reply==='string'?reply:reply.word,false);
     }
     return recipients;
-  }
-  wakeMovingListenersFromSpeech(){
-    for(const speech of this.recentEvents.filter(event=>event.tick===this.tick&&event.type==='speech')){
-      const data=speech.data as {word:string;recipientIds:string[]};
-      for(const id of data.recipientIds){
-        const listener=this.entities.find(entity=>entity.id===id),motion=listener?.motion;
-        if(!listener||listener.controller!=='agent'||!this.active(listener)||listener.following||!motion||!['walk','run'].includes(motion.kind??'walk'))continue;
-        const speaker=this.entity(speech.actor);
-        const messages=listener.movementPrompt?.messages??[];
-        if(messages.some(message=>message.tick===speech.tick&&message.speakerId===speech.actor&&message.word===data.word))continue;
-        messages.push({speakerId:speaker.id,speakerName:speaker.name,word:data.word,tick:speech.tick,direction:this.direction(listener,speaker.position),distance:Math.round(distance(this.eye(listener),this.eye(speaker))*10)/10});listener.movementPrompt={messages};
-        this.event(listener.id,'movement-prompt',`${speaker.name} said "${data.word}" while you were moving. Decide whether to continue or stop.`,{speakerId:speaker.id,word:data.word});
-      }
-    }
-  }
-  movementPrompts(){
-    for(const entity of this.entities)if(entity.movementPrompt&&(!entity.motion||entity.following||!['walk','run'].includes(entity.motion.kind??'walk')))delete entity.movementPrompt;
-    return this.entities.filter(entity=>this.active(entity)&&!!entity.movementPrompt&&!!entity.motion&&!entity.following);
-  }
-  resolveMovementPrompt(id:string,choice:'continue_moving'|'stop_moving'){
-    const entity=this.entity(id),prompt=entity.movementPrompt;
-    if(!prompt)return fail('There is no movement decision to resolve.');
-    delete entity.movementPrompt;
-    const speech=prompt.messages.map(message=>`${message.speakerName} saying "${message.word}"`).join(' and ');
-    const feedback={from:clone(entity.motion?.origin??entity.position),to:clone(entity.position),facing:entity.yaw};
-    if(choice==='stop_moving'){
-      delete entity.motion;entity.status='idle';
-      entity.lastAction={ok:true,message:`You stop moving after hearing ${speech}. Choose your next action on the next turn.`,feedback:{...feedback,outcome:'stopped'}};
-      this.event(id,'movement-response',entity.lastAction.message,{choice,messages:prompt.messages,...feedback});return entity.lastAction;
-    }
-    const result=ok(`You continue your current movement after hearing ${speech}.`);
-    this.event(id,'movement-response',result.message,{choice,messages:prompt.messages,...feedback});return result;
   }
   private updateEncounters(){
     for(const observer of this.entities.filter(entity=>entity.controller==='agent'&&this.active(entity))){
@@ -612,11 +602,10 @@ export class Engine {
       if(!target||!this.canFollow(e,target,a.angle??0))return fail('Follow requires another visible living entity within 20 metres, with a clear line of sight.');
       if(e.motion&&!e.following)return fail('Wait until your movement finishes before following.');
       if(target.following)this.endFollowing(target,`${e.name} started following you. You stop following and continue with your own actions.`);
-      e.following={entityId:target.id};delete e.motion;delete e.followInvitation;e.status='following';e.yaw=((Math.atan2(target.position[0]-e.position[0],target.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
-      return ok(`You follow ${target.name}, stopping one metre away. Each turn choose follow to continue, say to speak while following, or stop_follow to stop and take another action immediately.`);
+      e.following={entityId:target.id};delete e.motion;e.status='following';e.yaw=((Math.atan2(target.position[0]-e.position[0],target.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
+      return ok(`You follow ${target.name}, stopping one metre away. Following continues while you speak or wait for events. Use stop_follow or cancel your movement to stop.`);
     }
     if (a.action === 'say') {
-      if(e.motion&&!e.following)return fail('Wait until your movement finishes.');
       const remaining=speechWordsRemaining(e,this.tick),problem=speechProblem(a.word,remaining);
       if(problem)return fail(problem);
       const word=a.word!.trim(),count=speechWordCount(word);
@@ -638,7 +627,7 @@ export class Engine {
       const message=unchanged?'Nothing has changed since the previous scan.':materials
         ?materials.length?`You scan all around and find ${materials.map(item=>item.material).join(', ')}.`:'You scan all around but find no visible block materials.'
         :entities!.length?`You scan all around and see ${entities!.map(other=>`${other.name}, a ${other.kind}, ${other.holding?`holding ${other.holding.kind}${other.holding.contents?` containing ${other.holding.contents}`:''}`:'with empty hands'}`).join('; ')}.`:'You scan all around but see no other living beings.';
-      e.motion={kind:'scan',destination:clone(e.position),speed:0,origin:clone(e.position),progress:0,duration:1,startYaw:e.yaw};e.status='scanning';
+      e.motion={kind:'scan',scanType:a.action,destination:clone(e.position),speed:0,origin:clone(e.position),progress:0,duration:1,startYaw:e.yaw};e.status='scanning';
       return {ok:true,message,feedback:{outcome:'started',...(materials?{materials}:{entities}),scanType:a.action,scanSignature:signature,scanPosition:clone(e.position),...(unchanged?{unchanged:true,previousScanEventId:previous.scanEventId}:{})}};
     }
     if (a.action === 'turn') {
@@ -925,6 +914,7 @@ export class Engine {
     else delete e.motion;
     e.status=destination?'bouncing':e.following?'following':'idle';
     e.lastAction={ok:false,message:destination?`You collide with ${other.name} and bounce back safely.`:`You collide with ${other.name} and stop; there is no safe place to rebound.`,feedback:{outcome:'collision',from:actionOrigin,to:clone(e.position),otherId:other.id,other:other.name,rebound:destination??null,distanceTravelled:distance(actionOrigin,e.position)}};
+    if(e.motion)e.motion.result=clone(e.lastAction);
     this.event(e.id,'collision',e.lastAction.message,e.lastAction.feedback);
   }
   private collide(e:Entity,issue:MovementIssue){
@@ -945,8 +935,9 @@ export class Engine {
     if(metres<=step+.001){e.position=clone(motion.destination);this.finishBounce(e);}
   }
   private finishBounce(e:Entity){
+    const result=e.motion?.result;
     delete e.motion;e.status=e.following?'following':'idle';
-    e.lastAction={ok:false,message:`${e.lastAction?.message??'You collided with another creature.'} You are now stopped.`,feedback:{...e.lastAction?.feedback,outcome:'collision',to:clone(e.position),facing:e.yaw}};
+    e.lastAction={ok:false,message:`${result?.message??'You collided with another creature.'} You are now stopped.`,feedback:{...result?.feedback,outcome:'collision',to:clone(e.position),facing:e.yaw}};
     this.event(e.id,'rebound-ended',e.lastAction.message,e.lastAction.feedback);
   }
   private advanceFollowing(e:Entity){
@@ -987,7 +978,11 @@ export class Engine {
         const motion=e.motion,progress=Math.min(1,(motion.progress??0)+1/20/(motion.duration??1));motion.progress=progress;
         e.yaw=((motion.startYaw??e.yaw)+360*progress)%360;
         if(progress>=1){
-          e.yaw=motion.startYaw??e.yaw;delete e.motion;e.status='idle';e.lastAction={ok:true,message:e.lastAction?.message??'You finish scanning all around.',feedback:{...e.lastAction?.feedback,outcome:'completed',facing:e.yaw}};
+          e.yaw=motion.startYaw??e.yaw;delete e.motion;e.status='idle';
+          const scanType=motion.scanType!,scanMaterials=scanType==='find_material'?this.materialsAround(e.id):undefined;
+          const entities=scanType==='find_entity'?this.entitiesAround(e.id):undefined;
+          const results=scanMaterials??entities??[];
+          e.lastAction={ok:true,message:'You finish scanning all around.',feedback:{...(scanMaterials?{materials:scanMaterials}:{entities}),scanType,scanSignature:JSON.stringify([...results].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)))),scanPosition:clone(e.position),outcome:'completed',facing:e.yaw}};
           const materials=Array.isArray(e.lastAction.feedback?.materials)?e.lastAction.feedback.materials:[];
           for(const observed of materials){
             if(!observed||typeof observed!=='object')continue;
@@ -1059,7 +1054,8 @@ export class Engine {
         if(delayed){
           const message=`A separate loose ${body.kind} block fell and settled at [${target.join(',')}]. This is a falling block becoming terrain, not a broken block remaining in place.`;
           for(const observer of this.entities)if(this.active(observer)&&observer.controller==='agent'&&this.visible(observer,center(target),true)){
-            const notices=[...(this.terrainNotices.get(observer.id)??[]),{eventId:event.id,tick:this.tick,target:clone(target),kind:body.kind,message}].slice(-8);
+            const perceived=this.event(observer.id,'terrain-perceived',message,{sourceEventId:event.id,itemId:body.id,target:clone(target),kind:body.kind});
+            const notices=[...(this.terrainNotices.get(observer.id)??[]),{eventId:perceived.id,tick:this.tick,target:clone(target),kind:body.kind,message}].slice(-8);
             this.terrainNotices.set(observer.id,notices);
           }
         }

@@ -3,7 +3,7 @@ export const TURN_TICKS = TICKS_PER_SECOND;
 export const FRAME_TICKS = 2;
 export const STEP_MS = 1000 / TICKS_PER_SECOND;
 export const WORLD_DAY_SECONDS = 24 * 60 * 60;
-export const CLOCK_VERSION = 'lockstep-v1';
+export const CLOCK_VERSION = 'persistent-tools';
 
 export function worldTime(tick: number) {
   const totalSeconds = Math.max(0, tick) / TICKS_PER_SECOND;
@@ -25,7 +25,7 @@ export function formatWorldDuration(tick: number, tenths = false) {
 }
 
 export interface DecisionStatus {
-  state: 'planning' | 'thinking' | 'waiting' | 'ready' | 'moving' | 'disabled' | 'turn limit';
+  state: 'thinking' | 'waiting' | 'ready' | 'moving' | 'disabled';
   attempts?: number;
   message?: string;
 }

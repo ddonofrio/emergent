@@ -1,99 +1,70 @@
-import type { Engine } from '../src/core/engine';
-import { FRAME_TICKS, STEP_MS, TURN_TICKS, type DecisionStatus, type TurnStatus } from '../src/core/time';
-import type { AgentRuntime, PreparedTurn } from './agents/runtime';
+﻿import type { Engine } from '../src/core/engine';
+import { FRAME_TICKS, STEP_MS, TURN_TICKS, type TurnStatus } from '../src/core/time';
+import { disconnectedWorld, type WorldConnection } from './simulation/connection';
 
-/** One barrier, one commit, twenty physics steps. Wall time only paces presentation. */
+/** The sole owner of time. Connections only open or close the decision barrier. */
 export class TurnClock {
-  private phase: TurnStatus['phase'];
-  private enabled = true;
-  private decisions: Record<string, DecisionStatus> = {};
-  private pending?: AbortController;
-  private prepared?: PreparedTurn;
-  private endTick = 0;
-  private previous = 0;
+  private enabled = false;
   private closed = false;
-  constructor(readonly engine: Engine, readonly agents: AgentRuntime, readonly hooks: {
+  private previous: number;
+  private endTick: number;
+  private phase: TurnStatus['phase'] = 'paused';
+  constructor(readonly engine: Engine, readonly connection: WorldConnection = disconnectedWorld, readonly hooks: {
     frame(): void;
     status(): void;
     fatal(error: unknown): void;
-  }, private readonly now: () => number = () => performance.now()) {
-    // A restart inside an already committed turn finishes its remaining physics.
-    const remainder = engine.tick % TURN_TICKS;
-    this.phase = remainder ? 'advancing' : 'idle';
-    this.endTick = remainder ? engine.tick + TURN_TICKS - remainder : engine.tick;
+  }, private now: () => number = () => performance.now()) {
     this.previous = now();
+    this.endTick = engine.tick % TURN_TICKS ? Math.ceil(engine.tick / TURN_TICKS) * TURN_TICKS : engine.tick;
   }
   status(): TurnStatus {
-    return { phase: this.phase, enabled: this.enabled, turn: this.phase === 'advancing' ? this.endTick / TURN_TICKS : Math.floor(this.engine.tick / TURN_TICKS) + 1, tick: this.engine.tick, agents: { ...this.decisions } };
+    return { enabled: this.enabled, phase: this.phase, tick: this.engine.tick,
+      turn: Math.floor(this.engine.tick / TURN_TICKS) + 1, agents: this.connection.status() };
   }
   setEnabled(enabled: boolean) {
-    this.enabled = enabled;
-    if (!enabled && this.phase !== 'advancing') {
-      this.pending?.abort(); this.pending = undefined; this.prepared = undefined; this.phase = 'paused'; this.decisions = {};
-    } else if (enabled && this.phase === 'paused') this.phase = this.engine.tick % TURN_TICKS || this.engine.movementPrompts().length ? 'advancing' : 'idle';
-    // Once committed, finish the single second before pausing. Never commit half a decision set.
+    if (this.closed) return;
+    this.enabled = enabled; this.previous = this.now();
+    if (enabled) { this.connection.resume(); this.phase = 'idle'; }
+    else { this.connection.suspend(); this.phase = 'paused'; this.hooks.frame(); }
     this.hooks.status();
   }
   entityChanged() {
-    if (this.phase === 'thinking') {
-      this.pending?.abort(); this.pending = undefined; this.prepared = undefined; this.decisions = {};
-      this.phase = this.enabled ? this.engine.tick < this.endTick ? 'advancing' : 'idle' : 'paused';
-    }
-    this.hooks.status();
+    if (this.enabled) this.connection.resume();
+    this.previous = this.now(); this.hooks.status();
+  }
+  /** Called synchronously on model-state changes, even between timer pumps. */
+  barrierChanged() {
+    this.previous = this.now();
+    if (this.enabled && !this.connection.ready()) this.phase = 'thinking';
   }
   pump() {
-    if (this.closed) return;
-    if (this.enabled && !this.pending && this.engine.movementPrompts().length) { this.beginMovementPrompts(); return; }
-    if (this.phase === 'advancing') {
+    if (this.closed || !this.enabled) return;
+    try {
+      this.connection.resume();
+      // Resolving a tool closes the barrier before its promise continuation runs.
+      if (!this.connection.ready()) { this.hold(); return; }
+      this.connection.commit();
+      if (!this.connection.ready()) { this.hold(); return; }
+      if (this.phase !== 'advancing') {
+        if (this.phase === 'thinking') this.previous = this.now();
+        this.phase = 'advancing'; this.hooks.status();
+      }
+      if (this.engine.tick >= this.endTick) this.endTick = this.engine.tick + TURN_TICKS;
       const now = this.now();
       while (now - this.previous >= STEP_MS && this.engine.tick < this.endTick) {
         this.previous += STEP_MS;
-        const prepared = this.prepared; this.prepared = undefined;
-        this.engine.step(prepared ? () => this.agents.commit(prepared) : undefined);
-        if (this.engine.movementPrompts().length) { this.beginMovementPrompts(); return; }
+        this.engine.step(); this.connection.afterStep();
         if (this.engine.tick % FRAME_TICKS === 0) this.hooks.frame();
+        if (!this.connection.ready()) { this.hold(); return; }
       }
-      if (this.engine.tick === this.endTick) {
-        this.phase = this.enabled ? 'idle' : 'paused'; this.decisions = {}; this.hooks.status();
-      }
-      return;
-    }
-    if (!this.enabled || this.pending) return;
-    const controller = new AbortController(); this.pending = controller; this.phase = 'thinking'; this.decisions = {};
-    this.hooks.status();
-    void this.agents.prepareTurn(controller.signal, (id, status) => {
-      if (this.pending !== controller || controller.signal.aborted) return;
-      this.decisions[id] = status; this.hooks.status();
-    }).then(prepared => {
-      if (this.closed || this.pending !== controller || controller.signal.aborted) return;
-      this.pending = undefined; this.prepared = prepared; this.endTick = prepared.tick + TURN_TICKS;
-      this.previous = this.now(); this.phase = 'advancing'; this.hooks.status();
-    }).catch(error => {
-      if (controller.signal.aborted || this.closed) return;
-      this.hooks.fatal(error);
-    });
+      if (this.engine.tick === this.endTick) { this.phase = 'idle'; this.hooks.status(); }
+    } catch (error) { this.hooks.fatal(error); }
   }
-  private beginMovementPrompts() {
-    if (this.pending || !this.enabled || !this.engine.movementPrompts().length) return;
-    // Persist the interruption before inference. Replays never repeat this decision.
-    this.hooks.frame();
-    const controller = new AbortController(); this.pending = controller; this.phase = 'thinking'; this.decisions = {};
-    this.hooks.status();
-    void this.agents.prepareMovementPrompts(controller.signal, (id, status) => {
-      if (this.pending !== controller || controller.signal.aborted) return;
-      this.decisions[id] = status; this.hooks.status();
-    }).then(decisions => {
-      if (this.closed || this.pending !== controller || controller.signal.aborted) return;
-      this.pending = undefined;
-      this.agents.commitMovementPrompts(decisions);
-      this.hooks.frame();
-      this.previous = this.now();
-      this.phase = this.enabled ? 'advancing' : 'paused';
-      this.decisions = {};
-      this.hooks.status();
-    }).catch(error => {
-      if (!controller.signal.aborted && !this.closed) this.hooks.fatal(error);
-    });
+  private hold() {
+    this.previous = this.now();
+    if (this.phase !== 'thinking') { this.phase = 'thinking'; this.hooks.status(); }
   }
-  close() { this.closed = true; this.pending?.abort(); this.pending = undefined; }
+  close() {
+    this.closed = true; this.enabled = false; this.connection.close(); this.phase = 'paused';
+  }
 }

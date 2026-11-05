@@ -1,0 +1,199 @@
+/**
+ * Headless adaptation of LittleWhale's event-sourced Session and agent-loop
+ * step/tool dispatch cycle. MIT, Copyright (c) DeepSeek. See README.md.
+ */
+import { setTimeout as delay } from 'node:timers/promises';
+import { randomUUID } from 'node:crypto';
+import { compactablePrefix, frameSummary, summarizeWithLlm } from './compaction';
+import { estimateTokens } from './tool-pairing';
+import type { Completion, CompletionRequest, Message, SessionEvent, SessionMetrics, SessionRunOptions, SessionSnapshot } from './types';
+
+const initialMetrics = (): SessionMetrics => ({ llmCalls: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, estimatedInputTokens: 0, latencyMs: 0, retries: 0, compactionCalls: 0 });
+
+class SessionPersistenceError extends Error {}
+
+/** A session owns durable history; a host owns time and the physical tool bodies. */
+export class PersistentSession {
+  private data: SessionSnapshot;
+  private running = false;
+  private saving: Promise<void> = Promise.resolve();
+
+  constructor(readonly id: string, snapshot?: SessionSnapshot) {
+    if (snapshot && (snapshot.version !== 1 || snapshot.id !== id)) throw new Error('Unsupported agent session snapshot.');
+    this.data = snapshot ? structuredClone(snapshot) : {
+      version: 1, id, messages: [], events: [], pendingCalls: [], metrics: initialMetrics(), compactions: 0,
+    };
+  }
+
+  snapshot(): SessionSnapshot { return structuredClone(this.data); }
+  get metrics(): Readonly<SessionMetrics> { return { ...this.data.metrics }; }
+
+  appendUser(content: string): void {
+    if (this.running) throw new Error('External messages cannot interrupt a running agent session.');
+    this.appendMessage('user/message', { role: 'user', content });
+  }
+
+  private event(type: SessionEvent['type'], data: unknown): void {
+    this.data.events.push({ seq: this.data.events.length, type, data: structuredClone(data) });
+  }
+
+  private appendMessage(type: 'user/message' | 'assistant/message' | 'tool/result', message: Message): void {
+    const captured = structuredClone(message);
+    this.data.messages.push(captured);
+    this.event(type, captured);
+  }
+
+  private async save(options: SessionRunOptions): Promise<void> {
+    if (!options.persist) return;
+    const snapshot = this.snapshot();
+    this.saving = this.saving.catch(() => {}).then(async () => {
+      try { await options.persist!(snapshot); }
+      catch (error) { throw new SessionPersistenceError('Could not persist the agent session.', { cause: error }); }
+    });
+    await this.saving;
+  }
+
+  private recordCompletion(completion: Completion, request: CompletionRequest): void {
+    const metrics = this.data.metrics;
+    metrics.llmCalls += (completion.attempts ?? 1) - 1;
+    metrics.latencyMs += completion.latencyMs;
+    if (completion.usage) {
+      metrics.inputTokens += completion.usage.inputTokens;
+      metrics.outputTokens += completion.usage.outputTokens;
+      metrics.cachedInputTokens += completion.usage.cachedInputTokens ?? 0;
+    } else metrics.estimatedInputTokens += estimateTokens(request);
+  }
+
+  /** Cancellation retains ready results and pending call IDs for a later run. */
+  async run(options: SessionRunOptions): Promise<void> {
+    if (this.running) throw new Error('This session already has an execution loop.');
+    this.running = true;
+    const { signal } = options;
+    let attempts = 0;
+    try {
+      const lastCompaction = this.data.events.findLast(event => event.type === 'compaction/start' || event.type === 'compaction/end');
+      if (lastCompaction?.type === 'compaction/start') this.event('compaction/end', { success: false, interrupted: true });
+      await this.save(options);
+      while (true) {
+        signal.throwIfAborted();
+        if (this.data.pendingCalls.length) {
+          options.onState?.('tool');
+          // Dispatch overlaps, publication remains in model order. The world
+          // capability enforces physical concurrency and action exclusivity.
+          const settled = await Promise.allSettled(this.data.pendingCalls.map(async pending => {
+            if (pending.result) return;
+            const executor = options.tools[pending.call.name];
+            let result: unknown;
+            let isError = false;
+            try {
+              if (!executor) throw new Error(`Unknown tool ${pending.call.name}.`);
+              result = await executor(pending.call.arguments, pending.call, signal);
+              signal.throwIfAborted();
+            } catch (error) {
+              signal.throwIfAborted();
+              isError = true;
+              result = { error: error instanceof Error ? error.message : 'Tool execution failed.' };
+            }
+            pending.result = {
+              role: 'tool', toolCallId: pending.call.id, toolName: pending.call.name,
+              content: JSON.stringify(result ?? null), ...(isError ? { isError: true } : {}),
+            };
+            await this.save(options);
+          }));
+          signal.throwIfAborted();
+          const failed = settled.find(result => result.status === 'rejected');
+          if (failed?.status === 'rejected') throw failed.reason;
+          for (const pending of this.data.pendingCalls) this.appendMessage('tool/result', pending.result!);
+          this.data.pendingCalls = [];
+          await this.save(options);
+        }
+
+        options.onState?.('thinking');
+        try {
+          const prefixLength = compactablePrefix(options, this.data.messages);
+          if (prefixLength > 0) {
+            const prefix = this.data.messages.slice(0, prefixLength);
+            this.event('compaction/start', { prefixLength });
+            this.data.metrics.llmCalls++;
+            this.data.metrics.compactionCalls++;
+            await this.save(options);
+            let completion: Completion;
+            try {
+              completion = await summarizeWithLlm(async (request, callSignal) => {
+                const started = performance.now();
+                try {
+                  const response = await options.complete(request, callSignal);
+                  this.recordCompletion(response, request);
+                  return response;
+                } catch (error) {
+                  this.data.metrics.latencyMs += performance.now() - started;
+                  this.countFailedAttempts(error);
+                  throw error;
+                }
+              }, options, prefix, this.id, Math.min(options.maxOutputTokens ?? 4096, 2048));
+              const checkpoint = frameSummary(completion.content!);
+              if (estimateTokens(checkpoint) >= estimateTokens(prefix)) throw new Error('Compaction checkpoint did not reduce context.');
+              this.data.messages.splice(0, prefixLength, checkpoint);
+              this.data.compactions++;
+              this.event('compaction/end', { prefixLength, success: true, checkpoint });
+            } catch (error) {
+              this.event('compaction/end', { prefixLength, success: false });
+              await this.save(options);
+              throw error;
+            }
+            options.onCompletion?.(completion, 'compaction');
+            await this.save(options);
+          }
+
+          const request: CompletionRequest = {
+            system: options.system, messages: structuredClone(this.data.messages), tools: options.schemas,
+            maxOutputTokens: options.maxOutputTokens ?? 4096, purpose: 'agent', sessionId: this.id,
+          };
+          this.data.metrics.llmCalls++;
+          await this.save(options);
+          const started = performance.now();
+          let completion: Completion;
+          try { completion = await options.complete(request, signal); }
+          catch (error) { this.data.metrics.latencyMs += performance.now() - started; this.countFailedAttempts(error); throw error; }
+          signal.throwIfAborted();
+          this.recordCompletion(completion, request);
+          options.onCompletion?.(completion, 'agent');
+          if (completion.finishReason === 'length') throw new Error('Model response reached its output limit before completing.');
+          // Physical receipt identity must remain unique even when a provider
+          // repeats its own wire IDs in a later step. Replay projects these IDs
+          // into the adapter's signed response envelope in model order.
+          const calls = completion.calls.map(call => ({ ...call, id: `call_${randomUUID().replaceAll('-', '')}` }));
+          this.appendMessage('assistant/message', {
+            role: 'assistant', content: completion.content,
+            ...(calls.length ? { toolCalls: calls } : {}),
+            ...(completion.providerState === undefined ? {} : { providerState: completion.providerState }),
+          });
+          this.data.pendingCalls = calls.map(call => ({ call: structuredClone(call) }));
+          if (completion.calls.length === 0) {
+            this.appendMessage('user/message', { role: 'user', content: 'Choose a tool to act, observe, or wait. Your text alone does not change the world.' });
+          }
+          attempts = 0;
+          await this.save(options);
+        } catch (error) {
+          if (error instanceof SessionPersistenceError) throw error;
+          signal.throwIfAborted();
+          attempts++;
+          this.data.metrics.retries++;
+          const message = error instanceof Error ? error.message : 'Inference unavailable.';
+          this.event('llm/retry', { attempts, message });
+          await this.save(options);
+          options.onState?.('retrying', message);
+          await delay(Math.min(10000, (options.retryDelayMs ?? 1000) * 2 ** Math.min(attempts - 1, 4)), undefined, { signal });
+        }
+      }
+    } finally {
+      this.running = false;
+      options.onState?.('stopped');
+    }
+  }
+
+  private countFailedAttempts(error: unknown): void {
+    const attempts = (error as { attempts?: number } | null)?.attempts;
+    if (typeof attempts === 'number' && Number.isSafeInteger(attempts) && attempts >= 0) this.data.metrics.llmCalls += attempts - 1;
+  }
+}

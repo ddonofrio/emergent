@@ -1,0 +1,59 @@
+import type { Action, ActionResult, AgentIntent, Entity, Observation, Vec3 } from '../../src/core/types';
+
+export interface PerceivedEvent {
+  id: number;
+  tick: number;
+  type: string;
+  message: string;
+  data?: unknown;
+}
+export interface SimulationAction {
+  id: string;
+  callId: string;
+  kind: string;
+  channel: 'movement' | 'speech' | 'body';
+  status: 'queued' | 'running' | 'completed' | 'blocked' | 'cancelled' | 'rejected';
+  createdTick: number;
+  startedTick?: number;
+  finishedTick?: number;
+  origin: Vec3;
+  position: Vec3;
+  target?: Vec3;
+  distanceTravelled: number;
+  remainingDistance: number;
+  physicalActive?: boolean;
+  motion?: Entity['motion'];
+  result?: ActionResult;
+  command: Action | { action: 'cancel'; actionId: string };
+  dueTick?: number;
+  finishedEventId?: number;
+}
+export type ActionProgress = Pick<SimulationAction, 'id' | 'kind' | 'channel' | 'status' | 'position' | 'target' | 'distanceTravelled' | 'remainingDistance' | 'physicalActive' | 'result'>;
+export interface ToolOutcome {
+  tick: number;
+  position: Vec3;
+  motion?: Entity['motion'];
+  following?: Entity['following'];
+  reason: 'completed' | 'event' | 'timeout' | 'rejected';
+  action?: ActionProgress;
+  actions: ActionProgress[];
+  events: PerceivedEvent[];
+}
+
+/** An entity-scoped capability. The agent runtime never receives the engine. */
+export interface AgentPort {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: string;
+  readonly instructions: string;
+  readonly tick: number;
+  active(): boolean;
+  observe(angle?: number): Observation;
+  inspectJump(angle: number, distance: number): unknown;
+  submit(callId: string, action: Action, signal: AbortSignal): Promise<ToolOutcome>;
+  cancel(callId: string, actionId: string, signal: AbortSignal): Promise<ToolOutcome>;
+  wait(callId: string, options: { actionId?: string; seconds?: number }, signal: AbortSignal): Promise<ToolOutcome>;
+  setIntent(intent: AgentIntent): void;
+  remember(notes: string[]): void;
+  waiting(): boolean;
+}

@@ -1,0 +1,145 @@
+{
+  "architecture": "persistent-tool-conversations",
+  "measurement": "Deterministic stub provider with 5ms artificial delay. No real LLM inference or tokenizer. Input tokens are ceil(JSON chars/4), including tool schemas; UTF-8 canonical request bytes are exact. Execution is unpaced headless physics. Each scenario includes the first next request after arrival. Initial visible speaker is marked already encountered to isolate speech.",
+  "baseline": {
+    "architecture": "legacy",
+    "measurement": "Deterministic stub provider with 5ms artificial delay. No real LLM inference or tokenizer. Input tokens are ceil(JSON chars/4), including tool schemas; UTF-8 bytes are exact. Execution is unpaced headless physics.",
+    "scenarios": [
+      {
+        "scenario": "uninterrupted-walk-next-decision",
+        "worldTicks": 80,
+        "inferenceCalls": 3,
+        "inputBytes": 38148,
+        "estimatedInputTokens": 9538,
+        "providerLatencyMs": 21.961,
+        "executionLatencyMs": 145.529,
+        "requests": [
+          {
+            "phase": "set_plan",
+            "inputBytes": 9530,
+            "estimatedInputTokens": 2383,
+            "latencyMs": 4.385
+          },
+          {
+            "phase": "walk",
+            "inputBytes": 14404,
+            "estimatedInputTokens": 3601,
+            "latencyMs": 5.029
+          },
+          {
+            "phase": "say",
+            "inputBytes": 14214,
+            "estimatedInputTokens": 3554,
+            "latencyMs": 12.547
+          }
+        ]
+      },
+      {
+        "scenario": "walk-hear-reply-after-arrival",
+        "worldTicks": 80,
+        "interruptionAt": 40,
+        "inferenceCalls": 4,
+        "inputBytes": 39400,
+        "estimatedInputTokens": 9851,
+        "providerLatencyMs": 44.625,
+        "executionLatencyMs": 131.708,
+        "requests": [
+          {
+            "phase": "set_plan",
+            "inputBytes": 9530,
+            "estimatedInputTokens": 2383,
+            "latencyMs": 17.587
+          },
+          {
+            "phase": "walk",
+            "inputBytes": 14404,
+            "estimatedInputTokens": 3601,
+            "latencyMs": 7.938
+          },
+          {
+            "phase": "continue_moving",
+            "inputBytes": 1087,
+            "estimatedInputTokens": 272,
+            "latencyMs": 11.493
+          },
+          {
+            "phase": "say",
+            "inputBytes": 14379,
+            "estimatedInputTokens": 3595,
+            "latencyMs": 7.607
+          }
+        ]
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "scenario": "uninterrupted-walk-next-decision",
+      "worldTicks": 80,
+      "inferenceCalls": 2,
+      "inputBytes": 19679,
+      "estimatedInputTokens": 4921,
+      "providerLatencyMs": 17.672,
+      "executionLatencyMs": 64.472,
+      "measuredInputTokens": null,
+      "requests": [
+        {
+          "phase": "walk_to",
+          "worldTick": 0,
+          "inputBytes": 9350,
+          "estimatedInputTokens": 2338,
+          "latencyMs": 6.333
+        },
+        {
+          "phase": "say",
+          "worldTick": 80,
+          "inputBytes": 10329,
+          "estimatedInputTokens": 2583,
+          "latencyMs": 11.339
+        }
+      ]
+    },
+    {
+      "scenario": "walk-hear-reply-while-walking",
+      "worldTicks": 80,
+      "interruptionAt": 40,
+      "replyCommittedTick": 40,
+      "inferenceCalls": 4,
+      "inputBytes": 42605,
+      "estimatedInputTokens": 10653,
+      "providerLatencyMs": 27.488,
+      "executionLatencyMs": 73.911,
+      "measuredInputTokens": null,
+      "requests": [
+        {
+          "phase": "walk_to",
+          "worldTick": 0,
+          "inputBytes": 9350,
+          "estimatedInputTokens": 2338,
+          "latencyMs": 5.167
+        },
+        {
+          "phase": "say",
+          "worldTick": 40,
+          "inputBytes": 10113,
+          "estimatedInputTokens": 2529,
+          "latencyMs": 11.59
+        },
+        {
+          "phase": "wait_for_event",
+          "worldTick": 60,
+          "inputBytes": 11071,
+          "estimatedInputTokens": 2768,
+          "latencyMs": 5.992
+        },
+        {
+          "phase": "say",
+          "worldTick": 80,
+          "inputBytes": 12071,
+          "estimatedInputTokens": 3018,
+          "latencyMs": 4.739
+        }
+      ]
+    }
+  ]
+}

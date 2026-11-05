@@ -1,0 +1,9 @@
+GNU GENERAL PUBLIC LICENSE
+Version 3, 29 June 2007
+
+Little Whale is distributed under the GNU General Public License version 3 or
+any later version. The authoritative license text is available from the Free
+Software Foundation at https://www.gnu.org/licenses/gpl-3.0.html.
+
+This repository's product-owned files are intended to carry the GPL-3.0-or-later
+license. The upstream MIT components retain their separate MIT license.

@@ -150,8 +150,7 @@ export const robotsVsRobots: UniverseModule = {
     vocabulary: [],
     perception: { range: 18, fieldOfView: 120, maxBlocks: 96 },
     materials,
-    agentInstructions: 'You are {name}, an embodied robot in an unbounded physical world. Choose your own goals and success conditions from what you can perceive and remember.',
-    planningInstructions: 'Choose and maintain your own direction, project, immediate task, and success conditions from your local experience.',
+    agentInstructions: 'You are {name}, an embodied robot in an unbounded physical world. Choose your own goals and success conditions. Keep your identity, goals, and memory in this continuing conversation. Use tools to act and learn only from local observations and their results. Unseen space is unknown. You decide whether observed results satisfy your goals.',
   },
   generate: () => ({ blocks: [], entities: miners }),
   initializeAutomaton:initializeSquare,
@@ -164,8 +163,8 @@ export const robotsVsRobots: UniverseModule = {
     if(exact)return;
     const migrated=miners.map(template=>{
       const existing=state.entities.find(entity=>entity.id===template.id),robot:Entity={...existing,...template,enabled:existing?.enabled!==false,controller:'static',status:'idle',inventory:null};
-      delete robot.plan;delete robot.motion;delete robot.following;delete robot.lastAction;delete robot.automation;
-      delete robot.movementPrompt;delete robot.followInvitation;delete robot.speech;delete robot.speechBudget;return robot;
+      delete robot.intent;delete robot.motion;delete robot.following;delete robot.lastAction;delete robot.automation;
+      delete robot.speech;delete robot.speechBudget;return robot;
     });
     const ids=new Set(['duck',...miners.map(robot=>robot.id)]);
     return {
