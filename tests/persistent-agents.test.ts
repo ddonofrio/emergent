@@ -130,6 +130,33 @@ test('local ports expose no observer state or other private conversations and re
   } finally { await f.close(); }
 });
 
+test('state-dependent tools refresh after taking raw wood into the hands', async () => {
+  const f = fixture();
+  try {
+    f.engine.entity('walker').inventory = { stacks: [{ kind: 'wood', count: 2 }], selected: null, capacity: 640 };
+    f.engine.entity('walker').intent = { goal: 'Experiment with wood.', successCondition: 'Discover one shape.', status: 'active' };
+    f.clock.setEnabled(true); await until(() => f.requests.length === 1);
+    const firstNames = f.requests[0].request.tools.map(tool => tool.name);
+    assert.ok(firstNames.includes('hold'));
+    assert.equal(firstNames.includes('strike_held'), false);
+    assert.equal(firstNames.includes('interact'), false);
+    f.requests[0].respond('hold', { stack: 0 }); await until(() => f.runtime.ready());
+    for (let i = 0; i < 80 && f.requests.length < 2; i++) { f.pump(); await Promise.resolve(); }
+    await until(() => f.requests.length === 2);
+    const secondNames = f.requests[1].request.tools.map(tool => tool.name);
+    assert.ok(secondNames.includes('strike_held'));
+    assert.equal(secondNames.includes('run'), false);
+    const strike = f.requests[1].request.tools.find(tool => tool.name === 'strike_held')!;
+    assert.deepEqual((strike.parameters.properties as {point:{enum:string[]}}).point.enum,
+      ['top_center', 'bottom_center', 'front_center', 'side_center', 'front_corner', 'front_edge']);
+    assert.equal(strike.description.includes('plank'), false, 'Undiscovered products stay out of the affordance description.');
+    const result = resultOf(f.requests[1].request);
+    assert.equal(result.current.self.inventory.selected, 0);
+    assert.deepEqual(result.current.self.intent, f.engine.entity('walker').intent);
+    assert.deepEqual(f.errors, []);
+  } finally { await f.close(); }
+});
+
 test('a frozen commit updates its checkpoint atomically with the resumable action receipt', async () => {
   const f = fixture();
   let resumed: ReturnType<typeof fixture> | undefined;

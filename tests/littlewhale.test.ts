@@ -119,6 +119,8 @@ test('compaction replaces only the paired prefix and durably retains original co
     complete: async request => {
       if (request.purpose === 'compaction') {
         assert.ok(request.messages.at(-1)?.content?.includes('compaction engine'));
+        assert.ok(request.messages.at(-1)?.content?.includes('at most 700 words'));
+        assert.deepEqual(request.tools, [], 'Compaction cannot mutate the world or call an agent tool.');
         return response([], 'Known local facts: observations are retained in this checkpoint.');
       }
       normalRequest = request;

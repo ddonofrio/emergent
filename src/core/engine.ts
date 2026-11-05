@@ -2,6 +2,7 @@ import { Voxels } from './voxels';
 import { TICKS_PER_SECOND, TURN_TICKS } from './time';
 import { exchangeInventory, normalizeInventory } from './inventory';
 import { knowledgeDescription, observedMaterialKnowledge } from './knowledge';
+import { isRawBlock as rawBlock } from './materials';
 import { speechProblem, speechTurn, speechWordCount, speechWordsRemaining } from './speech';
 import { clone, distance, key, type Action, type ActionResult, type BlockImpactNotice, type Body, type EncounterNotice, type Entity, type EntitySighting, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type UniverseModule, type Vec3, type WorldEvent, type WorldState } from './types';
 
@@ -9,7 +10,6 @@ const ok = (message: string): ActionResult => ({ ok: true, message });
 const fail = (message: string, navigation?: NavigationReport): ActionResult => ({ ok: false, message, ...(navigation ? { navigation } : {}) });
 const center = (p: Vec3): Vec3 => p.map(v => v + .5) as Vec3;
 const faces: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
-const rawBlock = (kind: string) => ['grass','dirt','sand','stone','wood','leaves','iron_ore','copper_ore','quartz','coal','lithium_ore','titanium_ore'].includes(kind);
 const TREE_FALL_HORIZONTAL_SPEED = 4;
 const TREE_FALL_DOWNWARD_SPEED = .8;
 const DOOR_WIDTH = .86;

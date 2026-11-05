@@ -49,6 +49,7 @@ export interface AgentPort {
   readonly tick: number;
   active(): boolean;
   observe(angle?: number): Observation;
+  knowledge(angle?: number): string[];
   inspectJump(angle: number, distance: number): unknown;
   submit(callId: string, action: Action, signal: AbortSignal): Promise<ToolOutcome>;
   cancel(callId: string, actionId: string, signal: AbortSignal): Promise<ToolOutcome>;

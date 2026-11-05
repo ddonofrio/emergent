@@ -1,5 +1,8 @@
 import type { Material } from './types';
 
+const rawBlocks = new Set(['grass', 'dirt', 'sand', 'stone', 'wood', 'leaves', 'iron_ore', 'copper_ore', 'quartz', 'coal', 'lithium_ore', 'titanium_ore']);
+export const isRawBlock = (kind: string) => rawBlocks.has(kind);
+
 export const standardMaterials: Readonly<Record<string, Material>> = {
   water: { color: '#4d86a8', solid: false, floats: false, fluid: true },
   grass: { color: '#74955a', solid: true, floats: false },

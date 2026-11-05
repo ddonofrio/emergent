@@ -8,12 +8,13 @@ import type { AgentBridge, BridgeSnapshot } from '../simulation/agent-bridge';
 import type { WorldConnection } from '../simulation/connection';
 import { agentTools, localView } from './tools';
 
-export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; }
+export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; viewAngle?: number; }
 export interface RuntimeSnapshot { version: 1; agents: Record<string, AgentSnapshot>; simulation: BridgeSnapshot; }
 interface Agent {
   port: AgentPort;
   session: PersistentSession;
   notes: string[];
+  viewAngle?: number;
   state: SessionState;
   detail?: string;
   controller?: AbortController;
@@ -33,8 +34,8 @@ export class AgentRuntime implements WorldConnection {
     for (const port of bridge.ports()) {
       const saved = snapshot?.agents[port.id];
       const session = new PersistentSession(port.id, saved?.session);
-      const agent: Agent = { port, session, notes: saved?.notes ?? [], state: 'stopped' };
-      if (!saved) session.appendUser(JSON.stringify({ observation: localView(port.observe()), notes: [], instruction: 'Choose your own goals and act through the tools.' }));
+      const agent: Agent = { port, session, notes: saved?.notes ?? [], viewAngle: saved?.viewAngle, state: 'stopped' };
+      if (!saved) session.appendUser(JSON.stringify({ observation: localView(port.observe(), port.knowledge(), agent.notes), instruction: 'Choose your own goals and act through the currently available tools.' }));
       this.agents.set(port.id, agent);
     }
   }
@@ -45,7 +46,7 @@ export class AgentRuntime implements WorldConnection {
     this.hooks.changed();
   }
   persistence(): RuntimeSnapshot {
-    return { version: 1, simulation: this.bridge.snapshot(), agents: Object.fromEntries([...this.agents].map(([id, agent]) => [id, { session: agent.session.snapshot(), notes: [...agent.notes] }])) };
+    return { version: 1, simulation: this.bridge.snapshot(), agents: Object.fromEntries([...this.agents].map(([id, agent]) => [id, { session: agent.session.snapshot(), notes: [...agent.notes], ...(agent.viewAngle ? { viewAngle: agent.viewAngle } : {}) }])) };
   }
   metrics() { return Object.fromEntries([...this.agents].map(([id, agent]) => [id, agent.session.metrics])); }
   private persist() { this.store.saveAgentState(this.persistence()); }
@@ -76,13 +77,15 @@ export class AgentRuntime implements WorldConnection {
   private launch(agent: Agent) {
     const controller = new AbortController(); agent.controller = controller;
     const tools = agentTools(agent.port, agent);
-    const system = `You are ${agent.port.name}, one embodied ${agent.port.kind} with one continuous private conversation. ${agent.port.instructions.replaceAll('{name}', agent.port.name)}
-Choose your own identity, goals and observable success conditions; assess success from tool outcomes. Keep at most ten private notes with remember.
+    const system = `${agent.port.instructions.replaceAll('{name}', agent.port.name)}
+You have one continuous private conversation. Choose your own identity, goals and observable success conditions; reassess them from current tool outcomes and mark an intent completed when its full condition is met. Keep at most ten private notes with remember.
 Events arrive through tool results. A returned event leaves movement active: speak, then wait_for_event for more events or completion. Actions have persistent IDs. Only arrival, blockage, explicit cancellation or replacement ends movement. Speech is concurrent; locomotion is exclusive; hand interactions and scans require a stationary body. Calls in one response run concurrently and are validated at a shared commit boundary.
-World time freezes during every agent's inference or retry. Tool waits let the shared clock advance. Coordinates are [x,y,z], y is height; walk_to uses horizontal x,z. Never assume unseen facts. Call tools to proceed.`;
+World time freezes during every agent's inference or retry. Tool waits let the shared clock advance. Self and creature positions name x, yHeight and z; voxel targets use [x,y,z], where y is height; walk_to uses horizontal x,z.
+The current context in observations and physical tool results overrides older positions, inventory, intent and learned facts. Never route from a stale sighting: after a collision, unexpected blockage or uncertain target location, look again. The offered tools are refreshed from your current body, hands and local view. Never assume unseen facts. Call tools to proceed.`;
     const providers = this.inference.providers.filter(provider => provider.enabled !== false && provider.model);
     agent.job = agent.session.run({
       system, schemas: tools.schemas, tools: tools.executors, signal: controller.signal,
+      prepareTools: () => { const current = agentTools(agent.port, agent); return { schemas: current.schemas, tools: current.executors }; },
       complete: (request, signal) => this.complete(agent, request, signal),
       contextWindow: providers.length ? Math.min(...providers.map(provider => provider.contextWindow ?? DEFAULT_CONTEXT_WINDOW)) : DEFAULT_CONTEXT_WINDOW,
       maxOutputTokens: providers.length ? Math.min(...providers.map(provider => provider.maxOutputTokens ?? 4096)) : 4096,

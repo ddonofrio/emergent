@@ -9,6 +9,7 @@ import { estimateTokens } from './tool-pairing';
 import type { Completion, CompletionRequest, Message, SessionEvent, SessionMetrics, SessionRunOptions, SessionSnapshot } from './types';
 
 const initialMetrics = (): SessionMetrics => ({ llmCalls: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, estimatedInputTokens: 0, latencyMs: 0, retries: 0, compactionCalls: 0 });
+const preparedTools = (options: SessionRunOptions) => options.prepareTools?.() ?? { tools: options.tools, schemas: options.schemas };
 
 class SessionPersistenceError extends Error {}
 
@@ -78,11 +79,12 @@ export class PersistentSession {
         signal.throwIfAborted();
         if (this.data.pendingCalls.length) {
           options.onState?.('tool');
+          const tools = preparedTools(options).tools;
           // Dispatch overlaps, publication remains in model order. The world
           // capability enforces physical concurrency and action exclusivity.
           const settled = await Promise.allSettled(this.data.pendingCalls.map(async pending => {
             if (pending.result) return;
-            const executor = options.tools[pending.call.name];
+            const executor = tools[pending.call.name];
             let result: unknown;
             let isError = false;
             try {
@@ -110,7 +112,9 @@ export class PersistentSession {
 
         options.onState?.('thinking');
         try {
-          const prefixLength = compactablePrefix(options, this.data.messages);
+          const toolkit = preparedTools(options);
+          const currentOptions = { ...options, tools: toolkit.tools, schemas: toolkit.schemas };
+          const prefixLength = compactablePrefix(currentOptions, this.data.messages);
           if (prefixLength > 0) {
             const prefix = this.data.messages.slice(0, prefixLength);
             this.event('compaction/start', { prefixLength });
@@ -130,7 +134,7 @@ export class PersistentSession {
                   this.countFailedAttempts(error);
                   throw error;
                 }
-              }, options, prefix, this.id, Math.min(options.maxOutputTokens ?? 4096, 2048));
+              }, currentOptions, prefix, this.id, Math.min(options.maxOutputTokens ?? 4096, 2048));
               const checkpoint = frameSummary(completion.content!);
               if (estimateTokens(checkpoint) >= estimateTokens(prefix)) throw new Error('Compaction checkpoint did not reduce context.');
               this.data.messages.splice(0, prefixLength, checkpoint);
@@ -146,7 +150,7 @@ export class PersistentSession {
           }
 
           const request: CompletionRequest = {
-            system: options.system, messages: structuredClone(this.data.messages), tools: options.schemas,
+            system: options.system, messages: structuredClone(this.data.messages), tools: toolkit.schemas,
             maxOutputTokens: options.maxOutputTokens ?? 4096, purpose: 'agent', sessionId: this.id,
           };
           this.data.metrics.llmCalls++;

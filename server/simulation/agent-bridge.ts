@@ -1,4 +1,5 @@
 import type { Engine } from '../../src/core/engine';
+import { knowledgeDescription } from '../../src/core/knowledge';
 import { TURN_TICKS, TICKS_PER_SECOND } from '../../src/core/time';
 import { clone, distance, type Action, type WorldEvent } from '../../src/core/types';
 import type { ActionProgress, AgentPort, PerceivedEvent, SimulationAction, ToolOutcome } from './agent-port';
@@ -48,6 +49,12 @@ export class AgentBridge {
         get tick() { return engine.tick; },
         active: () => this.engine.active(this.engine.entity(id)),
         observe: (angle = 0) => this.engine.observeAt(id, angle),
+        knowledge: (angle = 0) => {
+          const observation = this.engine.observeAt(id, angle);
+          return [...(this.engine.discoveries.get(id) ?? [])]
+            .filter(knowledge => this.engine.module.relevantKnowledge?.(observation, knowledge) ?? true)
+            .map(knowledgeDescription);
+        },
         inspectJump: (angle, metres) => this.engine.inspectJump(id, angle, metres),
         submit: (callId, command, signal) => this.submit(id, callId, command, signal),
         cancel: (callId, actionId, signal) => this.submit(id, callId, { action: 'cancel', actionId }, signal),

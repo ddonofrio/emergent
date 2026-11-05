@@ -10,7 +10,8 @@ const COMPACTION_INSTRUCTION = [
   'Output concise English bullets under these headings, in order: Self-authored goals and success conditions; Known local facts; Decisions and action results; Current work and pending action IDs; Private notes; Next step.',
   'Use (none) for empty sections. Preserve exact entity IDs, action IDs, coordinates, quantities, errors, utterances when relevant, and the agent\'s own goals.',
   'Include only information already present. Preserve uncertainty and distinguish observations from guesses. Never invent discoveries, actions, achievements, or goals.',
-  'Merge any previous checkpoint with newer information, dropping stale facts. Retain at most ten private notes.',
+  'Merge any previous checkpoint with newer information, dropping stale positions, superseded inventory, repeated waits, routine navigation attempts, and raw reasoning. Retain at most ten private notes.',
+  'Use at most 700 words. Prefer the newest authoritative tool result whenever history conflicts.',
   'Output only the checkpoint text. Do not call tools or take another action.',
 ].join('\n');
 
@@ -31,7 +32,7 @@ export async function summarizeWithLlm(
   const completion = await complete({
     system: options.system,
     messages: [...messages, { role: 'user', content: COMPACTION_INSTRUCTION }],
-    tools: options.schemas,
+    tools: [],
     maxOutputTokens,
     sessionId,
     purpose: 'compaction',
