@@ -441,15 +441,18 @@ function renderDetails() {
 }
 function renderStats(){
   if(!shown||!meta)return;
+  const turns=Math.floor(cursor/TURN_TICKS),realSeconds=shownSecondsPerTurn===undefined?undefined:turns*shownSecondsPerTurn;
+  const gameToRealRatio=realSeconds===undefined||realSeconds===0||turns===0?undefined:turns/realSeconds;
   const totals=Object.values(shownMetrics??{}).reduce((sum,metrics)=>({
     output:sum.output+(metrics.outputTokens??0),input:sum.input+(metrics.inputTokens??0),cache:sum.cache+(metrics.cachedInputTokens??0),
   }),{output:0,input:0,cache:0});
   const rows:[string,string][]=[
     ['Turns/Speed',`${Math.floor(cursor/TURN_TICKS)} turns (${shownSecondsPerTurn===undefined?'—':shownSecondsPerTurn.toFixed(2)} sec/turn)`],
+    ['Game/Real Time',gameToRealRatio===undefined?'—':`${(gameToRealRatio*100).toFixed(1)} %`],
     ['Tokens out',shownMetrics?`${totals.output.toLocaleString('en-US')} tok`:'— tok'],
     ['Tokens in',shownMetrics?`${totals.input.toLocaleString('en-US')} tok`:'— tok'],
     ['Cached tokens',shownMetrics?`${totals.cache.toLocaleString('en-US')} tok`:'— tok'],
-    ['Cache hit',shownMetrics&&totals.input>0?`${(totals.cache/totals.input*100).toFixed(1)}%`:'—%'],
+    ['Cache hit',shownMetrics&&totals.input>0?`${(totals.cache/totals.input*100).toFixed(1)} %`:'—%'],
   ];
   const signature=JSON.stringify({rows,hasSnapshot:shownMetrics!==undefined});if(signature===statsSignature)return;
   statsSignature=signature;
