@@ -37,7 +37,7 @@ app.innerHTML = `
     <aside id="debug-panel" class="debug-panel collapsed" aria-label="Debug and journal">
       <header class="panel-heading"><button id="debug-toggle" class="panel-toggle" type="button" aria-expanded="false" aria-label="Expand debug panel" title="Expand debug panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg><span>Debug</span></button></header>
       <div class="debug-content">
-        <section class="turn-status-section"><h2>Turn status</h2><ul id="provider-status-list" class="provider-status-list" aria-label="Configured models"></ul><p id="turn-status" role="status">One turn = one world second</p><div id="toast" role="status"></div></section>
+        <section class="turn-status-section"><h2>Turn status</h2><ul id="provider-status-list" class="provider-status-list" aria-label="Configured models"></ul><div id="toast" role="status"></div></section>
         <section class="stats-section" aria-label="Stats"><h2>Stats</h2><div id="stats-rows"></div></section>
         <section class="journal-section"><header class="journal-heading"><h2>Journal</h2><span id="event-count">0</span></header><div id="journal" class="journal"><p class="empty">Waiting for the first trace.</p></div></section>
       </div>
