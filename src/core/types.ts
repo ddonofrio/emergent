@@ -1,3 +1,5 @@
+import type { CraftingRules } from './crafting';
+
 export type Vec3 = [number, number, number];
 export type Block = [number, number, number, string];
 export interface Material { color: string; solid: boolean; floats: boolean; stackLimit?: number; vessel?: boolean; fluid?: boolean; breakable?: boolean; }
@@ -33,6 +35,9 @@ export interface AgentIntent {
   goal: string;
   successCondition: string;
   assessment?: string;
+  nextStep?: string;
+  expectedObservation?: string;
+  reconsiderWhen?: string;
   status: 'active' | 'completed' | 'abandoned' | 'blocked';
 }
 export interface Entity {
@@ -69,7 +74,7 @@ export interface UniverseManifest {
   perception: { range: number; fieldOfView: number; maxBlocks: number };
   agentInstructions: string;
 }
-export interface Action { action: 'walk' | 'run' | 'reverse' | 'jump' | 'turn' | 'wait' | 'find_material' | 'find_entity' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'open' | 'close' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; x?: number; y?: number; z?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; }
+export interface Action { action: 'walk' | 'run' | 'reverse' | 'jump' | 'turn' | 'wait' | 'find_material' | 'find_entity' | 'place' | 'throw' | 'pickup' | 'hit' | 'dig' | 'strike_held' | 'join' | 'open' | 'close' | 'fill' | 'empty' | 'hold' | 'store' | 'say' | 'follow' | 'stop_follow'; distance?: number; angle?: number; x?: number; y?: number; z?: number; target?: Vec3; impact?: Vec3; orientation?: 'up' | 'down'; itemId?: string; entityId?: string; word?: string; force?: number; stack?: number; recipeId?: string; }
 export interface NavigationPath { direction: 'forward-left' | 'forward' | 'forward-right'; turn: number; clearance: number; approach?: { distance:number; angle:number }; jump?: { distance:number; angle:number }; }
 export interface NavigationReport { checkedDistance: number; paths: (NavigationPath & { issue?: MovementIssue; options?: string[] })[]; blockedAfter?: number; }
 export interface ActionResult { ok: boolean; message: string; navigation?: NavigationReport; feedback?: Record<string, unknown>; }
@@ -110,7 +115,7 @@ export interface UniverseModule {
   initializeAutomaton?(entity: Entity): void;
   automatonAction?(entity: Entity): Action | undefined;
   wanderAction?(entity: Entity, context: WanderContext): Action | undefined;
-  transformHit?(kind: string, impact: Vec3, orientation?: 'up' | 'down'): string | null;
+  crafting?: CraftingRules;
   canEnter?(entity: Entity, feet: Vec3, inWater?: boolean): ActionResult;
   waterSurfaceHeight?(entity: Entity, x: number, z: number): number | undefined;
   movementStepHeight?(entity: Entity): number;

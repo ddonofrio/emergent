@@ -96,6 +96,8 @@ export interface SessionRunOptions {
   schemas: ToolSchema[];
   /** Rebuild state-dependent tools immediately before dispatch or inference. */
   prepareTools?: () => { tools: Record<string, ToolExecutor>; schemas: ToolSchema[] };
+  /** Rebind an existing operation even when its tool is no longer offered for new calls. */
+  resumeTool?: (call: ToolCall, signal: AbortSignal) => Promise<unknown> | undefined;
   system: string;
   signal: AbortSignal;
   persist?: (snapshot: SessionSnapshot) => void | Promise<void>;

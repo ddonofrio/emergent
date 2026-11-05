@@ -143,18 +143,49 @@ test('state-dependent tools refresh after taking raw wood into the hands', async
     f.requests[0].respond('hold', { stack: 0 }); await until(() => f.runtime.ready());
     for (let i = 0; i < 80 && f.requests.length < 2; i++) { f.pump(); await Promise.resolve(); }
     await until(() => f.requests.length === 2);
-    const secondNames = f.requests[1].request.tools.map(tool => tool.name);
+    const discovery = resultOf(f.requests[1].request);
+    assert.equal(discovery.current.bodyActivity.id, discovery.action.id);
+    assert.equal(f.requests[1].request.tools.some(tool => tool.name === 'strike_held'), false);
+    assert.ok(discovery.current.learned.some((fact: string) => fact.includes('front_corner')));
+    f.requests[1].respond('wait_for_event', { actionId: discovery.action.id, eventTypes: [] });
+    await until(() => f.runtime.ready());
+    for (let i = 0; i < 80 && f.requests.length < 3; i++) { f.pump(); await Promise.resolve(); }
+    await until(() => f.requests.length === 3);
+    const secondNames = f.requests[2].request.tools.map(tool => tool.name);
     assert.ok(secondNames.includes('strike_held'));
     assert.equal(secondNames.includes('run'), false);
-    const strike = f.requests[1].request.tools.find(tool => tool.name === 'strike_held')!;
+    const strike = f.requests[2].request.tools.find(tool => tool.name === 'strike_held')!;
     assert.deepEqual((strike.parameters.properties as {point:{enum:string[]}}).point.enum,
       ['top_center', 'bottom_center', 'front_center', 'side_center', 'front_corner', 'front_edge']);
     assert.equal(strike.description.includes('plank'), false, 'Undiscovered products stay out of the affordance description.');
-    const result = resultOf(f.requests[1].request);
+    const result = resultOf(f.requests[2].request);
     assert.equal(result.current.self.inventory.selected, 0);
     assert.deepEqual(result.current.self.intent, f.engine.entity('walker').intent);
     assert.deepEqual(f.errors, []);
   } finally { await f.close(); }
+});
+
+test('restart rebinds a committed body operation even when its tool is temporarily unavailable', async () => {
+  const f = fixture();
+  let resumed: ReturnType<typeof fixture> | undefined;
+  try {
+    f.engine.entity('walker').inventory = { stacks: [{ kind: 'wood', count: 2 }], selected: null, capacity: 640 };
+    f.clock.setEnabled(true); await until(() => f.requests.length === 1);
+    f.requests[0].respond('hold', { stack: 0 }); await until(() => f.runtime.ready());
+    f.pump(0);
+    const runtime = f.runtime.persistence(), state = f.engine.state();
+    assert.equal(runtime.agents.walker.session.pendingCalls[0].result, undefined);
+    assert.equal(f.bridge.ports()[0].bodyActivity()?.kind, 'hold');
+    await f.close();
+    resumed = fixture(false, { state, runtime });
+    resumed.clock.setEnabled(true); await until(() => resumed!.requests.length === 1);
+    const result = resultOf(resumed.requests[0].request);
+    assert.equal(result.error, undefined);
+    assert.equal(result.action.kind, 'hold');
+    assert.equal(result.current.self.inventory.selected, 0);
+    assert.equal(resumed.bridge.snapshot().entities.walker.actions.filter(action => action.kind === 'hold').length, 1);
+    assert.deepEqual(resumed.errors, []);
+  } finally { if (resumed) await resumed.close(); else await f.close(); }
 });
 
 test('a frozen commit updates its checkpoint atomically with the resumable action receipt', async () => {

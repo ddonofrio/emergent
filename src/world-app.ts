@@ -3,6 +3,7 @@ import { advancePlayback, fastScrubSpeed } from './view/playback-clock';
 import { formatWorldDuration, worldTime, WORLD_DAY_SECONDS, TURN_TICKS, type TurnStatus } from './core/time';
 import { key, unkey, type Frame, type UniverseManifest, type WorldEvent, type WorldState } from './core/types';
 import { knowledgeDescription } from './core/knowledge';
+import { loadUniverse } from './universes';
 import { entityDisplayStatus } from './view/entity-status';
 
 interface AgentMetrics { llmCalls?:number; inputTokens?:number; outputTokens?:number; cachedInputTokens?:number; }
@@ -424,7 +425,7 @@ function renderDetails() {
     const section=document.createElement('section');section.className='agent-intent';section.setAttribute('aria-label','Agent-authored intent');
     const label=document.createElement('h4');label.textContent='Intent in this record';section.append(label);
     if(e.intent){
-      const rows=[...(e.intent.identity?[`Identity: ${e.intent.identity}`]:[]),`Goal: ${e.intent.goal}`,`Success condition: ${e.intent.successCondition}`,`Status: ${e.intent.status} (agent assessment)`,...(e.intent.assessment?[`Assessment: ${e.intent.assessment}`]:[])];
+      const rows=[...(e.intent.identity?[`Identity: ${e.intent.identity}`]:[]),`Goal: ${e.intent.goal}`,`Success condition: ${e.intent.successCondition}`,`Status: ${e.intent.status} (agent assessment)`,...(e.intent.nextStep?[`Next step: ${e.intent.nextStep}`]:[]),...(e.intent.expectedObservation?[`Expected observation: ${e.intent.expectedObservation}`]:[]),...(e.intent.reconsiderWhen?[`Reconsider when: ${e.intent.reconsiderWhen}`]:[]),...(e.intent.assessment?[`Assessment: ${e.intent.assessment}`]:[])];
       for(const text of rows){const paragraph=document.createElement('p');paragraph.textContent=text;section.append(paragraph);}
     }else{const paragraph=document.createElement('p');paragraph.className='muted';paragraph.textContent='No intent recorded yet.';section.append(paragraph);}
     panel.append(section);
@@ -434,7 +435,7 @@ function renderDetails() {
   else if(!memoryView.notes.length){const p=document.createElement('p');p.className='muted';p.textContent='No private memory notes yet.';recordPanel.append(p);}
   else for(const note of memoryView.notes){const p=document.createElement('p');p.textContent=note;recordPanel.append(p);}
   const knowledgeLabel=document.createElement('h4');knowledgeLabel.textContent='Learned Knowledge';recordPanel.append(knowledgeLabel);
-  const learned=(shown.discoveries?.[selected]??[]).map(knowledgeDescription);
+  const learned=(shown.discoveries?.[selected]??[]).map(knowledge=>knowledgeDescription(knowledge,loadUniverse(universeId!).crafting));
   if(!learned.length){const p=document.createElement('p');p.className='muted';p.textContent='Nothing discovered yet.';recordPanel.append(p);}
   else for(const knowledge of learned){const p=document.createElement('p');p.textContent=knowledge;recordPanel.append(p);}
 }

@@ -1,4 +1,9 @@
 import type { Action, ActionResult, AgentIntent, Entity, Observation, Vec3 } from '../../src/core/types';
+import type { ItemCapability } from '../../src/core/crafting';
+
+export const wakeEventTypes = ['speech', 'encounter', 'discovery', 'terrain', 'block-impact', 'collision', 'blocked', 'arrived', 'scanned', 'follow-ended', 'follow-blocked', 'rebound-ended', 'action-completed', 'action-blocked', 'action-cancelled', 'action-rejected'] as const;
+export interface WaitOptions { actionId?: string; seconds?: number; eventTypes?: (typeof wakeEventTypes)[number][]; }
+export interface BodyActivity { id: string; kind: string; untilTick?: number; }
 
 export interface PerceivedEvent {
   id: number;
@@ -50,10 +55,14 @@ export interface AgentPort {
   active(): boolean;
   observe(angle?: number): Observation;
   knowledge(angle?: number): string[];
+  recall(query: string): { facts: string[]; total: number };
+  capabilities(view: Observation): ItemCapability[];
+  bodyActivity(): BodyActivity | undefined;
+  resume(callId: string, signal: AbortSignal): Promise<ToolOutcome> | undefined;
   inspectJump(angle: number, distance: number): unknown;
   submit(callId: string, action: Action, signal: AbortSignal): Promise<ToolOutcome>;
   cancel(callId: string, actionId: string, signal: AbortSignal): Promise<ToolOutcome>;
-  wait(callId: string, options: { actionId?: string; seconds?: number }, signal: AbortSignal): Promise<ToolOutcome>;
+  wait(callId: string, options: WaitOptions, signal: AbortSignal): Promise<ToolOutcome>;
   setIntent(intent: AgentIntent): void;
   remember(notes: string[]): void;
   waiting(): boolean;

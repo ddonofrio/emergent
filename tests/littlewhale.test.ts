@@ -121,6 +121,8 @@ test('compaction replaces only the paired prefix and durably retains original co
         assert.ok(request.messages.at(-1)?.content?.includes('compaction engine'));
         assert.ok(request.messages.at(-1)?.content?.includes('at most 700 words'));
         assert.deepEqual(request.tools, [], 'Compaction cannot mutate the world or call an agent tool.');
+        assert.notEqual(request.system, 'Embodied agent.', 'Compaction must not inherit the acting prompt.');
+        assert.match(request.system, /do not call tools/i);
         return response([], 'Known local facts: observations are retained in this checkpoint.');
       }
       normalRequest = request;

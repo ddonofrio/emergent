@@ -1,10 +1,11 @@
 import type { Engine } from '../../src/core/engine';
 import { knowledgeDescription } from '../../src/core/knowledge';
+import { itemCapabilities } from '../../src/core/crafting';
 import { TURN_TICKS, TICKS_PER_SECOND } from '../../src/core/time';
 import { clone, distance, type Action, type WorldEvent } from '../../src/core/types';
-import type { ActionProgress, AgentPort, PerceivedEvent, SimulationAction, ToolOutcome } from './agent-port';
+import type { ActionProgress, AgentPort, PerceivedEvent, SimulationAction, ToolOutcome, WaitOptions } from './agent-port';
 
-interface WaitRequest { callId: string; actionId?: string; untilTick?: number; }
+interface WaitRequest { callId: string; actionId?: string; untilTick?: number; eventTypes?: WaitOptions['eventTypes']; }
 interface EntityTasks {
   sequence: number;
   actions: SimulationAction[];
@@ -38,6 +39,7 @@ export class AgentBridge {
       this.entities[entity.id] ??= { sequence: 0, actions: [], events: [], seen: [], requests: [], receipts: {} };
     }
     this.unsubscribe = engine.subscribeEvents(event => this.collectEvent(event));
+    for (const id of Object.keys(this.entities)) engine.learnHeldItem(id);
   }
   snapshot(): BridgeSnapshot { return clone({ entities: this.entities }); }
   get tick() { return this.engine.tick; }
@@ -53,16 +55,40 @@ export class AgentBridge {
           const observation = this.engine.observeAt(id, angle);
           return [...(this.engine.discoveries.get(id) ?? [])]
             .filter(knowledge => this.engine.module.relevantKnowledge?.(observation, knowledge) ?? true)
-            .map(knowledgeDescription);
+            .map(knowledge => knowledgeDescription(knowledge, this.engine.module.crafting));
+        },
+        capabilities: view => itemCapabilities(this.engine.module.crafting, view),
+        recall: query => {
+          const terms = query.toLowerCase().trim().split(/\s+/);
+          const facts = [...(this.engine.discoveries.get(id) ?? [])].flatMap(key => {
+            const description = knowledgeDescription(key, this.engine.module.crafting);
+            return terms.every(term => `${key} ${description}`.toLowerCase().includes(term)) ? [description] : [];
+          });
+          return { facts: facts.slice(0, 20), total: facts.length };
+        },
+        bodyActivity: () => {
+          const action = this.state(id).actions.find(action => action.channel === 'body'
+            && (action.status === 'queued' || action.status === 'running' && (action.physicalActive || action.dueTick! > this.engine.tick)));
+          return action ? { id: action.id, kind: action.kind, ...(action.dueTick === undefined ? {} : { untilTick: action.dueTick }) } : undefined;
         },
         inspectJump: (angle, metres) => this.engine.inspectJump(id, angle, metres),
+        resume: (callId, signal) => {
+          if (this.closed) return Promise.reject(new Error('Simulation connection is closed.'));
+          signal.throwIfAborted();
+          const state = this.state(id);
+          if (state.receipts[callId]) return Promise.resolve(clone(state.receipts[callId]));
+          const action = state.actions.find(action => action.callId === callId);
+          const request = state.requests.find(request => request.callId === callId);
+          return request || action ? this.bind(id, request ?? { callId, actionId: action!.id }, signal) : undefined;
+        },
         submit: (callId, command, signal) => this.submit(id, callId, command, signal),
         cancel: (callId, actionId, signal) => this.submit(id, callId, { action: 'cancel', actionId }, signal),
         wait: (callId, options, signal) => this.wait(id, callId, options, signal),
         setIntent: intent => { this.engine.entity(id).intent = clone(intent); this.engine.event(id, 'intent', intent.goal, { intent }); this.checkpoint(); },
         remember: notes => { this.engine.event(id, 'memory', 'Updated private notes.', { notes }); this.checkpoint(); },
         waiting: () => (this.waiters.get(id)?.size ?? 0) > 0
-          && (this.state(id).actions.some(action => action.status === 'queued') || this.state(id).events.length === 0),
+          && (this.state(id).actions.some(action => action.status === 'queued')
+            || ![...this.waiters.get(id)!.values()].some(waiter => this.hasWakeEvent(waiter.request, this.state(id).events))),
       };
     });
   }
@@ -82,7 +108,7 @@ export class AgentBridge {
     }
     return this.bind(id, { callId, actionId: action.id }, signal);
   }
-  private wait(id: string, callId: string, options: { actionId?: string; seconds?: number }, signal: AbortSignal) {
+  private wait(id: string, callId: string, options: WaitOptions, signal: AbortSignal) {
     if (this.closed) return Promise.reject(new Error('Simulation connection is closed.'));
     signal.throwIfAborted();
     const state = this.state(id);
@@ -92,7 +118,11 @@ export class AgentBridge {
     }
     const previous = state.requests.find(request => request.callId === callId);
     return this.bind(id, previous ?? { callId, actionId: options.actionId,
+      ...(options.eventTypes === undefined ? {} : { eventTypes: [...options.eventTypes] }),
       ...(options.seconds === undefined ? {} : { untilTick: this.engine.tick + Math.max(1, Math.ceil(options.seconds * TICKS_PER_SECOND)) }) }, signal);
+  }
+  private hasWakeEvent(request: WaitRequest, events: PerceivedEvent[]) {
+    return events.some(event => request.eventTypes === undefined || request.eventTypes.includes(event.type as NonNullable<WaitOptions['eventTypes']>[number]));
   }
   private bind(id: string, request: WaitRequest, signal: AbortSignal): Promise<ToolOutcome> {
     const state = this.state(id);
@@ -269,8 +299,9 @@ export class AgentBridge {
       const state = this.state(id);
       // Every submitted operation must pass the shared commit before parallel waits return.
       if (state.actions.some(action => action.status === 'queued')) continue;
-      const hasEvents = state.events.length > 0;
+      const queuedEvents = [...state.events];
       for (const [callId, waiter] of waiters) {
+        const hasEvents = this.hasWakeEvent(waiter.request, queuedEvents);
         const action = state.actions.find(action => action.id === waiter.request.actionId);
         const completed = action && terminal(action);
         const timedOut = waiter.request.untilTick !== undefined && this.engine.tick >= waiter.request.untilTick;

@@ -6,7 +6,7 @@ import type { Store } from '../store';
 import type { AgentPort } from '../simulation/agent-port';
 import type { AgentBridge, BridgeSnapshot } from '../simulation/agent-bridge';
 import type { WorldConnection } from '../simulation/connection';
-import { agentTools, localView } from './tools';
+import { agentTools, observeAgent, resumeAgentTool } from './tools';
 
 export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; viewAngle?: number; }
 export interface RuntimeSnapshot { version: 1; agents: Record<string, AgentSnapshot>; simulation: BridgeSnapshot; }
@@ -35,7 +35,7 @@ export class AgentRuntime implements WorldConnection {
       const saved = snapshot?.agents[port.id];
       const session = new PersistentSession(port.id, saved?.session);
       const agent: Agent = { port, session, notes: saved?.notes ?? [], viewAngle: saved?.viewAngle, state: 'stopped' };
-      if (!saved) session.appendUser(JSON.stringify({ observation: localView(port.observe(), port.knowledge(), agent.notes), instruction: 'Choose your own goals and act through the currently available tools.' }));
+      if (!saved) session.appendUser(JSON.stringify({ observation: observeAgent(port, agent.notes), instruction: 'Choose your own goals and act through the currently available tools.' }));
       this.agents.set(port.id, agent);
     }
   }
@@ -78,14 +78,16 @@ export class AgentRuntime implements WorldConnection {
     const controller = new AbortController(); agent.controller = controller;
     const tools = agentTools(agent.port, agent);
     const system = `${agent.port.instructions.replaceAll('{name}', agent.port.name)}
-You have one continuous private conversation. Choose your own identity, goals and observable success conditions; reassess them from current tool outcomes and mark an intent completed when its full condition is met. Keep at most ten private notes with remember.
-Events arrive through tool results. A returned event leaves movement active: speak, then wait_for_event for more events or completion. Actions have persistent IDs. Only arrival, blockage, explicit cancellation or replacement ends movement. Speech is concurrent; locomotion is exclusive; hand interactions and scans require a stationary body. Calls in one response run concurrently and are validated at a shared commit boundary.
+You have one continuous private conversation. Choose your own identity, goals and observable success conditions. Keep a small next step, expected observation and reason to reconsider in set_intent when useful; update your own plan after discoveries, repeated blockage or completion. Each success condition must cover the goal you selected. An experiment establishes only the tested inputs, not every option. Keep at most ten private notes with remember; permanent learned knowledge can be searched with recall even after an object is gone.
+Events arrive through tool results. An event alone does not stop movement or require a reply. Only arrival, blockage, explicit cancellation or replacement ends movement. Use wait_for_event to continue an ongoing action, choosing eventTypes if only certain interruptions matter. For an uncertain reply, choose a timeout; silence need not stop your own plans.
+Calls in one response run concurrently, not sequentially. Submit at most one body or locomotion action per response. Scans, turning and hand interactions require a free stationary body; bodyActivity remains busy until its action completes even if you look stationary. Speech and private planning may run alongside an action. Wait for a dependent step's result before issuing the next step. Actions have persistent IDs and are validated at the shared commit boundary.
 World time freezes during every agent's inference or retry. Tool waits let the shared clock advance. Self and creature positions name x, yHeight and z; voxel targets use [x,y,z], where y is height; walk_to uses horizontal x,z.
-The current context in observations and physical tool results overrides older positions, inventory, intent and learned facts. Never route from a stale sighting: after a collision, unexpected blockage or uncertain target location, look again. The offered tools are refreshed from your current body, hands and local view. Never assume unseen facts. Call tools to proceed.`;
+Current tool results override old positions, inventory and fallible notes. Learned lists are relevant subsets, not erasures of prior discoveries. Capabilities describe possible uses and prerequisites; available tools describe what you can execute now. Missing hit or pickup while holding an object means you must free your hands, not that nearby material is unreachable. Check hand constraints and bodyActivity before changing position to solve an unavailable action. Visible block counts describe only the local view, never the whole world or your inventory. After a collision or uncertain location, look again. Never assume unseen facts. Call tools to proceed.`;
     const providers = this.inference.providers.filter(provider => provider.enabled !== false && provider.model);
     agent.job = agent.session.run({
       system, schemas: tools.schemas, tools: tools.executors, signal: controller.signal,
       prepareTools: () => { const current = agentTools(agent.port, agent); return { schemas: current.schemas, tools: current.executors }; },
+      resumeTool: (call, signal) => resumeAgentTool(agent.port, call.id, signal),
       complete: (request, signal) => this.complete(agent, request, signal),
       contextWindow: providers.length ? Math.min(...providers.map(provider => provider.contextWindow ?? DEFAULT_CONTEXT_WINDOW)) : DEFAULT_CONTEXT_WINDOW,
       maxOutputTokens: providers.length ? Math.min(...providers.map(provider => provider.maxOutputTokens ?? 4096)) : 4096,

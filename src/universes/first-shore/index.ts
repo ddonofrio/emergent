@@ -1,6 +1,7 @@
 import type { Action, Block, Entity, UniverseModule, Vec3, WanderContext } from '../../core/types';
 import { WORLD_DAY_SECONDS } from '../../core/time';
 import { standardMaterials } from '../../core/materials';
+import { firstShoreCrafting } from './crafting';
 
 const waterLevel = 0;
 function islandSurfaceAt(x:number,z:number){
@@ -94,17 +95,7 @@ export const island: UniverseModule = {
   },
   movementStepHeight(entity){return entity.kind==='duck'?1:0;},
   movementInertia(entity){return entity.kind==='duck'?{acceleration:3,deceleration:3}:undefined;},
-  transformHit(kind, impact, orientation) {
-    if(kind!=='wood')return null;
-    const [x,y,z]=impact,mid=(v:number)=>v>=.32&&v<=.68,edge=(v:number)=>v<=.18||v>=.82;
-    if(edge(x)&&edge(y)&&edge(z))return 'shovel';
-    if(edge(x)&&mid(y)&&edge(z))return orientation==='up'?'door_half_up':orientation==='down'?'door_half_down':null;
-    if(y<=.18&&mid(x)&&mid(z))return 'plank';
-    if(y>=.82&&mid(x)&&mid(z))return 'bucket';
-    if(z>=.82&&mid(x)&&mid(y))return 'spear';
-    if(edge(x)&&mid(y)&&mid(z))return 'knife';
-    return null;
-  },
+  crafting: firstShoreCrafting,
   describeObstacle(issue) {
     if(issue.material==='wood'&&(issue.height??0)>1)return 'A tree trunk or tall wooden structure blocks your path.';
   },
@@ -113,13 +104,14 @@ export const island: UniverseModule = {
   },
   relevantKnowledge(observation,knowledge){
     const inventory=observation.self.inventory,held=inventory?.selected===null||!inventory?undefined:inventory.stacks[inventory.selected];
+    if(knowledge.startsWith('item-uses:'))return !!inventory?.stacks.some(stack=>stack.kind===knowledge.slice('item-uses:'.length));
+    const recipe=this.crafting?.recipes.find(recipe=>recipe.knowledge.id===knowledge);
+    if(recipe)return recipe.ingredients.some(ingredient=>inventory?.stacks.some(stack=>stack.kind===ingredient.kind));
     const nearWater=observation.self.position[1]<=waterLevel+1||observation.navigation.paths.some(path=>path.issue?.kind==='water');
     if(knowledge==='blocks-break-after-three-hits')return !held&&observation.interactions.hit.length>0;
     if(knowledge==='deep-water-limit')return nearWater;
     if(knowledge==='thrown-blocks-settle')return !!held&&['dirt','grass','sand','stone','wood','leaves'].includes(held.kind);
     if(knowledge==='nonfloating-objects-sink')return nearWater&&!!held;
-    if(knowledge==='wood-shape:door')return !!inventory?.stacks.some(stack=>stack.kind==='door_half_up'||stack.kind==='door_half_down');
-    if(knowledge.startsWith('wood-shape:'))return held?.kind==='wood';
     return false;
   },
   respondToSpeech(listener){

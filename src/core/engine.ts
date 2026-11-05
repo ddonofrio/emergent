@@ -1,6 +1,7 @@
 import { Voxels } from './voxels';
 import { TICKS_PER_SECOND, TURN_TICKS } from './time';
 import { exchangeInventory, normalizeInventory } from './inventory';
+import { itemUseDescription, itemUseKnowledge, recipeRemovals } from './crafting';
 import { knowledgeDescription, observedMaterialKnowledge } from './knowledge';
 import { isRawBlock as rawBlock } from './materials';
 import { speechProblem, speechTurn, speechWordCount, speechWordsRemaining } from './speech';
@@ -232,10 +233,11 @@ export class Engine {
       const clear=!kind&&distance(eye,point)<=3&&this.visible(e,point);
       const objectFits=held.kind!=='door'||this.inside([target[0],target[1]+1,target[2]])&&!this.voxels.get([target[0],target[1]+1,target[2]]);
       if(clear&&objectFits&&!held.contents&&!this.cellOccupied(target)&&this.hasSupport(target,!rawBlock(held.kind)))place.push(target);
-      if(held.kind!=='bucket')continue;
-      const canChangeContents=(contents?:string)=>!!exchangeInventory(e.inventory,[{index:e.inventory!.selected!,count:1}],[{kind:'bucket',count:1,...(contents?{contents}:{})}],true);
+      const container=this.module.crafting?.items[held.kind]?.container;
+      if(!container)continue;
+      const canChangeContents=(contents?:string)=>!!exchangeInventory(e.inventory,[{index:e.inventory!.selected!,count:1}],[{kind:held.kind,count:1,...(contents?{contents}:{})}],true);
       const fluid=kind&&this.module.manifest.materials[kind]?.fluid;
-      if(!held.contents&&(((fluid&&distance(eye,point)<=3&&this.visible(e,point))||((kind==='sand'||kind==='dirt')&&!this.standingOn(target)&&this.blockInReach(e,target)&&this.blockSurfaces(target,eye).some(p=>this.visible(e,p))))&&canChangeContents(kind)))fill.push(target);
+      if(!held.contents&&kind&&container.materials.includes(kind)&&(((fluid&&distance(eye,point)<=3&&this.visible(e,point))||(!fluid&&!this.standingOn(target)&&this.blockInReach(e,target)&&this.blockSurfaces(target,eye).some(p=>this.visible(e,p))))&&canChangeContents(kind)))fill.push(target);
       if(held.contents&&clear&&(held.contents==='water'||(!this.cellOccupied(target)&&this.hasSupport(target)))&&canChangeContents())empty.push(target);
     }
     const nearest=(targets:Vec3[])=>targets.sort((a,b)=>distance(eye,center(a))-distance(eye,center(b)));
@@ -262,12 +264,12 @@ export class Engine {
     const doors=items.filter(item=>item.door&&distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)).map(item=>({itemId:item.id,kind:'door' as const,metres:Math.round(distance(eye,item.position)*10)/10,angle:item.door!.angle,outsideYaw:item.door!.outsideYaw}));
     const description = this.describe(e,[...surfaces.values()],entities,items,navigation);
     const obstacles=new Set(navigation.paths.flatMap(path=>path.issue?.target?[key(path.issue.target)]:[]));
-    const held=this.held(e),emptyHands=!held,hasShovel=held?.kind==='shovel';
+    const held=this.held(e),emptyHands=!held,digMaterials=held&&this.module.crafting?.items[held.kind]?.dig?.materials;
     const interactions = {
-      hit: emptyHands||hasShovel ? blocks.filter(block=>{
+      hit: emptyHands||digMaterials ? blocks.filter(block=>{
         const target=block.slice(0,3) as Vec3;
         const material=this.module.manifest.materials[block[3]];
-        return !material?.fluid&&material?.breakable!==false&&this.blockInReach(e,target)&&!this.standingOn(target)&&(!hasShovel||['sand','dirt','grass'].includes(block[3]));
+        return !material?.fluid&&material?.breakable!==false&&this.blockInReach(e,target)&&!this.standingOn(target)&&(!digMaterials||digMaterials.includes(block[3]));
       }).sort((a,b)=>(this.blockDamage.get(key(b.slice(0,3) as Vec3))??0)-(this.blockDamage.get(key(a.slice(0,3) as Vec3))??0)||Number(obstacles.has(key(b.slice(0,3) as Vec3)))-Number(obstacles.has(key(a.slice(0,3) as Vec3)))||Number(b[3]==='wood')-Number(a[3]==='wood'))
         .map(block=>({target:block.slice(0,3) as Vec3,kind:block[3],cracks:this.blockDamage.get(key(block.slice(0,3) as Vec3))??0})) : [],
       pickup: emptyHands ? items.filter(item=>(!item.door||item.door.angle===0)&&distance(eye,item.position)<=3&&this.voxels.clearLine(eye,item.position)&&this.canHold(e,item.kind,item.contents??(item.water?'water':undefined)).ok)
@@ -418,6 +420,10 @@ export class Engine {
     return 'behind';
   }
   held(e: Entity) { return e.inventory?.selected === null || !e.inventory ? undefined : e.inventory.stacks[e.inventory.selected]; }
+  learnHeldItem(id: string) {
+    const held=this.held(this.entity(id));
+    if(held)this.discover(id,itemUseKnowledge(held.kind),itemUseDescription(held.kind,this.module.crafting),{item:held.kind});
+  }
   private describe(e: Entity, surfaces: {kind:string;count:number;nearest:Vec3}[], entities: EntitySighting[], items: Body[], navigation: NavigationReport, bodyYaw=e.yaw) {
     const parts: string[] = [];
     const held = this.held(e);
@@ -433,7 +439,7 @@ export class Engine {
       const metres = distance(e.position,center(surface.nearest));
       const label = surface.kind === 'plant' ? 'plant or shrub' : `${surface.kind} block`;
       const reach=this.blockInReach(e,surface.nearest)&&!this.standingOn(surface.nearest);
-      const interaction=this.module.manifest.materials[surface.kind]?.fluid?' It is fluid and can be entered where its depth is safe.':held?.kind==='shovel'&&['sand','dirt','grass'].includes(surface.kind)?' Within reach: dig with your shovel.':held?' Within reach; free your hands to hit it.':' Within reach: hit it without moving closer.';
+      const interaction=this.module.manifest.materials[surface.kind]?.fluid?' It is fluid and can be entered where its depth is safe.':held&&this.module.crafting?.items[held.kind]?.dig?.materials.includes(surface.kind)?` Within reach: dig with your ${held.kind}.`:held?' Within reach; free your hands to hit it.':' Within reach: hit it without moving closer.';
       parts.push(`A ${label} at [${surface.nearest.join(',')}] is ${metres.toFixed(1)} m to its centre, ${this.direction(body,center(surface.nearest))} (body-relative ${bearing(center(surface.nearest))} degrees).${reach?interaction:''}`);
     }
     for (const other of entities.slice(0,4)) parts.push(`${other.name}, a ${other.kind}, is ${distance(e.position,other.position).toFixed(1)} m ${this.direction(body,other.position)} (body-relative ${bearing(other.position)} degrees). ${other.holding?`${other.name} holds ${other.holding.kind}${other.holding.contents?` containing ${other.holding.contents}`:''}.`:`${other.name}'s hands are empty.`}`);
@@ -549,7 +555,7 @@ export class Engine {
     }
     if(issue?.target&&['rise','wall','overhang'].includes(issue.kind)){
       const held=this.held(e),reachable=!this.standingOn(issue.target)&&this.blockInReach(e,issue.target)&&this.blockSurfaces(issue.target,this.eye(e)).some(point=>this.visible(e,point));
-      if(held?.kind==='shovel'&&reachable&&['sand','dirt','grass'].includes(this.voxels.get(issue.target)!))options.push('dig');
+      if(held&&reachable&&this.module.crafting?.items[held.kind]?.dig?.materials.includes(this.voxels.get(issue.target)!))options.push('dig');
       else if(held)options.push('store');
       else if(reachable)options.push('hit');
     }
@@ -587,6 +593,7 @@ export class Engine {
     if(result.ok&&action.action==='follow')result.feedback={...result.feedback,outcome:'following',from:clone(e.position)};
     if(result.ok&&action.action==='stop_follow')result.feedback={...result.feedback,outcome:'stopped',to:clone(e.position)};
     if(result.ok){
+      this.learnHeldItem(id);
       const counts=new Map<string,{kind:string;contents?:string;change:number}>();
       for(const [stacks,sign] of [[previousInventory,-1],[e.inventory?.stacks??[],1]] as const)for(const stack of stacks){
         const id=JSON.stringify([stack.kind,stack.contents??null]),entry=counts.get(id)??{kind:stack.kind,...(stack.contents?{contents:stack.contents}:{}),change:0};
@@ -740,27 +747,29 @@ export class Engine {
       this.consume(e); return ok(`Threw one ${held.kind}.`);
     }
     if(a.action==='strike_held'){
-      const held=this.held(e);if(!held||held.kind!=='wood')return fail('Only a raw wood block can be worked this way.');
+      const held=this.held(e),experiments=held&&this.module.crafting?.items[held.kind]?.experiments;
+      if(!held||!experiments?.length)return fail('The held item has no available surface experiments.');
       if(!a.impact||a.impact.length!==3||!a.impact.every(v=>Number.isFinite(v)&&v>=0&&v<=1))return fail('Impact must be a local surface point in [0,1]^3.');
-      if(a.impact[0]<=.18&&a.impact[1]>=.32&&a.impact[1]<=.68&&a.impact[2]>=.82&&!a.orientation)return fail('Choose orientation up or down for this strike.');
-      const made=this.module.transformHit?.(held.kind,a.impact,a.orientation)??null;
-      if(!made)return ok('The strike leaves a notch in the wood, but its form does not change.');
-      const count=made==='plank'?5:1;
-      if(!this.replaceHeld(e,{kind:made,count}))return fail('No space for the result: at most 10 different stacks, 64 identical items each. Put something down first.');
-      const discovery=made==='plank'?'Discovered that a centered strike on the bottom of wood makes five planks, each 0.20 metres thick.':made==='shovel'?'Discovered a wooden shovel that removes sand, dirt, and grass with one strike.':`Discovered how to shape wood into a ${made.replaceAll('_',' ')}.`;
-      this.discover(e.id,`wood-shape:${made}`,discovery,{source:'wood',product:made,impact:a.impact,...(a.orientation?{orientation:a.orientation}:{})});
-      if(made==='plank')return {...ok('The wood splits into five wooden planks, each 0.20 metres thick.'),feedback:{shaped:made}};
-      if(made==='door_half_up'||made==='door_half_down')return {...ok(`The wood changes shape. You now hold the ${made==='door_half_up'?'upper':'lower'} half of a rustic wooden door.`),feedback:{shaped:made}};
-      return {...ok(`The wood changes shape under the strike. You now hold a wooden ${made.replaceAll('_',' ')}.`),feedback:{shaped:made}};
+      const experiment=experiments.find(experiment=>experiment.matches(a.impact!));
+      if(experiment?.orientations&&!experiment.orientations.includes(a.orientation!))return fail(`Choose orientation ${experiment.orientations.join(' or ')} for this strike.`);
+      const recipe=this.module.crafting!.recipes.find(recipe=>!!experiment&&!!recipe.experiment&&recipe.experiment.point===experiment.point
+        &&recipe.experiment?.orientation===(experiment?.orientations?a.orientation:undefined)
+        &&recipe.ingredients.length===1&&recipe.ingredients[0].kind===held.kind&&recipe.ingredients[0].contents===held.contents);
+      if(!recipe)return ok(`The strike marks the ${held.kind}, but its form does not change.`);
+      const inventory=exchangeInventory(e.inventory,[{index:e.inventory!.selected!,count:recipe.ingredients[0].count}],[recipe.result],true);
+      if(!inventory)return fail('No ingredients or inventory space for this experiment.');
+      e.inventory=inventory;
+      this.discover(e.id,recipe.knowledge.id,recipe.knowledge.description,{source:held.kind,product:recipe.result.kind,point:experiment!.point,impact:a.impact,...(a.orientation?{orientation:a.orientation}:{})});
+      return {...ok(recipe.message),feedback:{shaped:recipe.result.kind,source:'held-inventory',point:experiment!.point,...(a.orientation?{orientation:a.orientation}:{})}};
     }
     if(a.action==='join'){
-      const inventory=e.inventory;if(!inventory)return fail('You have no wooden door halves to join.');
-      const upper=inventory.stacks.findIndex(stack=>stack.kind==='door_half_up'&&stack.count>0),lower=inventory.stacks.findIndex(stack=>stack.kind==='door_half_down'&&stack.count>0);
-      if(upper<0||lower<0)return fail('You need one upper and one lower wooden door half to join them.');
-      const joined=exchangeInventory(inventory,[{index:upper,count:1},{index:lower,count:1}],[{kind:'door',count:1}],true);
-      if(!joined)return fail('No inventory space for the joined door. Put something down first.');
-      e.inventory=joined;this.discover(e.id,'wood-shape:door','Discovered that an upper and lower wooden door half join into a rustic door.',{source:'wood',product:'door'});
-      return ok('You join the upper and lower wooden halves into a rustic plank door.');
+      const recipes=this.module.crafting?.recipes.filter(recipe=>!recipe.experiment&&recipeRemovals(e.inventory,recipe))??[];
+      const recipe=a.recipeId?recipes.find(recipe=>recipe.id===a.recipeId):recipes.length===1?recipes[0]:undefined;
+      if(!recipe)return fail('Choose an available combination of owned ingredients.');
+      const joined=exchangeInventory(e.inventory,recipeRemovals(e.inventory,recipe)!,[recipe.result],true);
+      if(!joined)return fail('No inventory space for the joined object. Put something down first.');
+      e.inventory=joined;this.discover(e.id,recipe.knowledge.id,recipe.knowledge.description,{recipeId:recipe.id,product:recipe.result.kind});
+      return ok(recipe.message);
     }
     const target = a.target;
     if (!Array.isArray(target) || target.length !== 3 || !target.every(Number.isInteger) || !this.inside(target)) return fail('Target must be an integer voxel coordinate inside the world.');
@@ -800,55 +809,56 @@ export class Engine {
       const material = held.kind; this.voxels.set(target, material); this.consume(e); return {...ok(`Placed one ${material}.`),feedback:{placed:material,target}};
     }
     if (a.action === 'hit'||a.action==='dig') {
-      const held=this.held(e),usingShovel=held?.kind==='shovel';
-      if(a.action==='dig'&&!usingShovel)return fail('Hold a shovel before digging.');
-      if(held&&!usingShovel)return fail('You cannot strike the world while holding an object. Store, place, or throw it first.');
+      const held=this.held(e),digMaterials=held&&this.module.crafting?.items[held.kind]?.dig?.materials,usingDigTool=!!digMaterials;
+      if(a.action==='dig'&&!usingDigTool)return fail('Hold a digging tool before digging.');
+      if(held&&!usingDigTool)return fail('You cannot strike the world while holding an object. Store, place, or throw it first.');
       if (!kind) return fail('There is nothing to hit.');
       if(fluid)return fail(`The ${kind} block flows around a strike; enter it or use a suitable container instead.`);
       if(this.module.manifest.materials[kind]?.breakable===false)return fail(`The ${kind} is permanent and cannot be damaged or removed.`);
-      if(usingShovel&&!['sand','dirt','grass'].includes(kind))return fail('The wooden shovel can remove only sand, dirt, or grass in one strike.');
+      if(digMaterials&&!digMaterials.includes(kind))return fail(`The ${held!.kind} can dig only ${digMaterials.join(', ')}.`);
       const supported=this.standingOn(target);
       if(supported)return fail(`You cannot strike that block because ${supported.name} is standing on it.`);
       e.yaw=((Math.atan2(point[0]-e.position[0],point[2]-e.position[2])*180/Math.PI)%360+360)%360;
       const awayX=point[0]-e.position[0],awayZ=point[2]-e.position[2],awayDistance=Math.hypot(awayX,awayZ),facing=e.yaw*Math.PI/180;
       const treeFallDirection:Vec3=awayDistance>.001?[awayX/awayDistance,0,awayZ/awayDistance]:[Math.sin(facing),0,Math.cos(facing)];
       const voxel=key(target),damage=(this.blockDamage.get(voxel)??0)+1;
-      if(!usingShovel&&damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return {...ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`),feedback:{target,material:kind,blockOutcome:'cracked',cracks:damage}};}
-      this.blockDamage.delete(voxel);this.voxels.set(target,null);const treeCollapsed=this.collapseUnsupportedTree(target,treeFallDirection);this.wakeBodies();if(!usingShovel)this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
+      if(!usingDigTool&&damage<3){this.blockDamage.set(voxel,damage);this.event(e.id,'damage',`${kind} cracked (${damage}/3).`,{target,damage});return {...ok(damage===1?`You strike the ${kind}. Thin cracks appear, but the block remains intact. Another strike on the same block could deepen them.`:`You strike the ${kind} again. The cracks spread; one more solid hit should break it.`),feedback:{target,material:kind,blockOutcome:'cracked',cracks:damage}};}
+      this.blockDamage.delete(voxel);this.voxels.set(target,null);const treeCollapsed=this.collapseUnsupportedTree(target,treeFallDirection);this.wakeBodies();if(!usingDigTool)this.discover(e.id,'blocks-break-after-three-hits',`Discovered that repeated strikes break blocks after three hits.`,{material:kind,target,hits:3});
       const collected=kind==='plant'?'stick':kind,heldResult=this.canHold(e,collected);
-      if(heldResult.ok)this.addInventory(e,collected,undefined,!usingShovel);
+      if(heldResult.ok)this.addInventory(e,collected,undefined,!usingDigTool);
       else this.bodies.push({id:`item-${this.tick}-${this.nextBody++}`,kind:collected,position:center(target),velocity:[0,0,0],resting:false});
-      const result=usingShovel
-        ?heldResult.ok?`The wooden shovel removes the ${kind} block in one strike. You pick it up.`:`The wooden shovel removes the ${kind}, but it falls loose because your inventory is full.`
+      const result=usingDigTool
+        ?heldResult.ok?`The ${held!.kind} removes the ${kind} block in one strike. You pick it up.`:`The ${held!.kind} removes the ${kind}, but it falls loose because your inventory is full.`
         :kind==='plant'
           ?heldResult.ok?'The plant breaks. You pick up a stick.':'The plant breaks, but the stick falls loose because your inventory is full.'
           :heldResult.ok?`The ${kind} block breaks. You pick it up.`:`The ${kind} block breaks and falls loose because your inventory is full.`;
       return {...ok(result+(treeCollapsed?' You break the tree, and its unsupported wood and leaves topple away from you into loose blocks.':'')),feedback:{target,material:kind,blockOutcome:heldResult.ok?'collected':'broken',...(heldResult.ok?{collected}: {}),...(treeCollapsed?{treeCollapsed:true}:{})}};
     }
     if (a.action === 'fill') {
-      const held=this.held(e);if(!held||held.kind!=='bucket'||held.contents)return fail('You need to hold an empty bucket.');
+      const held=this.held(e),container=held&&this.module.crafting?.items[held.kind]?.container;
+      if(!held||!container||held.contents)return fail('Hold an empty compatible container.');
+      if(!kind||!container.materials.includes(kind))return fail(`This container can be filled from ${container.materials.join(', ')}.`);
       if(fluid){
-        if(!this.replaceHeld(e,{kind:'bucket',count:1,contents:kind}))return fail(`No stack space for a ${kind}-filled bucket. Put something down first.`);
-        return ok(`You fill one bucket with ${kind} and hold it. The other buckets keep their contents.`);
+        if(!this.replaceHeld(e,{kind:held.kind,count:1,contents:kind}))return fail(`No stack space for a ${kind}-filled ${held.kind}. Put something down first.`);
+        return ok(`You fill one ${held.kind} with ${kind} and hold it. Other containers keep their contents.`);
       }
-      if(kind!=='dirt'&&kind!=='sand')return fail('The bucket can currently be filled from water, dirt, or sand.');
       const supported=this.standingOn(target);
       if(supported)return fail(`You cannot take that ${kind}; ${supported.name} is standing on it.`);
-      if(!this.replaceHeld(e,{kind:'bucket',count:1,contents:kind}))return fail(`No stack space for a ${kind}-filled bucket. Put something down first.`);
-      this.voxels.set(target,null);this.blockDamage.delete(key(target));return ok(`You fill one bucket with one block of ${kind} and hold it. The other buckets keep their contents.`);
+      if(!this.replaceHeld(e,{kind:held.kind,count:1,contents:kind}))return fail(`No stack space for a ${kind}-filled ${held.kind}. Put something down first.`);
+      this.voxels.set(target,null);this.blockDamage.delete(key(target));return ok(`You fill one ${held.kind} with one block of ${kind} and hold it. Other containers keep their contents.`);
     }
     if (a.action === 'empty') {
-      const held=this.held(e);if(!held||held.kind!=='bucket'||!held.contents)return fail('You need to hold a non-empty bucket.');
+      const held=this.held(e);if(!held||!this.module.crafting?.items[held.kind]?.container||!held.contents)return fail('Hold a non-empty compatible container.');
       if(held.contents==='water'){
-        if(!this.replaceHeld(e,{kind:'bucket',count:1}))return fail('No stack space for an empty bucket. Put something down first.');
-        this.event(e.id,'splash','Emptied a bucket of water.',{position:point});return ok('You empty one bucket and hold it. The water splashes and disperses.');
+        if(!this.replaceHeld(e,{kind:held.kind,count:1}))return fail(`No stack space for an empty ${held.kind}. Put something down first.`);
+        this.event(e.id,'splash',`Emptied a ${held.kind} of water.`,{position:point});return ok(`You empty one ${held.kind} and hold it. The water splashes and disperses.`);
       }
       if(kind&&!fluid)return fail('That cell is occupied.');
       if(this.cellOccupied(target))return fail('A creature occupies that cell.');
       if(!faces.some(d=>this.voxels.solid(target.map((v,i)=>v+d[i]) as Vec3)))return fail('The emptied material needs adjacent support.');
       const contents=held.contents;
-      if(!this.replaceHeld(e,{kind:'bucket',count:1}))return fail('No stack space for an empty bucket. Put something down first.');
-      this.voxels.set(target,contents);return ok(`You empty one bucket, placing one ${contents} block, and hold the empty bucket.`);
+      if(!this.replaceHeld(e,{kind:held.kind,count:1}))return fail(`No stack space for an empty ${held.kind}. Put something down first.`);
+      this.voxels.set(target,contents);return ok(`You empty one ${held.kind}, placing one ${contents} block, and hold the empty container.`);
     }
     return fail('Unknown action.');
   }

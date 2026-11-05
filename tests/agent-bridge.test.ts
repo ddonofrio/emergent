@@ -240,6 +240,49 @@ test('scans require a stationary body and retain their results through concurren
   } finally { bridge.close(); }
 });
 
+test('filtered waits defer unwanted events without closing the clock barrier or losing receipts', async () => {
+  const { engine, bridge, port, signal, advance } = fixture();
+  try {
+    const walking = port.submit('walk-filtered', { action: 'walk', distance: 4 }, signal);
+    bridge.commit();
+    engine.event('a', 'discovery', 'An initial event'); bridge.flush();
+    const started = await walking;
+    let released = false;
+    const waiting = port.wait('finish-walk', { actionId: started.action!.id, eventTypes: ['speech'] }, signal).then(value => { released = true; return value; });
+    const first = engine.event('a', 'discovery', 'Deferred first fact'); bridge.flush();
+    const second = engine.event('a', 'discovery', 'Deferred second fact'); bridge.flush();
+    await Promise.resolve();
+    assert.equal(released, false);
+    assert.equal(port.waiting(), true, 'Ignored queued events must not freeze the shared clock.');
+    advance(40);
+    const completed = await waiting;
+    assert.equal(completed.action?.status, 'completed');
+    assert.equal(completed.reason, 'completed');
+    assert.deepEqual(completed.events.filter(event => [first.id, second.id].includes(event.id)).map(event => event.id), [first.id, second.id]);
+    assert.deepEqual(bridge.snapshot().entities.a.events, []);
+  } finally { bridge.close(); }
+});
+
+test('filtered event choice and deferred events survive restart until timeout', async () => {
+  const setup = fixture();
+  const paused = new AbortController();
+  const pending = setup.port.wait('filtered-timeout', { seconds: .1, eventTypes: [] }, paused.signal);
+  const cancelled = assert.rejects(pending, /Pause/);
+  const event = setup.engine.event('a', 'discovery', 'Keep this fact across restart'); setup.bridge.flush();
+  const state = setup.engine.state(), snapshot = setup.bridge.snapshot();
+  paused.abort(new Error('Pause')); await cancelled; setup.bridge.close();
+  const engine = new Engine(island, state), bridge = new AgentBridge(engine, snapshot), port = bridge.ports()[0];
+  try {
+    const resumed = port.wait('filtered-timeout', {}, new AbortController().signal);
+    bridge.flush();
+    assert.equal(port.waiting(), true);
+    for (let tick = 0; tick < 2; tick++) { engine.step(); bridge.afterStep(); }
+    const result = await resumed;
+    assert.equal(result.reason, 'timeout');
+    assert.ok(result.events.some(queued => queued.id === event.id));
+  } finally { bridge.close(); }
+});
+
 test('closing a bridge revokes pending waits and prevents deferred checkpoints', async () => {
   const setup = fixture(); setup.bridge.close();
   let checkpoints = 0;

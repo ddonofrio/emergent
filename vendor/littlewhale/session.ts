@@ -88,8 +88,12 @@ export class PersistentSession {
             let result: unknown;
             let isError = false;
             try {
-              if (!executor) throw new Error(`Unknown tool ${pending.call.name}.`);
-              result = await executor(pending.call.arguments, pending.call, signal);
+              const resumed = options.resumeTool?.(pending.call, signal);
+              if (resumed !== undefined) result = await resumed;
+              else {
+                if (!executor) throw new Error(`Unknown tool ${pending.call.name}.`);
+                result = await executor(pending.call.arguments, pending.call, signal);
+              }
               signal.throwIfAborted();
             } catch (error) {
               signal.throwIfAborted();

@@ -1,7 +1,7 @@
-import { impactPoints } from '../../src/core/impact-points';
+import type { ItemCapability } from '../../src/core/crafting';
 import { isRawBlock } from '../../src/core/materials';
 import type { Action, AgentIntent, Observation, Vec3 } from '../../src/core/types';
-import type { ActionProgress, AgentPort, PerceivedEvent, ToolOutcome } from '../simulation/agent-port';
+import { wakeEventTypes, type ActionProgress, type AgentPort, type BodyActivity, type PerceivedEvent, type ToolOutcome, type WaitOptions } from '../simulation/agent-port';
 import { validateArguments, type ToolExecutor, type ToolSchema } from '../../vendor/littlewhale';
 
 const number = { type: 'number' };
@@ -11,23 +11,42 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
 const coordinates = ([x, y, z]: Vec3) => ({ x, yHeight: y, z });
 
 function selfView(view: Observation) {
+  const inventory = view.self.inventory, holding = inventory?.selected == null ? undefined : inventory.stacks[inventory.selected];
   return { position: coordinates(view.self.position), facingDegrees: view.self.yaw, inventory: view.self.inventory,
-    intent: view.self.intent, motion: view.self.motion, following: view.following };
+    holding: holding ?? null, ...(holding ? { handConstraint: 'World-block hit and pickup require empty hands. Use store to free them without losing inventory; moving closer does not free your hands.' } : {}),
+    intent: view.self.intent, motion: view.self.motion ? { kind: view.self.motion.kind, destination: view.self.motion.destination, scanType: view.self.motion.scanType } : undefined, following: view.following };
 }
 
 const visibleEntities = (view: Observation) => view.entities.map(entity => ({ ...entity, position: coordinates(entity.position) }));
 
-export function localView(view: Observation & { viewAngle?: number }, learned: string[] = [], notes: string[] = []) {
-  return { tick: view.tick, viewAngle: view.viewAngle ?? 0, self: selfView(view), learned, notes,
+function capabilityView(capabilities: ItemCapability[], view: Observation, bodyActivity?: BodyActivity) {
+  return capabilities.map(({ experiments, ...capability }) => ({ ...capability,
+    available: capability.available && !bodyActivity && !view.self.motion && !view.self.following,
+    ...(experiments ? { experiments: experiments.map(({ point, orientations }) => ({ point, ...(orientations ? { orientations } : {}) })) } : {}) }));
+}
+
+export function localView(view: Observation & { viewAngle?: number }, learned: string[] = [], notes: string[] = [], capabilities: ItemCapability[] = [], bodyActivity?: BodyActivity) {
+  return { tick: view.tick, viewAngle: view.viewAngle ?? 0, self: selfView(view), bodyActivity, learned, notes,
+    capabilities: capabilityView(capabilities, view, bodyActivity),
     beingFollowed: view.beingFollowed, entities: visibleEntities(view),
     items: view.items.map(item => ({ id: item.id, kind: item.kind, position: coordinates(item.position), contents: item.contents, water: item.water })),
-    surfaces: view.surfaces.map(surface => ({ ...surface, nearest: coordinates(surface.nearest) })),
+    surfaces: view.surfaces.map(surface => ({ kind: surface.kind, visibleBlockCount: surface.count, nearest: coordinates(surface.nearest) })),
     navigation: view.navigation, interactions: view.interactions, truncated: view.truncated };
 }
 
-function currentContext(port: AgentPort, notes: string[]) {
+export function observeAgent(port: AgentPort, notes: string[], angle = 0) {
+  const view = port.observe(angle);
+  return localView(view, port.knowledge(angle), notes, port.capabilities(view), port.bodyActivity());
+}
+
+function currentContext(port: AgentPort) {
   const view = port.observe();
-  return { self: selfView(view), learned: port.knowledge(), notes, visibleEntities: visibleEntities(view) };
+  const bodyActivity = port.bodyActivity();
+  return { self: selfView(view), bodyActivity, learned: port.knowledge(), capabilities: capabilityView(port.capabilities(view), view, bodyActivity), visibleEntities: visibleEntities(view) };
+}
+
+export function resumeAgentTool(port: AgentPort, callId: string, signal: AbortSignal) {
+  return port.resume(callId, signal)?.then(outcome => toolOutcome(outcome, currentContext(port)));
 }
 
 const metres = (value: number) => Math.round(value * 1000) / 1000;
@@ -71,8 +90,8 @@ export function toolOutcome(outcome: ToolOutcome, current?: ReturnType<typeof cu
   }
   return { tick: outcome.tick, reason: outcome.reason,
     ...(current ? { current } : { position: outcome.position }),
-    ...(outcome.motion ? { motion: outcome.motion } : {}),
-    ...(outcome.following ? { following: outcome.following } : {}),
+    ...(!current && outcome.motion ? { motion: outcome.motion } : {}),
+    ...(!current && outcome.following ? { following: outcome.following } : {}),
     ...(outcome.action ? { action: actionProgress(outcome.action) } : {}),
     ...(completed.size ? { completedActions: [...completed.values()].map(actionProgress) } : {}),
     actions: outcome.actions.filter(action => action.id !== outcome.action?.id).map(actionProgress),
@@ -86,7 +105,8 @@ export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle
   const view = port.observe(viewAngle);
   const inventory = view.self.inventory;
   const held = inventory?.selected === null || !inventory ? undefined : inventory.stacks[inventory.selected];
-  const stationary = !view.self.motion && !view.self.following;
+  const bodyActivity = port.bodyActivity(), capabilities = port.capabilities(view);
+  const stationary = !view.self.motion && !view.self.following && !bodyActivity;
   const limited = <T>(values: T[]) => values.slice(0, 24);
   const target = (values: Vec3[], description: string) => ({ type: 'array', items: integer, minItems: 3, maxItems: 3,
     enum: limited(values), description: `${description} Coordinates are [x,y,z], with y as height.` });
@@ -97,7 +117,7 @@ export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle
       validateArguments(schema, args);
       const result = await execute(args, call, signal);
       return result && typeof result === 'object' && 'reason' in result && 'actions' in result && 'events' in result
-        ? toolOutcome(result as ToolOutcome, currentContext(port, memory.notes)) : result;
+        ? toolOutcome(result as ToolOutcome, currentContext(port)) : result;
     };
   };
   const submit = (name: Action['action'], description: string, parameters: Record<string, unknown>, prepare: (args: Record<string, unknown>) => Action = args => ({ ...args, action: name } as Action)) =>
@@ -109,10 +129,10 @@ export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle
   tool('look', 'Refresh your local field of view with normal range and occlusion. Optional relative angle changes the view without turning. No world time.',
     object({ angle: { ...number, minimum: -180, maximum: 180 } }), async args => {
       const angle = args.angle as number | undefined; memory.viewAngle = angle ?? 0;
-      return localView(port.observe(angle), port.knowledge(angle), memory.notes);
+      return observeAgent(port, memory.notes, angle);
     });
-  if (!view.self.following) {
-    tool('walk_to', 'Walk to horizontal x,z (at most 32m); terrain sets y height. Returns at arrival, blockage or a perceived event. Events preserve movement; a new locomotion action replaces it.',
+  if (!view.self.following && !bodyActivity) {
+    tool('walk_to', 'Walk in a straight line to horizontal x,z (at most 32m); terrain sets y height. This does not route around obstacles. Returns at arrival, blockage or a perceived event. Events preserve movement; a new locomotion action replaces it.',
       object({ x: number, z: number }, ['x', 'z']), (args, call, signal) => {
         memory.viewAngle = 0;
         return port.submit(call.id, { action: 'walk', target: [args.x as number, port.observe().self.position[1], args.z as number] }, signal);
@@ -131,13 +151,16 @@ export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle
     async args => port.inspectJump(args.angle as number, args.distance as number));
   submit('say', 'Speak one to three words in clear hearing range; three total per world second. Speaking and hearing preserve concurrent movement.',
     object({ word: { type: 'string', minLength: 1, maxLength: 100 } }, ['word']));
-  tool('wait_for_event', 'Wait for observable events, action completion or optional world-second timeout. actionId selects an existing action; omit it to listen. Other actions continue. Receives each queued event once.',
-    object({ actionId: text, seconds: { ...number, exclusiveMinimum: 0, maximum: 3600 } }),
-    (args, call, signal) => port.wait(call.id, args as { actionId?: string; seconds?: number }, signal));
+  tool('wait_for_event', 'Wait while other actions continue. actionId always returns when that action ends; seconds sets a world-time limit for uncertain replies. Optional eventTypes selects early interruptions; [] waits only for the action or timeout. Omit eventTypes for any event. All queued events are delivered on return, including deferred types.',
+    object({ actionId: text, seconds: { ...number, exclusiveMinimum: 0, maximum: 3600 }, eventTypes: { type: 'array', items: { type: 'string', enum: [...wakeEventTypes] }, maxItems: wakeEventTypes.length, uniqueItems: true } }),
+    (args, call, signal) => {
+      if (Array.isArray(args.eventTypes) && !args.eventTypes.length && !args.actionId && args.seconds === undefined) throw new Error('An empty eventTypes list requires actionId or seconds.');
+      return port.wait(call.id, args as WaitOptions, signal);
+    });
   if (view.self.motion) tool('cancel_action', 'Cancel your ongoing movement by action ID, preserving current position.',
     object({ actionId: text }, ['actionId']), (args, call, signal) => { memory.viewAngle = 0; return port.cancel(call.id, args.actionId as string, signal); });
 
-  if (view.interactions.follow.length) {
+  if (!bodyActivity && view.interactions.follow.length) {
     const choices = view.interactions.follow.map(entity => entity.id);
     submit('follow', `Follow one currently visible creature until blocked, cancelled or unavailable. Current choices: ${view.interactions.follow.map(entity => `${entity.id} (${entity.name}, ${entity.metres}m)`).join(', ')}.`,
       object({ entityId: { ...text, enum: choices } }, ['entityId']), args => ({ action: 'follow', entityId: args.entityId as string, ...(viewAngle ? { angle: viewAngle } : {}) }));
@@ -162,30 +185,36 @@ export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle
         object({ target: target(view.interactions.place, 'Choose one current placement target.') }, ['target']));
       submit('throw', `Throw one held ${held.kind} forward.`, object({ force: { ...number, minimum: 1, maximum: 12 } }));
       submit('store', 'Free your hands without changing inventory quantities.', object({}));
-      if (held.kind === 'wood') {
-        tool('strike_held', 'Experiment on the raw wood in your hands by striking one named surface region. The point names identify distinct regions, not undiscovered outcomes.',
-          object({ point: { type: 'string', enum: Object.keys(impactPoints) }, orientation: { type: 'string', enum: ['up', 'down'], description: 'Required only for front_edge.' } }, ['point']),
+      const shaping = capabilities.find(capability => capability.action === 'strike_held' && capability.available);
+      if (shaping?.experiments) {
+        const experiments = shaping.experiments;
+        tool('strike_held', shaping.description + ' Point names identify distinct regions; results must be discovered separately. To hit a world block, store this item first.',
+          object({ point: { type: 'string', enum: experiments.map(experiment => experiment.point) }, orientation: { type: 'string', enum: ['up', 'down'], description: `Required for: ${experiments.filter(experiment => experiment.orientations).map(experiment => experiment.point).join(', ') || 'none'}.` } }, ['point']),
           (args, call, signal) => {
-            if (args.point === 'front_edge' && !args.orientation) throw new Error('front_edge requires orientation up or down.');
-            return port.submit(call.id, { action: 'strike_held', impact: impactPoints[args.point as string], ...(args.orientation ? { orientation: args.orientation as 'up' | 'down' } : {}) }, signal);
+            const experiment = experiments.find(experiment => experiment.point === args.point)!;
+            if (experiment.orientations && !experiment.orientations.includes(args.orientation as 'up' | 'down')) throw new Error(`${experiment.point} requires orientation ${experiment.orientations.join(' or ')}.`);
+            memory.viewAngle = 0;
+            return port.submit(call.id, { action: 'strike_held', impact: experiment.impact, ...(args.orientation ? { orientation: args.orientation as 'up' | 'down' } : {}) }, signal);
           });
       }
-      if (held.kind === 'shovel' && view.interactions.hit.length) {
+      const digging = capabilities.find(capability => capability.action === 'dig' && capability.available);
+      if (digging) {
         const choices = limited(view.interactions.hit);
-        submit('dig', `Dig one reachable sand, dirt or grass block with the held shovel. Targets: ${choices.map(item => `${item.kind} [${item.target.join(',')}]`).join('; ')}.`,
+        submit('dig', `${digging.description} Targets: ${choices.map(item => `${item.kind} [${item.target.join(',')}]`).join('; ')}.`,
           object({ target: target(choices.map(item => item.target), 'Choose one current dig target.') }, ['target']));
       }
-      if (held.kind === 'bucket' && !held.contents && view.interactions.fill.length) submit('fill', 'Fill one held empty bucket from a current compatible source.',
+      if (capabilities.some(capability => capability.action === 'fill' && capability.available)) submit('fill', 'Fill one held empty container from a current compatible source.',
         object({ target: target(view.interactions.fill, 'Choose one current fill source.') }, ['target']));
-      if (held.kind === 'bucket' && held.contents && view.interactions.empty.length) submit('empty', `Empty one held bucket containing ${held.contents} at a current valid destination.`,
+      if (capabilities.some(capability => capability.action === 'empty' && capability.available)) submit('empty', `Empty one held container containing ${held.contents} at a current valid destination.`,
         object({ target: target(view.interactions.empty, 'Choose one current emptying destination.') }, ['target']));
     }
 
     const otherStacks = inventory?.stacks.flatMap((_stack, index) => index === inventory.selected ? [] : [index]) ?? [];
     if (otherStacks.length) submit('hold', `Take one owned stack into your hands. Choices: ${otherStacks.map(index => `${index} (${inventory!.stacks[index].count} x ${inventory!.stacks[index].kind})`).join(', ')}.`,
       object({ stack: { type: 'integer', enum: otherStacks } }, ['stack']));
-    if (inventory?.stacks.some(stack => stack.kind === 'door_half_up') && inventory.stacks.some(stack => stack.kind === 'door_half_down'))
-      submit('join', 'Join one owned upper and lower wooden door half.', object({}));
+    const combinations = capabilities.filter(capability => capability.action === 'join' && capability.available);
+    if (combinations.length) submit('join', combinations.map(capability => `${capability.recipeId}: ${capability.description}`).join(' '),
+      object({ recipeId: { type: 'string', enum: combinations.map(capability => capability.recipeId) } }, combinations.length > 1 ? ['recipeId'] : []));
     for (const name of ['open', 'close'] as const) {
       const choices = view.interactions[name];
       if (choices.length) submit(name, `${name === 'open' ? 'Open' : 'Close'} one currently reachable installed door.`,
@@ -193,10 +222,12 @@ export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle
     }
   }
 
-  tool('set_intent', 'Create or update your identity, goal and observable success condition. Reassess it from current outcomes and set completed promptly when every condition is satisfied. No world time.',
-    object({ identity: text, goal: text, successCondition: text, assessment: text, status: { type: 'string', enum: ['active', 'completed', 'abandoned', 'blocked'] } }, ['goal', 'successCondition', 'status']),
+  tool('set_intent', 'Record your own goal and a success condition covering it. Optional nextStep, expectedObservation and reconsiderWhen describe your chosen experiment or plan. Reassess after discoveries, blockage or completion. This replaces the previous intent; preserve fields you still want. No world time.',
+    object({ identity: text, goal: text, successCondition: text, assessment: text, nextStep: text, expectedObservation: text, reconsiderWhen: text, status: { type: 'string', enum: ['active', 'completed', 'abandoned', 'blocked'] } }, ['goal', 'successCondition', 'status']),
     async args => { port.setIntent(args as unknown as AgentIntent); return { intent: args, assessmentBy: 'agent' }; });
-  tool('remember', 'Replace your private notes (at most ten concise entries). Before adding to ten existing notes, merge those into nine or fewer. Preserve useful facts, hypotheses and commitments.',
+  tool('recall', 'Search your permanent Learned Knowledge by item or topic, including objects you no longer own. Returns up to twenty matching facts you have already discovered; refine the query if total is larger. No world time.',
+    object({ query: text }, ['query']), async args => port.recall(args.query as string));
+  tool('remember', 'Replace your private notes (at most ten concise entries); merge ten into nine or fewer before adding. Preserve reproducible findings with exact inputs, labelled hypotheses and commitments. Correct disproven claims. Avoid current inventory, tool lists and bearings; timestamp useful last sightings. Learned knowledge is already durable.',
     object({ notes: { type: 'array', items: text, maxItems: 10 } }, ['notes']),
     async args => { memory.notes = [...args.notes as string[]]; port.remember(memory.notes); return { notes: memory.notes }; });
   return { schemas, executors };
