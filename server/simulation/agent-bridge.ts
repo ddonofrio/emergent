@@ -122,7 +122,14 @@ export class AgentBridge {
       ...(options.seconds === undefined ? {} : { untilTick: this.engine.tick + Math.max(1, Math.ceil(options.seconds * TICKS_PER_SECOND)) }) }, signal);
   }
   private hasWakeEvent(request: WaitRequest, events: PerceivedEvent[]) {
-    return events.some(event => request.eventTypes === undefined || request.eventTypes.includes(event.type as NonNullable<WaitOptions['eventTypes']>[number]));
+    return events.some(event => {
+      if (request.eventTypes !== undefined
+        && !request.eventTypes.includes(event.type as NonNullable<WaitOptions['eventTypes']>[number])) return false;
+      if (!request.actionId || !event.type.startsWith('action-')) return true;
+      const data = event.data as { actionId?: string; action?: { id?: string } } | undefined;
+      const eventActionId = data?.actionId ?? data?.action?.id;
+      return eventActionId === undefined || eventActionId === request.actionId;
+    });
   }
   private bind(id: string, request: WaitRequest, signal: AbortSignal): Promise<ToolOutcome> {
     const state = this.state(id);
