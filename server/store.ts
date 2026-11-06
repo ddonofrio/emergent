@@ -115,6 +115,12 @@ export class Store {
     const row = this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type = 'memory' ORDER BY id DESC LIMIT 1").get(tick, actor) as {data: string} | undefined;
     return row ? ((JSON.parse(row.data) as WorldEvent).data as {notes: string[]}).notes : [];
   }
+  memoryRecordAt(tick: number, actor: string): { notes: string[]; learned?: string[] } {
+    const row = this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type = 'memory' ORDER BY id DESC LIMIT 1").get(tick, actor) as { data: string } | undefined;
+    if (!row) return { notes: [] };
+    const record = (JSON.parse(row.data) as WorldEvent).data as { notes: string[]; learned?: string[] };
+    return { notes: record.notes, ...(record.learned ? { learned: record.learned } : {}) };
+  }
   loadAgentState<T>(): T | undefined {
     const row = this.db.prepare('SELECT data FROM agent_runtime WHERE id = 1').get() as {data: Uint8Array} | undefined;
     return row ? unpack<T>(row.data) : undefined;

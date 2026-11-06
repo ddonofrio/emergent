@@ -66,7 +66,7 @@ export interface SessionMetrics {
   compactionCalls: number;
 }
 
-export type SessionState = 'thinking' | 'compacting' | 'tool' | 'retrying' | 'stopped';
+export type SessionState = 'thinking' | 'tool' | 'retrying' | 'stopped';
 export interface PendingCall {
   call: ToolCall;
   /** A result is persisted as soon as it settles, before model-order publication. */
@@ -82,7 +82,7 @@ export interface SessionEvent {
 export interface SessionSnapshot {
   version: 1;
   id: string;
-  /** Compactable model surface. Original messages remain in events. */
+  /** Recent model surface. Original messages, including reasoning, remain in events. */
   messages: Message[];
   events: SessionEvent[];
   pendingCalls: PendingCall[];
@@ -98,6 +98,8 @@ export interface SessionRunOptions {
   schemas: ToolSchema[];
   /** Rebuild state-dependent tools immediately before dispatch or inference. */
   prepareTools?: () => { tools: Record<string, ToolExecutor>; schemas: ToolSchema[] };
+  /** Fresh entity-scoped observation and persistent memory, read before every request. */
+  currentContext?: () => string;
   /** Rebind an existing operation even when its tool is no longer offered for new calls. */
   resumeTool?: (call: ToolCall, signal: AbortSignal) => Promise<unknown> | undefined;
   system: string;

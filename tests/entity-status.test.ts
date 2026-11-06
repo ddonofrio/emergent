@@ -18,7 +18,7 @@ test('thinking uses the individual live session even when the physical entity an
 
 test('context compaction uses the shrinking activity indicator', () => {
   assert.deepEqual(entityDisplayStatus(entity, runtime('shrinking'), true), {
-    text: 'shrinking', thinking: true, title: 'Shrinking the conversation context.',
+    text: 'shrinking', thinking: true, title: 'Shrinking the memory record in the background.',
   });
 });
 

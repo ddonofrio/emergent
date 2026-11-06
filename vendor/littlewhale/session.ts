@@ -4,9 +4,9 @@
  */
 import { setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
-import { compactablePrefix, compactedMessages, summarizeWithLlm } from './compaction';
+import { conversationRequest } from './context-window';
 import { estimateTokens } from './tool-pairing';
-import type { Completion, CompletionRequest, Message, SessionEvent, SessionMetrics, SessionRunOptions, SessionSnapshot } from './types';
+import type { Complete, Completion, CompletionRequest, Message, SessionEvent, SessionMetrics, SessionRunOptions, SessionSnapshot } from './types';
 
 const initialMetrics = (): SessionMetrics => ({ llmCalls: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, estimatedInputTokens: 0, latencyMs: 0, retries: 0, compactionCalls: 0 });
 const preparedTools = (options: SessionRunOptions) => options.prepareTools?.() ?? { tools: options.tools, schemas: options.schemas };
@@ -28,6 +28,22 @@ export class PersistentSession {
 
   snapshot(): SessionSnapshot { return structuredClone(this.data); }
   get metrics(): Readonly<SessionMetrics> { return { ...this.data.metrics }; }
+
+  /** Auxiliary memory work shares accounting, never the acting loop or its barrier. */
+  async completeAuxiliary(complete: Complete, request: CompletionRequest, signal: AbortSignal): Promise<Completion> {
+    this.data.metrics.llmCalls++;
+    this.data.metrics.compactionCalls++;
+    const started = performance.now();
+    try {
+      const response = await complete(request, signal);
+      this.recordCompletion(response, request);
+      return response;
+    } catch (error) {
+      this.data.metrics.latencyMs += performance.now() - started;
+      this.countFailedAttempts(error);
+      throw error;
+    }
+  }
 
   appendUser(content: string): void {
     if (this.running) throw new Error('External messages cannot interrupt a running agent session.');
@@ -121,47 +137,10 @@ export class PersistentSession {
         options.onState?.('thinking');
         try {
           const toolkit = preparedTools(options);
-          const currentOptions = { ...options, tools: toolkit.tools, schemas: toolkit.schemas };
-          const prefixLength = compactablePrefix(currentOptions, this.data.messages, this.data.contextPressure);
-          if (prefixLength > 0) {
-            const history = structuredClone(this.data.messages);
-            this.event('compaction/start', { prefixLength, summarizedMessages: history.length });
-            this.data.metrics.llmCalls++;
-            this.data.metrics.compactionCalls++;
-            options.onState?.('compacting');
-            await this.save(options);
-            let completion: Completion;
-            try {
-              completion = await summarizeWithLlm(async (request, callSignal) => {
-                const started = performance.now();
-                try {
-                  const response = await options.complete(request, callSignal);
-                  this.recordCompletion(response, request);
-                  return response;
-                } catch (error) {
-                  this.data.metrics.latencyMs += performance.now() - started;
-                  this.countFailedAttempts(error);
-                  throw error;
-                }
-              }, currentOptions, history, this.id, options.maxTokens ?? 4096);
-              signal.throwIfAborted();
-              const compacted = compactedMessages(history, prefixLength, completion.content!);
-              if (estimateTokens(compacted) >= estimateTokens(history)) throw new Error('Compaction checkpoint did not reduce context.');
-              this.data.messages = compacted;
-              this.data.compactions++;
-              this.event('compaction/end', { prefixLength, success: true, checkpoint: compacted[0], reasoningCleared: true });
-            } catch (error) {
-              this.event('compaction/end', { prefixLength, success: false });
-              await this.save(options);
-              throw error;
-            }
-            options.onCompletion?.(completion, 'compaction');
-            await this.save(options);
-            options.onState?.('thinking');
-          }
-
+          const context = conversationRequest({ ...options, schemas: toolkit.schemas }, this.data.messages);
+          this.data.messages = context.history;
           const request: CompletionRequest = {
-            system: options.system, messages: structuredClone(this.data.messages), tools: toolkit.schemas,
+            system: options.system, messages: context.messages, tools: toolkit.schemas,
             maxTokens: options.maxTokens ?? 4096, purpose: 'agent', sessionId: this.id,
           };
           this.data.metrics.llmCalls++;

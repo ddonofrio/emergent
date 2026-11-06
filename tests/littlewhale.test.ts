@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { PersistentSession, balancedCuts, selectCompactableRange, validateArguments, type Completion, type CompletionRequest, type Message, type SessionSnapshot, type ToolCall } from '../vendor/littlewhale';
-import { compactablePrefix, projectedContextTokens } from '../vendor/littlewhale/compaction';
+import { PersistentSession, balancedCuts, validateArguments, type Completion, type CompletionRequest, type SessionSnapshot, type ToolCall } from '../vendor/littlewhale';
 import { InferenceClient, publicProviders, validateProviders, discoverModels, type ProviderConfig } from '../server/inference/providers';
 
 const response = (calls: ToolCall[], content: string | null = null): Completion => ({
@@ -94,7 +93,7 @@ test('resume rebinds pending tools by their persisted call IDs without another m
   await assert.rejects(resumedRun, /Done/);
 });
 
-test('compaction never splits assistant tool calls from their results', () => {
+test('balanced cuts track every parallel tool result', () => {
   const messages = [
     { role: 'user' as const, content: 'Old observation '.repeat(200) },
     { role: 'assistant' as const, content: null, toolCalls: [{ id: 'a', name: 'walk_to', arguments: {} }, { id: 'b', name: 'speak', arguments: {} }] },
@@ -103,58 +102,6 @@ test('compaction never splits assistant tool calls from their results', () => {
     { role: 'user' as const, content: 'Tail' },
   ];
   assert.deepEqual(balancedCuts(messages), [true, true, false, false, true, true]);
-  const cutoff = selectCompactableRange(messages, 35);
-  assert.equal(balancedCuts(messages)[cutoff], true);
-  assert.ok(cutoff > 0);
-});
-
-test('provider usage anchors context pressure instead of trusting the conservative whole-history estimate', () => {
-  const options = { system: 'Entity.', schemas: [], contextWindow: 60000, maxTokens: 4096 };
-  const messages: Message[] = Array.from({ length: 8 }, (_, index) => ({ role: 'user', content: `Observation ${index}: ${'local detail '.repeat(1500)}` }));
-  const estimatedTokens = projectedContextTokens(options, messages);
-  assert.ok(estimatedTokens > (60000 - 4096) * .75);
-  const sample = { inputTokens: 29000, estimatedTokens };
-  assert.equal(projectedContextTokens(options, messages, sample), 29000);
-  assert.equal(compactablePrefix({ ...options, tools: {}, signal: new AbortController().signal, complete: async () => response([]) }, messages, sample), 0);
-  messages.push({ role: 'user', content: 'new evidence '.repeat(4000) });
-  assert.ok(projectedContextTokens(options, messages, sample) > (60000 - 4096) * .75);
-  assert.ok(compactablePrefix({ ...options, tools: {}, signal: new AbortController().signal, complete: async () => response([]) }, messages, sample) > 0);
-});
-
-test('compaction replaces only the paired prefix and durably retains original conversation', async () => {
-  const session = new PersistentSession('compact');
-  for (let index = 0; index < 8; index++) session.appendUser(`Local fact ${index}: ${'long observation '.repeat(90)}`);
-  const abort = new AbortController();
-  let saved: SessionSnapshot | undefined;
-  let normalRequest: CompletionRequest | undefined;
-  const entered = deferred();
-  const run = session.run({
-    system: 'Embodied agent.', schemas: [], signal: abort.signal, contextWindow: 2048, maxTokens: 128,
-    persist: snapshot => { saved = snapshot; },
-    complete: async request => {
-      if (request.purpose === 'compaction') {
-        assert.ok(request.messages.at(-1)?.content?.includes('compaction engine'));
-        assert.ok(request.messages.at(-1)?.content?.includes('Preserve important decisions and conclusions from reasoning'));
-        assert.deepEqual(request.tools, [], 'Compaction cannot mutate the world or call an agent tool.');
-        assert.notEqual(request.system, 'Embodied agent.', 'Compaction must not inherit the acting prompt.');
-        assert.match(request.system, /do not call tools/i);
-        return response([], 'Known local facts: observations are retained in this checkpoint.');
-      }
-      normalRequest = request;
-      assert.equal(saved?.compactions, 1, 'Checkpoint must be durable before the next model call.');
-      return response([{ id: 'wire', name: 'wait_for_event', arguments: {} }]);
-    },
-    tools: { wait_for_event: async (_args, _call, signal) => { entered.resolve(); return wait(signal); } },
-  });
-  await entered.promise;
-  assert.ok(normalRequest?.messages[0].content?.includes('<compacted-summary>'));
-  assert.equal(saved?.events.filter(event => event.type === 'user/message').length, 8);
-  assert.equal(saved?.events.filter(event => event.type === 'compaction/start').length, 1);
-  assert.equal(saved?.events.filter(event => event.type === 'compaction/end').length, 1);
-  assert.equal(session.metrics.compactionCalls, 1);
-  assert.equal(session.metrics.llmCalls, 2);
-  abort.abort(new Error('Done'));
-  await assert.rejects(run, /Done/);
 });
 
 test('unavailable inference retries the same retained conversation without invented actions', async () => {

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Engine } from '../src/core/engine';
 import { island } from '../src/universes/first-shore';
-import type { Block, Entity } from '../src/core/types';
+import type { AgentMemoryRecord, Block, Entity } from '../src/core/types';
 import { Store } from '../server/store';
 import { AgentBridge } from '../server/simulation/agent-bridge';
 import { AgentRuntime, type RuntimeSnapshot } from '../server/agents/runtime';
@@ -26,10 +26,11 @@ function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state
   const bridge = new AgentBridge(engine, restored?.runtime.simulation, () => store.record(engine.frame(), undefined, runtime.persistence()));
   const errors: unknown[] = [];
   runtime = new AgentRuntime(bridge, store, [{ id: 'mock', type: 'openai-compatible', name: 'Mock', baseUrl: 'http://unused.invalid', model: 'mock', apiKey: '', ...capacity }], restored?.runtime, { changed() { clock?.barrierChanged(); }, fatal(error) { errors.push(error); } });
-  const requests: { request: CompletionRequest; respond(name: string, args?: Record<string, unknown>): void; fail(): void }[] = [];
+  const requests: { request: CompletionRequest; respond(name: string, args?: Record<string, unknown>): void; summarize(record: AgentMemoryRecord): void; fail(): void }[] = [];
   runtime.inference.complete = (request, signal) => new Promise<Completion>((resolve, reject) => {
     const abort = () => reject(signal.reason); signal.addEventListener('abort', abort, { once: true });
     requests.push({ request: structuredClone(request), respond(name, args = {}) { signal.removeEventListener('abort', abort); resolve({ content: null, calls: [{ id: 'provider-reuses-id', name, arguments: args }], provider: 'mock', model: 'mock', latencyMs: 1 }); },
+      summarize(record) { signal.removeEventListener('abort', abort); resolve({ content: JSON.stringify(record), calls: [], provider: 'mock', model: 'mock', latencyMs: 1, finishReason: 'stop' }); },
       fail() { signal.removeEventListener('abort', abort); reject(new Error('Disconnected')); } });
   });
   store.record(engine.frame(), engine.state(), runtime.persistence());
@@ -41,23 +42,65 @@ function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state
 }
 const resultOf = (request: CompletionRequest) => JSON.parse(request.messages.filter(message => message.role === 'tool').at(-1)!.content!);
 
-test('context compaction identifies its entity once while failed transport attempts retry', async () => {
-  const f = fixture(false, undefined, { contextWindow: 8192 });
+test('a compacted record is durable, visible at its recorded tick, and survives restart while original discoveries remain searchable', async () => {
+  const f = fixture();
+  let restored: ReturnType<typeof fixture> | undefined;
   try {
-    const session = f.runtime.agents.get('walker')!.session;
-    for (let index = 0; index < 8; index++) session.appendUser(`Historical observation ${index}: ${'long local detail '.repeat(250)}`);
+    const agent = f.runtime.agents.get('walker')!;
+    f.engine.discoveries.set('walker', new Set(['observed-material:wood']));
+    agent.memory.write({ notes: Array.from({ length: 10 }, () => 'Useful local detail. '.repeat(23)),
+      intent: { goal: 'Explore the shore.', successCondition: 'Find water.', status: 'active' } });
     f.clock.setEnabled(true);
-    await until(() => f.requests[0]?.request.purpose === 'compaction');
+    await until(() => f.requests.length === 2);
+    f.requests.find(item => item.request.purpose === 'agent')!.respond('walk_to', { x: .5, z: 8.5 });
+    await until(() => f.runtime.ready());
+    for (let i = 0; i < 10; i++) f.pump();
+    assert.ok(f.engine.tick > 0);
+    const record = { ...agent.memory.record, notes: ['Explore carefully.'], learned: ['Wood observed.'] };
+    f.requests.find(item => item.request.purpose === 'compaction')!.summarize(record);
+    await until(() => !agent.memory.compacting);
+    assert.deepEqual(f.store.memoryRecordAt(f.engine.tick, 'walker'), { notes: record.notes, learned: record.learned });
+    assert.equal(f.store.memoryRecordAt(0, 'walker').notes.length, 10);
+    assert.deepEqual(f.engine.entity('walker').intent, record.intent);
+    assert.ok(agent.port.recall('wood').facts.some(fact => fact.includes('wood terrain')));
+    const saved = f.store.loadAgentState<RuntimeSnapshot>()!;
+    assert.deepEqual(saved.agents.walker.memory?.record, record);
+    f.clock.setEnabled(false);
+    await until(() => !agent.job);
+    restored = fixture(false, { state: f.engine.state(), runtime: f.runtime.persistence() });
+    assert.deepEqual(restored.runtime.agents.get('walker')!.memory.record, record);
+    restored.clock.setEnabled(true);
+    await until(() => restored!.runtime.ready());
+    assert.equal(restored.requests.length, 0, 'Restart rebinds movement and does not retry the accepted compaction.');
+    assert.deepEqual(f.errors, []);
+  } finally { await restored?.close(); await f.close(); }
+});
+
+test('background memory compaction records its entity while the world advances and failures wait for a write', async () => {
+  const f = fixture();
+  try {
+    const agent = f.runtime.agents.get('walker')!;
+    agent.memory.write({ notes: Array.from({ length: 10 }, () => 'Useful local detail. '.repeat(23)) });
+    f.clock.setEnabled(true);
+    await until(() => f.requests.length === 2);
     assert.equal(f.runtime.status().walker.state, 'shrinking');
     const event = f.engine.recentEvents.findLast(candidate => candidate.type === 'context-compaction');
     assert.equal(event?.actor, 'walker');
-    assert.equal(event?.message, 'walker started shrinking its conversation context.');
+    assert.equal(event?.message, 'walker started shrinking its memory record.');
     assert.ok(f.store.eventsAt(f.engine.tick).some(candidate => candidate.id === event?.id));
-    f.requests[0].fail();
-    await new Promise(resolve => setTimeout(resolve, 1100));
-    await until(() => f.requests.length === 2);
+    f.requests.find(request => request.request.purpose === 'agent')!.respond('walk_to', { x: .5, z: 8.5 });
+    await until(() => f.runtime.ready());
+    for (let i = 0; i < 20; i++) f.pump();
+    assert.ok(f.engine.tick > 0);
     assert.equal(f.runtime.status().walker.state, 'shrinking');
-    assert.equal(f.engine.recentEvents.filter(candidate => candidate.type === 'context-compaction').length, 1);
+    f.requests.find(request => request.request.purpose === 'compaction')!.fail();
+    await until(() => !agent.memory.compacting);
+    for (let i = 0; i < 5; i++) f.pump();
+    assert.equal(f.requests.filter(request => request.request.purpose === 'compaction').length, 1);
+    assert.equal(f.runtime.ready(), true);
+    agent.memory.write({ notes: agent.notes });
+    assert.equal(f.requests.filter(request => request.request.purpose === 'compaction').length, 2);
+    assert.deepEqual(f.errors, []);
   } finally { await f.close(); }
 });
 
@@ -76,7 +119,8 @@ test('silent walking holds one tool without inference across world seconds and r
     await until(() => f.requests.length === 2);
     assert.equal(f.engine.tick, 80);
     assert.equal(f.requests[1].request.system, first.system);
-    assert.deepEqual(f.requests[1].request.messages[0], first.messages[0]);
+    assert.match(f.requests[1].request.messages[0].content!, /Earlier conversation history is no longer included/);
+    assert.notDeepEqual(f.requests[1].request.messages[0], first.messages[0], 'The current observation refreshes while the recent actions stay raw.');
     assert.equal(f.requests[1].request.messages.filter(message => message.role === 'user').length, 1);
     const result = resultOf(f.requests[1].request);
     assert.equal(result.action.status, 'completed'); assert.equal(result.action.distanceTravelled.toFixed(1), '8.0');
@@ -140,7 +184,7 @@ test('local ports expose no observer state or other private conversations and re
   try {
     f.clock.setEnabled(true); await until(() => f.requests.length === 2);
     const walker = f.requests.find(request => request.request.sessionId === 'walker')!;
-    const observation = JSON.parse(walker.request.messages[0].content!).observation;
+    const observation = JSON.parse(walker.request.messages[0].content!.split('\n\n').at(-1)!).observation;
     assert.equal(observation.entities[0]?.intent, undefined);
     assert.equal(observation.entities[0]?.inventory, undefined);
     walker.respond('walk_to', { x: 'bad', z: 8.5 });

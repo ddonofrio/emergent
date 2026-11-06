@@ -161,6 +161,7 @@ const server = createServer(async (req, res) => {
       if (apiPath === '/api/meta') { json(res, metadata()); return; }
       if (apiPath === '/api/state') { const tick=Math.max(0,Math.min(Math.floor(requestedTick),store.latestTick()));json(res, { ...metadata(), state: store.stateAt(tick), events: store.eventsAt(tick), recordedMetrics: store.metricsAt(tick), recordedSecondsPerTurn: store.secondsPerTurnAt(tick) }); return; }
       if (apiPath === '/api/memory') { const actor=url.searchParams.get('actor')?.trim();if(!actor){json(res,{error:'Actor is required.'},400);return;}json(res,store.memoryAt(requestedTick,actor));return; }
+      if (apiPath === '/api/memory-record') { const actor=url.searchParams.get('actor')?.trim();if(!actor){json(res,{error:'Actor is required.'},400);return;}json(res,store.memoryRecordAt(requestedTick,actor));return; }
       if (apiPath === '/api/events') { json(res, store.eventsAt(requestedTick, url.searchParams.get('actor') ?? '', 120)); return; }
       if (apiPath === '/api/frames') { json(res, store.framesAfter(requestedTick)); return; }
       if (apiPath === '/api/stream') {

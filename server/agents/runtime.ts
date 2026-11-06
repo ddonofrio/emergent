@@ -1,5 +1,5 @@
 import type { DecisionStatus } from '../../src/core/time';
-import { PersistentSession, type CompletionRequest, type SessionSnapshot, type SessionState } from '../../vendor/littlewhale';
+import { PersistentSession, conversationRequest, type CompletionRequest, type SessionSnapshot, type SessionState } from '../../vendor/littlewhale';
 import { InferenceClient, type ProviderConfig } from '../inference/providers';
 import { RequestQueue } from '../inference/request-queue';
 import type { Store } from '../store';
@@ -7,15 +7,19 @@ import type { AgentPort } from '../simulation/agent-port';
 import type { AgentBridge, BridgeSnapshot } from '../simulation/agent-bridge';
 import type { WorldConnection } from '../simulation/connection';
 import { agentTools, observeAgent, resumeAgentTool, type AgentToolMemory, type LookState } from './tools';
+import { AgentMemory, type MemorySnapshot } from './memory-record';
+import type { AgentMemoryRecord } from '../../src/core/types';
 
-export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; viewAngle?: number; look?: LookState; }
+export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; }
 export interface RuntimeSnapshot { version: 1; agents: Record<string, AgentSnapshot>; simulation: BridgeSnapshot; }
 interface Agent extends AgentToolMemory {
   port: AgentPort;
+  sourcePort: AgentPort;
+  memory: AgentMemory;
+  system?: string;
   session: PersistentSession;
   state: SessionState;
   detail?: string;
-  compactionPending?: boolean;
   controller?: AbortController;
   job?: Promise<void>;
 }
@@ -33,37 +37,56 @@ export class AgentRuntime implements WorldConnection {
     for (const port of bridge.ports()) {
       const saved = snapshot?.agents[port.id];
       const session = new PersistentSession(port.id, saved?.session);
-      const agent: Agent = { port, session, notes: saved?.notes ?? [], viewAngle: saved?.viewAngle,
+      const memory = new AgentMemory({ intent: port.observe().self.intent, notes: saved?.notes ?? [], learned: port.knowledge() }, port.knowledge(), saved?.memory, {
+        sessionId: port.id,
+        context: () => this.agentContext(agent),
+        complete: (request, signal) => session.completeAuxiliary((req, sig) => this.complete(agent, req, sig), request, signal),
+        save: () => this.persist(),
+        publish: (record, source) => this.publishMemory(agent, record, source),
+        event: event => {
+          try { port.recordContextCompaction({ ...event }); this.persist(); this.hooks.inferenceChanged?.(); }
+          catch (error) { this.fail(error); throw error; }
+        },
+        fatal: error => this.fail(error),
+      });
+      const agent: Agent = { sourcePort: port, port: { ...port, get tick() { return port.tick; }, knowledge: () => {
+        memory.discover(port.knowledge()); return memory.record.learned;
+      } }, session, memory,
+        get notes() { return memory.record.notes; }, writeMemory: update => memory.write(update), viewAngle: saved?.viewAngle,
         ...(saved?.look ? { look: { ...saved.look } } : {}), state: 'stopped' };
-      if (!saved) session.appendUser(JSON.stringify({ observation: observeAgent(port, agent.notes), instruction: 'Choose your own goals and act through the currently available tools.' }));
       this.agents.set(port.id, agent);
     }
   }
   get mode(): 'llm' | 'waiting' { return this.inference.enabled ? 'llm' : 'waiting'; }
   configure(providers: ProviderConfig[]) {
     this.inference = new InferenceClient(providers, () => this.hooks.inferenceChanged?.(), this.requestQueue);
-    for (const agent of this.agents.values()) agent.controller?.abort(new Error('Inference configuration changed.'));
+    for (const agent of this.agents.values()) { agent.memory.pause(); agent.controller?.abort(new Error('Inference configuration changed.')); }
     this.hooks.changed();
   }
   persistence(): RuntimeSnapshot {
     return { version: 1, simulation: this.bridge.snapshot(), agents: Object.fromEntries([...this.agents].map(([id, agent]) => [id, {
-      session: agent.session.snapshot(), notes: [...agent.notes], ...(agent.viewAngle ? { viewAngle: agent.viewAngle } : {}),
+      session: agent.session.snapshot(), notes: [...agent.notes], memory: agent.memory.snapshot(), ...(agent.viewAngle ? { viewAngle: agent.viewAngle } : {}),
       ...(agent.look ? { look: { ...agent.look } } : {}),
     }])) };
   }
   metrics() { return Object.fromEntries([...this.agents].map(([id, agent]) => [id, agent.session.metrics])); }
-  private persist() { this.store.saveAgentState(this.persistence()); }
+  private persist() {
+    try { this.store.saveAgentState(this.persistence()); }
+    catch (error) { this.fail(error); throw error; }
+  }
   resume() {
     if (this.closed || this.failed) return;
     this.enabled = true;
     for (const agent of this.agents.values()) {
-      if (!agent.port.active()) { agent.controller?.abort(new Error('Entity disabled.')); continue; }
+      if (!agent.port.active()) { agent.memory.pause(); agent.controller?.abort(new Error('Entity disabled.')); continue; }
+      this.syncMemory(agent);
       if (!agent.job) this.launch(agent);
+      if (this.inference.enabled) agent.memory.resume();
     }
   }
   suspend() {
     this.enabled = false;
-    for (const agent of this.agents.values()) agent.controller?.abort(new Error('World paused.'));
+    for (const agent of this.agents.values()) { agent.memory.pause(); agent.controller?.abort(new Error('World paused.')); }
   }
   fail(error: unknown) {
     if (this.failed || this.closed) return;
@@ -75,34 +98,50 @@ export class AgentRuntime implements WorldConnection {
   commit() { this.bridge.commit(); }
   afterStep() { this.bridge.afterStep(); }
   status(): Record<string, DecisionStatus> {
-    return Object.fromEntries([...this.agents].map(([id, agent]) => [id, { state: !agent.port.active() ? 'disabled' : agent.state === 'tool' && agent.port.waiting() ? 'ready' : agent.state === 'retrying' || !this.inference.enabled ? 'waiting' : agent.state === 'compacting' ? 'shrinking' : 'thinking', ...(agent.detail ? { message: agent.detail } : {}) }]));
+    return Object.fromEntries([...this.agents].map(([id, agent]) => [id, { state: !agent.port.active() ? 'disabled' : agent.memory.compacting ? 'shrinking' : agent.state === 'tool' && agent.port.waiting() ? 'ready' : agent.state === 'retrying' || !this.inference.enabled ? 'waiting' : 'thinking', ...(agent.detail ? { message: agent.detail } : {}) }]));
+  }
+  private syncMemory(agent: Agent) {
+    const intent = agent.sourcePort.observe().self.intent;
+    if (JSON.stringify(intent) !== JSON.stringify(agent.memory.record.intent)) agent.memory.write({ intent });
+    agent.memory.discover(agent.sourcePort.knowledge());
+  }
+  private currentContext(agent: Agent) {
+    this.syncMemory(agent);
+    return JSON.stringify({ record: agent.memory.record, observation: observeAgent(agent.port, agent.notes) });
+  }
+  private agentContext(agent: Agent) {
+    const tools = agentTools(agent.port, agent).schemas;
+    return { system: agent.system, tools, messages: conversationRequest({ system: agent.system ?? '', schemas: tools,
+      currentContext: () => this.currentContext(agent), contextWindow: this.inference.contextWindow, maxTokens: this.inference.maxTokens }, agent.session.snapshot().messages).messages };
+  }
+  private publishMemory(agent: Agent, record: AgentMemoryRecord, source: 'write' | 'compaction') {
+    try {
+      if (record.intent && JSON.stringify(agent.sourcePort.observe().self.intent) !== JSON.stringify(record.intent)) agent.sourcePort.setIntent(record.intent);
+      agent.sourcePort.recordMemory(record, source);
+      this.persist(); this.hooks.inferenceChanged?.();
+    } catch (error) { this.fail(error); throw error; }
   }
   private launch(agent: Agent) {
     const controller = new AbortController(); agent.controller = controller;
     const tools = agentTools(agent.port, agent);
     const system = `${agent.port.instructions.replaceAll('{name}', agent.port.name)}
-You have one continuous private conversation. Choose your own identity, goals and observable success conditions. Keep a small next step, expected observation and reason to reconsider in set_intent when useful; update your own plan after discoveries, repeated blockage or completion. Each success condition must cover the goal you selected. An experiment establishes only the tested inputs, not every option. Keep at most ten private notes with remember; permanent learned knowledge can be searched with recall even after an object is gone.
+You retain a fresh observation, your current memory record, and at most ten recent complete action exchanges without old reasoning. Earlier conversation history is forgotten. Choose your own identity, goals and observable success conditions. Keep a small next step, expected observation and reason to reconsider in set_intent when useful; update your own plan after discoveries, repeated blockage or completion. Each success condition must cover the goal you selected. An experiment establishes only the tested inputs, not every option. Keep at most ten private notes with remember; permanent learned knowledge can be searched with recall even after an object is gone. Your memory record may be shortened in the background; preserve important conclusions explicitly.
 Events arrive through tool results. An event alone does not stop movement or require a reply. Only arrival, blockage, explicit cancellation or replacement ends movement. Use wait_for_event to continue an ongoing action, choosing eventTypes if only certain interruptions matter. For an uncertain reply, choose a timeout; silence need not stop your own plans.
 Calls in one response run concurrently, not sequentially. Submit at most one body or locomotion action per response. Scans, turning and hand interactions require a free stationary body; bodyActivity remains busy until its action completes even if you look stationary. Speech and private planning may run alongside an action. Wait for a dependent step's result before issuing the next step. Actions have persistent IDs and are validated at the shared commit boundary.
 World time freezes during every agent's inference or retry. Tool waits let the shared clock advance. Self and creature positions name x, yHeight and z; voxel targets use [x,y,z], where y is height; walk_to uses horizontal x,z.
-Current tool results override old positions, inventory and fallible notes. Learned Knowledge contains every durable discovery you have made; ordinary visible details are observations, not discoveries. Capabilities describe possible uses and prerequisites; available tools describe what you can execute now. Missing hit or pickup while holding an object means you must free your hands, not that nearby material is unreachable. Check hand constraints and bodyActivity before changing position to solve an unavailable action. Visible block counts describe only the local view, never the whole world or your inventory. After a collision or uncertain location, look again. Never assume unseen facts. Call tools to proceed.`;
+Current tool results override old positions, inventory and fallible notes. Learned Knowledge is a condensed record of your discoveries; recall can search their original details. Ordinary visible details are observations, not discoveries. Capabilities describe possible uses and prerequisites; available tools describe what you can execute now. Missing hit or pickup while holding an object means you must free your hands, not that nearby material is unreachable. Check hand constraints and bodyActivity before changing position to solve an unavailable action. Visible block counts describe only the local view, never the whole world or your inventory. After a collision or uncertain location, look again. Never assume unseen facts. Call tools to proceed.`;
+    agent.system = system;
     agent.job = agent.session.run({
       system, schemas: tools.schemas, tools: tools.executors, signal: controller.signal,
+      currentContext: () => this.currentContext(agent),
       prepareTools: () => { const current = agentTools(agent.port, agent); return { schemas: current.schemas, tools: current.executors }; },
       resumeTool: (call, signal) => resumeAgentTool(agent.port, agent, call.id, signal),
       complete: (request, signal) => this.complete(agent, request, signal),
       contextWindow: this.inference.contextWindow,
       maxTokens: this.inference.maxTokens,
       persist: () => this.persist(),
-      onCompletion: (_completion, purpose) => { if (purpose === 'compaction') agent.compactionPending = false; },
       onState: (state, detail) => {
         agent.state = state; agent.detail = detail;
-        if (state === 'compacting' && !agent.compactionPending) {
-          agent.compactionPending = true;
-          try { agent.port.recordContextCompaction(); }
-          catch (error) { this.fail(error); throw error; }
-        }
-        if (state === 'stopped') agent.compactionPending = false;
         this.hooks.changed();
       },
     }).catch(error => {
@@ -122,16 +161,16 @@ Current tool results override old positions, inventory and fallible notes. Learn
       try { return operation(); }
       catch (error) { this.fail(error); throw error; }
     };
-    const audit = durable(() => this.store.beginInference(this.bridge.tick, agent.port.id, request.purpose, 'persistent-tools-v1', request));
+    const audit = durable(() => this.store.beginInference(this.bridge.tick, agent.port.id, request.purpose, 'recent-context-v1', request));
     try {
       const answer = await this.inference.complete(request, signal);
       signal.throwIfAborted();
       durable(() => this.store.finishInference(audit, { ...answer, timing: { startedAt, durationMs: performance.now() - started } }, 'completed'));
       return answer;
     } catch (error) {
-      if (!this.closed) durable(() => this.store.finishInference(audit, { message: signal.aborted ? 'Inference cancelled.' : 'Provider unavailable; the same conversation will retry.', timing: { startedAt, durationMs: performance.now() - started } }, signal.aborted ? 'cancelled' : 'failed'));
+      if (!this.closed) durable(() => this.store.finishInference(audit, { message: signal.aborted ? 'Inference cancelled.' : this.inference.describeError(error), timing: { startedAt, durationMs: performance.now() - started } }, signal.aborted ? 'cancelled' : 'failed'));
       throw error;
     }
   }
-  close() { this.closed = true; this.suspend(); this.persist(); this.bridge.close(); }
+  close() { this.closed = true; for (const agent of this.agents.values()) agent.memory.close(); this.suspend(); this.persist(); this.bridge.close(); }
 }

@@ -86,8 +86,14 @@ export class AgentBridge {
         submit: (callId, command, signal) => this.submit(id, callId, command, signal),
         cancel: (callId, actionId, signal) => this.submit(id, callId, { action: 'cancel', actionId }, signal),
         wait: (callId, options, signal) => this.wait(id, callId, options, signal),
-        recordContextCompaction: () => {
-          this.engine.event(id, 'context-compaction', `${entity.name} started shrinking its conversation context.`);
+        recordContextCompaction: details => {
+          this.engine.event(id, 'context-compaction', details?.phase === 'finished'
+            ? `${entity.name} memory compaction ${details.outcome}.`
+            : `${entity.name} started shrinking its memory record.`, details);
+          this.checkpoint();
+        },
+        recordMemory: (record, source) => {
+          this.engine.event(id, 'memory', source === 'compaction' ? 'Compacted memory record.' : 'Updated memory record.', { ...clone(record), source });
           this.checkpoint();
         },
         setIntent: intent => { this.engine.entity(id).intent = clone(intent); this.engine.event(id, 'intent', intent.goal, { intent }); this.checkpoint(); },

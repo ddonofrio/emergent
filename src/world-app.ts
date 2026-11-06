@@ -81,7 +81,7 @@ let shownMetrics:Record<string,AgentMetrics>|undefined;
 let shownSecondsPerTurn:number|undefined;
 let epoch = 0, seekTimer: ReturnType<typeof setTimeout>, replayFrames: Frame[] = [], fetching = false, replayClock = 0, replayRequest = 0, lastPlayback = performance.now(), lastUi = 0, nextReplayFetch = 0, seeking = false;
 let dayCount = 0,detailsSignature='',statsSignature='';
-let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[]}|undefined;
+let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[];learned?:string[]}|undefined;
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
 let inferenceConfig:InferenceConfig={version:1,parallelRequests:true,providers:[]};
@@ -197,7 +197,7 @@ function renderProviderStatus(config:InferenceConfig|undefined=meta?.inferenceCo
 function selectEntity(id: string) { selected = id; detailsSignature='';view.select(id);renderInspector();void loadMemory(); }
 async function loadMemory(){
   const request=++memoryRequest,actor=selected,tick=cursor;memoryView=undefined;renderDetails();
-  try{const response=await fetch(`${worldApi}/memory?tick=${tick}&actor=${encodeURIComponent(actor)}`);if(!response.ok)throw new Error();const notes=await response.json() as string[];if(request===memoryRequest){memoryView={actor,tick,notes};renderDetails();}}
+  try{const response=await fetch(`${worldApi}/memory-record?tick=${tick}&actor=${encodeURIComponent(actor)}`);if(!response.ok)throw new Error();const record=await response.json() as {notes:string[];learned?:string[]};if(request===memoryRequest){memoryView={actor,tick,...record};renderDetails();}}
   catch{if(request===memoryRequest){memoryView={actor,tick,notes:[]};renderDetails();}}
 }
 function setBoot(boot: Boot) {
@@ -434,7 +434,7 @@ function renderDetails() {
   else if(!memoryView.notes.length){const p=document.createElement('p');p.className='muted';p.textContent='No private memory notes yet.';recordPanel.append(p);}
   else for(const note of memoryView.notes){const p=document.createElement('p');p.textContent=note;recordPanel.append(p);}
   const knowledgeLabel=document.createElement('h4');knowledgeLabel.textContent='Learned Knowledge';recordPanel.append(knowledgeLabel);
-  const learned=(shown.discoveries?.[selected]??[]).map(knowledge=>knowledgeDescription(knowledge,loadUniverse(universeId!).crafting));
+  const learned=(memoryView?.actor===selected?memoryView.learned:undefined)??(shown.discoveries?.[selected]??[]).map(knowledge=>knowledgeDescription(knowledge,loadUniverse(universeId!).crafting));
   if(!learned.length){const p=document.createElement('p');p.className='muted';p.textContent='Nothing discovered yet.';recordPanel.append(p);}
   else for(const knowledge of learned){const p=document.createElement('p');p.textContent=knowledge;recordPanel.append(p);}
 }

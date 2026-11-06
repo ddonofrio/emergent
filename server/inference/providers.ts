@@ -189,6 +189,7 @@ export class InferenceClient {
   private requestStatuses = new Map<string, ProviderRequestStatus>();
   constructor(providers: ProviderConfig[], private onStatusChanged?: () => void, private requestQueue = new RequestQueue()) { this.providers = validateProviders(providers); }
   configure(providers: ProviderConfig[]): void { this.providers = validateProviders(providers); }
+  describeError(error: unknown): string { return safeError(error, this.providers); }
   statuses(): Record<string, ProviderRequestStatus> {
     return Object.fromEntries(this.providers.map(provider => [provider.id, { ...(this.requestStatuses.get(provider.id) ?? { state: 'unknown' as const, inFlight: 0 }) }]));
   }
@@ -213,6 +214,8 @@ export class InferenceClient {
 
   /** One attempt per configured route. The session owns indefinite cancellable retries. */
   complete(request: CompletionRequest, signal: AbortSignal): Promise<Completion> {
+    // Auxiliary memory work must not occupy the serial foreground decision queue.
+    if (request.purpose === 'compaction') return this.request(request, signal);
     return this.requestQueue.run(() => this.request(request, signal), signal);
   }
 
@@ -236,7 +239,7 @@ export class InferenceClient {
           tools: request.tools.map((tool: ToolSchema) => ({ ...tool, parameters: tool.parameters as Tool['parameters'] })),
         };
         const response = await collection.completeSimple(model, context, {
-          signal, maxTokens: Math.min(request.maxTokens, model.maxTokens),
+          signal, maxTokens: request.maxTokens,
           maxRetries: 0, timeoutMs: config.timeoutMs ?? 120000, sessionId: request.sessionId,
           ...(config.reasoning && config.reasoning !== 'off' ? { reasoning: config.reasoning } : {}),
           ...(config.region ? { env: { AWS_REGION: config.region } } : {}),
@@ -246,8 +249,12 @@ export class InferenceClient {
         if (response.stopReason === 'error' || response.stopReason === 'aborted') throw new Error(response.errorMessage || 'Model provider returned no completion.');
         const content = response.content.filter(block => block.type === 'text').map(block => block.text).join('\n') || null;
         const calls = response.content.filter(block => block.type === 'toolCall').map(({ id, name, arguments: args }) => ({ id, name, arguments: args }));
-        if (!content && !calls.length) throw new Error('Model returned an empty completion.');
-        this.updateStatus(config.id, { state: 'ok', detail: 'Request completed.' });
+        // A reasoning-only response can exhaust its output budget before emitting text.
+        // Preserve its finish reason and usage for the session and durable audit.
+        if (!content && !calls.length && response.stopReason !== 'length') throw new Error('Model returned no text or tool calls.');
+        this.updateStatus(config.id, response.stopReason === 'length'
+          ? { state: 'bad', detail: `Model reached its output limit after ${response.usage.output} tokens.` }
+          : { state: 'ok', detail: 'Request completed.' });
         return {
           content, calls, provider: config.id, model: selected, latencyMs: performance.now() - started, attempts,
           usage: { inputTokens: response.usage.input + response.usage.cacheRead + response.usage.cacheWrite, outputTokens: response.usage.output, totalTokens: response.usage.totalTokens, cachedInputTokens: response.usage.cacheRead },

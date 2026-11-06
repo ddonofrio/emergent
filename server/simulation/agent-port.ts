@@ -1,4 +1,4 @@
-import type { Action, ActionResult, AgentIntent, Entity, Observation, Vec3 } from '../../src/core/types';
+import type { Action, ActionResult, AgentIntent, AgentMemoryRecord, Entity, Observation, Vec3 } from '../../src/core/types';
 import type { ItemCapability } from '../../src/core/crafting';
 
 export const wakeEventTypes = ['speech', 'encounter', 'discovery', 'terrain', 'block-impact', 'collision', 'blocked', 'arrived', 'scanned', 'follow-ended', 'follow-blocked', 'rebound-ended', 'action-completed', 'action-blocked', 'action-cancelled', 'action-rejected'] as const;
@@ -65,7 +65,8 @@ export interface AgentPort {
   submit(callId: string, action: Action, signal: AbortSignal): Promise<ToolOutcome>;
   cancel(callId: string, actionId: string, signal: AbortSignal): Promise<ToolOutcome>;
   wait(callId: string, options: WaitOptions, signal: AbortSignal): Promise<ToolOutcome>;
-  recordContextCompaction(): void;
+  recordContextCompaction(details?: Record<string, unknown>): void;
+  recordMemory(record: AgentMemoryRecord, source: 'write' | 'compaction'): void;
   setIntent(intent: AgentIntent): void;
   remember(notes: string[]): void;
   waiting(): boolean;

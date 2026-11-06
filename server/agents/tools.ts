@@ -13,7 +13,10 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
 const coordinates = ([x, y, z]: Vec3) => ({ x, yHeight: y, z });
 
 export interface LookState { signature?: string; }
-export interface AgentToolMemory { notes: string[]; viewAngle?: number; look?: LookState; }
+export interface AgentToolMemory {
+  notes: string[]; viewAngle?: number; look?: LookState;
+  writeMemory?: (update: { notes?: string[]; intent?: AgentIntent }) => void;
+}
 
 const lookSignature = (value: Record<string, unknown>) => {
   const { tick: _tick, ...stable } = value;
@@ -261,11 +264,20 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
 
   tool('set_intent', 'Record your own goal and a success condition covering it. Optional nextStep, expectedObservation and reconsiderWhen describe your chosen experiment or plan. Reassess after discoveries, blockage or completion. This replaces the previous intent; preserve fields you still want. No world time.',
     object({ identity: text, goal: text, successCondition: text, assessment: text, nextStep: text, expectedObservation: text, reconsiderWhen: text, status: { type: 'string', enum: ['active', 'completed', 'abandoned', 'blocked'] } }, ['goal', 'successCondition', 'status']),
-    async args => { port.setIntent(args as unknown as AgentIntent); return { intent: args, assessmentBy: 'agent' }; });
+    async args => {
+      if (memory.writeMemory) memory.writeMemory({ intent: args as unknown as AgentIntent });
+      else port.setIntent(args as unknown as AgentIntent);
+      return { intent: args, assessmentBy: 'agent' };
+    });
   tool('recall', 'Search your permanent Learned Knowledge by item or topic, including objects you no longer own. Returns up to twenty matching facts you have already discovered; refine the query if total is larger. No world time.',
     object({ query: text }, ['query']), async args => port.recall(args.query as string));
   tool('remember', 'Replace your private notes (at most ten concise entries); merge ten into nine or fewer before adding. Preserve reproducible findings with exact inputs, labelled hypotheses and commitments. Correct disproven claims. Avoid current inventory, tool lists and bearings; timestamp useful last sightings. Learned knowledge is already durable.',
     object({ notes: { type: 'array', items: text, maxItems: 10 } }, ['notes']),
-    async args => { memory.notes = [...args.notes as string[]]; port.remember(memory.notes); return { notes: memory.notes }; });
+    async args => {
+      const notes = [...args.notes as string[]];
+      if (memory.writeMemory) memory.writeMemory({ notes });
+      else { memory.notes = notes; port.remember(notes); }
+      return { notes };
+    });
   return { schemas, executors };
 }

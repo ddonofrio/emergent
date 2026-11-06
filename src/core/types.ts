@@ -40,6 +40,7 @@ export interface AgentIntent {
   reconsiderWhen?: string;
   status: 'active' | 'completed' | 'abandoned' | 'blocked';
 }
+export interface AgentMemoryRecord { intent?: AgentIntent; notes: string[]; learned: string[]; }
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander' | 'static' | 'automaton'; position: Vec3; yaw: number;
   enabled?: boolean;
