@@ -39,6 +39,7 @@ export interface SimulationAction {
   physicalActive?: boolean;
   motion?: Entity['motion'];
   result?: ActionResult;
+  attemptedFailure?: boolean;
   command: Action | { action: 'cancel'; actionId: string };
   dueTick?: number;
   finishedEventId?: number;

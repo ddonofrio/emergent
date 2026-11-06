@@ -72,6 +72,18 @@ test('a side look refreshes applicable target tools from that local view', async
     const forwardHit = forward.schemas.find(tool => tool.name === 'hit');
     const forwardTargets = (forwardHit?.parameters.properties as {target?:{enum:number[][]}} | undefined)?.target?.enum ?? [];
     assert.equal(forwardTargets.some(target => target.join(',') === '2,1,0'), false);
+    const missed = forward.executors.hit({ target: [2, 1, 0] },
+      { id: 'hidden-hit', name: 'hit', arguments: { target: [2, 1, 0] } }, f.signal) as Promise<any>;
+    f.bridge.commit();
+    const missResult = await missed;
+    assert.equal(missResult.action.status, 'running');
+    const finishing = f.port.wait('finish-hidden-hit', { actionId: missResult.action.id }, f.signal);
+    f.advance(20);
+    const finishedMiss = await finishing;
+    assert.equal(finishedMiss.action?.status, 'completed');
+    assert.equal(finishedMiss.action?.result?.ok, false);
+    assert.equal(f.engine.voxels.get([2, 1, 0]), 'wood');
+    assert.equal(f.engine.blockDamage.has('2,1,0'), false);
     const looking = forward.executors.look({ angle: 90 }, { id: 'look-side', name: 'look', arguments: { angle: 90 } }, f.signal);
     f.bridge.commit(); f.advance(1);
     const side = await looking as { viewAngle: number; timeAdvancedTicks: number };
@@ -130,5 +142,73 @@ test('say is unavailable after the turn speech budget is spent and returns next 
     f.advance(20);
     assert.equal(f.port.remainingSpeechWords(), 3);
     assert.equal(agentTools(f.port, { notes: [] }).schemas.some(tool => tool.name === 'say'), true);
+  } finally { f.bridge.close(); }
+});
+
+test('repeated well-formed hit and walk failures lock after three attempts and any other tool unlocks them', async () => {
+  const f = fixture();
+  try {
+    f.engine.entity('maker').inventory = null;
+    const memory: AgentToolMemory = { notes: [] };
+    const failedHit = async (id: string) => {
+      const tools = agentTools(f.port, memory);
+      const advertised = tools.schemas.find(tool => tool.name === 'hit')!;
+      const targets = (advertised.parameters.properties as {target:{enum:number[][]}}).target.enum;
+      assert.equal(targets.some(target => target.join(',') === '0,1,1'), false);
+      const pending = tools.executors.hit({ target: [0, 1, 1] },
+        { id, name: 'hit', arguments: { target: [0, 1, 1] } }, f.signal) as Promise<any>;
+      f.bridge.commit(); f.advance(20);
+      return pending;
+    };
+
+    const firstHit = await failedHit('miss-1');
+    assert.equal(firstHit.toolControl, undefined);
+    assert.equal(memory.toolFailures?.hit?.count, 1);
+    const secondHit = await failedHit('miss-2');
+    assert.equal(secondHit.toolControl.failures, 2);
+    assert.match(secondHit.toolControl.message, /repeated.*nothing/i);
+    const thirdHit = await failedHit('miss-3');
+    assert.equal(thirdHit.toolControl.unavailable, true);
+    assert.equal(memory.toolFailures?.hit?.unavailable, true);
+
+    const lockedHitTools = agentTools(f.port, memory);
+    assert.equal(lockedHitTools.schemas.some(tool => tool.name === 'hit'), false);
+    const lockedHit = await lockedHitTools.executors.hit({ target: [0, 1, 1] },
+      { id: 'miss-4', name: 'hit', arguments: { target: [0, 1, 1] } }, f.signal) as any;
+    assert.equal(lockedHit.toolControl.unavailable, true);
+    await assert.rejects(lockedHitTools.executors.hit({ target: '[0,1,1]' },
+      { id: 'bad-hit', name: 'hit', arguments: { target: '[0,1,1]' } }, f.signal), /array/);
+    assert.equal(memory.toolFailures?.hit?.count, 3);
+
+    const recall = agentTools(f.port, memory);
+    await recall.executors.recall({ query: 'wood' }, { id: 'recall', name: 'recall', arguments: { query: 'wood' } }, f.signal);
+    assert.equal(memory.toolFailures?.hit, undefined);
+    assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'hit'), true);
+
+    const turning = agentTools(f.port, memory).executors.turn({ angle: 90 },
+      { id: 'turning', name: 'turn', arguments: { angle: 90 } }, f.signal);
+    f.bridge.commit();
+    const failedWalk = async (id: string) => {
+      const tools = agentTools(f.port, memory);
+      assert.equal(tools.schemas.some(tool => tool.name === 'walk'), false);
+      const result = tools.executors.walk({ distance: 2 },
+        { id, name: 'walk', arguments: { distance: 2 } }, f.signal);
+      f.bridge.commit();
+      return result as Promise<any>;
+    };
+    assert.equal((await failedWalk('walk-1')).toolControl, undefined);
+    assert.equal((await failedWalk('walk-2')).toolControl.failures, 2);
+    assert.equal((await failedWalk('walk-3')).toolControl.unavailable, true);
+    assert.equal(memory.toolFailures?.walk?.unavailable, true);
+    f.advance(20); await turning;
+    assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'walk'), false);
+
+    const unlock = agentTools(f.port, memory);
+    await unlock.executors.recall({ query: 'wood' }, { id: 'unlock', name: 'recall', arguments: { query: 'wood' } }, f.signal);
+    assert.equal(memory.toolFailures?.walk, undefined);
+    assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'walk'), true);
+    await assert.rejects(agentTools(f.port, memory).executors.walk({ distance: '2' },
+      { id: 'bad-walk', name: 'walk', arguments: { distance: '2' } }, f.signal), /number/);
+    assert.equal(memory.toolFailures?.walk, undefined);
   } finally { f.bridge.close(); }
 });

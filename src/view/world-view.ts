@@ -116,7 +116,7 @@ export class WorldView {
     this.current = frame; this.received = performance.now(); this.syncEntities(frame.entities);
     for (const event of frame.events) {
       const action=(event.data as {action?:{action?:string}}|undefined)?.action?.action;
-      if(event.type==='action'&&action==='hit')this.punches.set(event.actor,{start:event.time,until:event.time+.55});
+      if((event.type==='action'||event.type==='rejected')&&action==='hit')this.punches.set(event.actor,{start:event.time,until:event.time+.55});
       if (event.type !== 'splash' && event.type !== 'discovery') continue;
       const data = event.data as { position?: Vec3; target?: Vec3 };
       const position = data.position ?? data.target; if (!position) continue;

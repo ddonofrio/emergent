@@ -611,6 +611,7 @@ export class Engine {
     return this.entities.find(other=>this.active(other)&&Math.floor(other.position[0])===target[0]&&Math.floor(other.position[2])===target[2]&&Math.abs(other.position[1]-(target[1]+1))<.05);
   }
   private execute(e: Entity, a: Action): ActionResult {
+    if(a.attemptOnly&&(a.action==='hit'||a.action==='walk'))return fail(a.action==='hit'?'There is nothing you can hit at that target.':'You cannot walk that way.');
     if(a.action==='look'){
       if(a.angle!==undefined&&(!Number.isFinite(a.angle)||Math.abs(a.angle)>180))return fail('Look angle must be between -180 and 180 degrees.');
       return {ok:true,message:'You spend a moment looking around.',feedback:{outcome:'started',angle:a.angle??0}};

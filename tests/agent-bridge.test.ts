@@ -49,6 +49,44 @@ test('movement progress uses the committed terrain destination and scoped world 
   } finally { bridge.close(); }
 });
 
+test('failed hit and walk attempts remain physical actions for one normal body turn', async () => {
+  const { engine, bridge, port, signal, advance } = fixture();
+  try {
+    let hitResolved = false;
+    const hit = port.submit('missed-hit', { action: 'hit', target: [0, 1, 1] }, signal)
+      .then(result => { hitResolved = true; return result; });
+    bridge.commit();
+    const startedHit = bridge.snapshot().entities.a.actions.find(action => action.callId === 'missed-hit')!;
+    assert.equal(startedHit.status, 'running');
+    assert.equal(startedHit.result?.ok, false);
+    assert.equal(startedHit.attemptedFailure, true);
+    advance(19); await Promise.resolve();
+    assert.equal(hitResolved, false);
+    advance(1);
+    const missed = await hit;
+    assert.equal(missed.action?.status, 'completed');
+    assert.equal(missed.action?.result?.ok, false);
+    assert.match(missed.action?.result?.message ?? '', /nothing to hit/i);
+
+    engine.voxels.set([0, 1, 1], 'stone');
+    let walkResolved = false;
+    const walk = port.submit('blocked-walk', { action: 'walk', distance: 2 }, signal)
+      .then(result => { walkResolved = true; return result; });
+    bridge.commit();
+    const startedWalk = bridge.snapshot().entities.a.actions.find(action => action.callId === 'blocked-walk')!;
+    assert.equal(startedWalk.status, 'running');
+    assert.equal(startedWalk.result?.ok, false);
+    assert.equal(startedWalk.attemptedFailure, true);
+    advance(19); await Promise.resolve();
+    assert.equal(walkResolved, false);
+    advance(1);
+    const blocked = await walk;
+    assert.equal(blocked.action?.status, 'completed');
+    assert.equal(blocked.action?.result?.ok, false);
+    assert.equal(engine.tick, 40);
+  } finally { bridge.close(); }
+});
+
 test('body completion remains observable after speech returned its first tool result', async () => {
   const { engine, bridge, port, signal, advance } = fixture([3.5, 1, .5]);
   try {

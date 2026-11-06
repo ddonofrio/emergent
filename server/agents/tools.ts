@@ -13,9 +13,41 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
 const coordinates = ([x, y, z]: Vec3) => ({ x, yHeight: y, z });
 
 export interface LookState { signature?: string; }
+export type RepeatedToolName = 'hit' | 'walk';
+export interface RepeatedToolFailure { signature: string; count: number; unavailable?: boolean; }
+export type RepeatedToolFailures = Partial<Record<RepeatedToolName, RepeatedToolFailure>>;
 export interface AgentToolMemory {
   notes: string[]; viewAngle?: number; look?: LookState;
+  toolFailures?: RepeatedToolFailures;
   writeMemory?: (update: { notes?: string[]; intent?: AgentIntent }) => void;
+}
+
+const repeatedToolNames = new Set<RepeatedToolName>(['hit', 'walk']);
+const repeatedToolName = (name: string): name is RepeatedToolName => repeatedToolNames.has(name as RepeatedToolName);
+
+function clearToolFailure(memory: AgentToolMemory, name: RepeatedToolName) {
+  if (!memory.toolFailures?.[name]) return;
+  delete memory.toolFailures[name];
+  if (!memory.toolFailures.hit && !memory.toolFailures.walk) delete memory.toolFailures;
+}
+
+function unlockWithOtherTool(memory: AgentToolMemory, name: string) {
+  if (name !== 'hit') clearToolFailure(memory, 'hit');
+  if (name !== 'walk') clearToolFailure(memory, 'walk');
+}
+
+function repeatedToolControl(name: RepeatedToolName, count: number) {
+  if (count === 2) return {
+    tool: name, repeatedFailure: true, failures: count,
+    message: name === 'hit'
+      ? 'You repeated the same failed hit. There is nothing you can strike at that target.'
+      : 'You repeated the same failed walk. You still cannot move that way.',
+  };
+  if (count >= 3) return {
+    tool: name, repeatedFailure: true, failures: count, unavailable: true,
+    message: `${name} has failed three times and is unavailable until you use another tool.`,
+  };
+  return undefined;
 }
 
 const lookSignature = (value: Record<string, unknown>) => {
@@ -139,23 +171,62 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
   const bodyActivity = port.bodyActivity(), capabilities = port.capabilities(view);
   const stationary = !view.self.motion && !view.self.following && !bodyActivity;
   const limited = <T>(values: T[]) => values.slice(0, 24);
+  const repeatedParameters: Record<RepeatedToolName, Record<string, unknown>> = {
+    walk: object({ distance: { ...number, exclusiveMinimum: 0, maximum: 32 }, angle: { ...number, minimum: -180, maximum: 180 } }, ['distance']),
+    hit: object({ target: { type: 'array', items: integer, minItems: 3, maxItems: 3 } }, ['target']),
+  };
+  const repeatedSignature = (name: RepeatedToolName, args: Record<string, unknown>) => {
+    try { validateArguments({ name, description: '', parameters: repeatedParameters[name] }, args); }
+    catch { return undefined; }
+    return name === 'hit'
+      ? JSON.stringify({ target: args.target })
+      : JSON.stringify({ distance: args.distance, angle: args.angle ?? 0 });
+  };
   const target = (values: Vec3[], description: string) => ({ type: 'array', items: integer, minItems: 3, maxItems: 3,
     enum: limited(values), description: `${description} Coordinates are [x,y,z], with y as height.` });
-  const tool = (name: string, description: string, parameters: Record<string, unknown>, execute: ToolExecutor) => {
+  const present = (result: unknown) => result && typeof result === 'object' && 'reason' in result && 'actions' in result && 'events' in result
+    ? toolOutcome(result as ToolOutcome, currentContext(port)) : result;
+  const tool = (name: string, description: string, parameters: Record<string, unknown>, execute: ToolExecutor, advertise = true) => {
     const schema = { name, description, parameters };
-    schemas.push(schema);
+    if (advertise) schemas.push(schema);
     executors[name] = async (args, call, signal) => {
-      validateArguments(schema, args);
-      const result = await execute(args, call, signal);
-      return result && typeof result === 'object' && 'reason' in result && 'actions' in result && 'events' in result
-        ? toolOutcome(result as ToolOutcome, currentContext(port)) : result;
+      unlockWithOtherTool(memory, name);
+      const repeated = repeatedToolName(name), signature = repeated ? repeatedSignature(name, args) : undefined;
+      if (repeated && !signature) validateArguments(schema, args);
+      if (repeated && memory.toolFailures?.[name]?.unavailable) {
+        return { error: repeatedToolControl(name, memory.toolFailures[name]!.count)!.message,
+          toolControl: repeatedToolControl(name, memory.toolFailures[name]!.count) };
+      }
+      let attemptOnly = false;
+      try { validateArguments(schema, args); }
+      catch (error) {
+        // A structurally valid hit may name a stale or empty target. Let the
+        // simulation execute the physical attempt instead of rejecting its enum.
+        if (!repeated || !signature) throw error;
+        attemptOnly = name === 'hit';
+      }
+      const result = await execute(attemptOnly ? { ...args, attemptOnly: true } : args, call, signal);
+      if (!repeated || !signature) return present(result);
+      const outcome = result as ToolOutcome, dispatchError = result && typeof result === 'object' && 'error' in result;
+      const failed = outcome?.action?.result?.ok === false || dispatchError;
+      if (!failed) {
+        clearToolFailure(memory, name);
+        return present(result);
+      }
+      const previous = memory.toolFailures?.[name];
+      const count = previous?.signature === signature ? previous.count + 1 : 1;
+      memory.toolFailures ??= {};
+      memory.toolFailures[name] = { signature, count, ...(count >= 3 ? { unavailable: true } : {}) };
+      const displayed = present(result);
+      const control = repeatedToolControl(name, count);
+      return control && displayed && typeof displayed === 'object' ? { ...displayed, toolControl: control } : displayed;
     };
   };
-  const submit = (name: Action['action'], description: string, parameters: Record<string, unknown>, prepare: (args: Record<string, unknown>) => Action = args => ({ ...args, action: name } as Action)) =>
+  const submit = (name: Action['action'], description: string, parameters: Record<string, unknown>, prepare: (args: Record<string, unknown>) => Action = args => ({ ...args, action: name } as Action), advertise = true) =>
     tool(name, description, parameters, (args, call, signal) => {
       const action = prepare(args); memory.viewAngle = 0;
       return port.submit(call.id, action, signal);
-    });
+    }, advertise);
 
   if (looksThisTurn < 3) {
     tool('look', 'Spend simulation time refreshing one local, occlusion-aware view without turning your body. Optional relative angle changes the viewing direction. At most three looks may start in one world turn; after the third, look is unavailable until the next turn. An unchanged result contains no new information.',
@@ -179,6 +250,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
       ['reverse', 'Move backwards while keeping your forward orientation.', 4],
       ['jump', 'Jump a short distance and optional body-relative angle. Inspect unfamiliar landings first.', 2.5],
     ] as const) {
+      if (name === 'walk' && memory.toolFailures?.walk?.unavailable) continue;
       submit(name, description, object({ distance: { ...number, exclusiveMinimum: 0, maximum }, ...(name === 'reverse' ? {} : { angle: { ...number, minimum: name === 'jump' ? -90 : -180, maximum: name === 'jump' ? 90 : 180 } }) }, ['distance']));
     }
   }
@@ -210,7 +282,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
       ['find_entity', 'Scan 360 degrees for visible living beings over one world second. On completion, returns every visible being within normal range and occlusion. An identical repeated scan says that nothing changed.'],
     ] as const) submit(name, description, object({}));
 
-    if (!held && view.interactions.hit.length) {
+    if (!held && view.interactions.hit.length && !memory.toolFailures?.hit?.unavailable) {
       const choices = limited(view.interactions.hit);
       submit('hit', `Strike one currently reachable block with empty hands. Targets: ${choices.map(item => `${item.kind} [${item.target.join(',')}]${item.cracks ? `, cracks ${item.cracks}/3` : ''}`).join('; ')}.`,
         object({ target: target(choices.map(item => item.target), 'Choose one current reachable block target.') }, ['target']));
@@ -279,5 +351,12 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
       else { memory.notes = notes; port.remember(notes); }
       return { notes };
     });
+  // Keep non-advertised dispatchers for stale or hallucinated calls. Argument
+  // shape is still validated exactly; only well-formed walk and hit calls take
+  // part in repeated-failure control.
+  if (!executors.walk) tool('walk', 'Walk a relative distance and optional body-relative angle.', repeatedParameters.walk,
+    async () => ({ error: 'walk is not currently available. Use a listed tool or wait for the current action.' }), false);
+  if (!executors.hit) submit('hit', 'Strike a block with empty hands.', repeatedParameters.hit,
+    args => ({ ...args, action: 'hit', ...(!held && stationary ? { attemptOnly: true } : {}) } as Action), false);
   return { schemas, executors };
 }

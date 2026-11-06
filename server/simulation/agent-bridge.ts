@@ -69,7 +69,7 @@ export class AgentBridge {
           return { facts: facts.slice(0, 20), total: facts.length };
         },
         bodyActivity: () => {
-          const action = this.state(id).actions.find(action => action.channel === 'body'
+          const action = this.state(id).actions.find(action => (action.channel === 'body' || action.attemptedFailure)
             && (action.status === 'queued' || action.status === 'running' && (action.physicalActive || action.dueTick! > this.engine.tick)));
           return action ? { id: action.id, kind: action.kind, ...(action.dueTick === undefined ? {} : { untilTick: action.dueTick }) } : undefined;
         },
@@ -175,7 +175,7 @@ export class AgentBridge {
       for (const action of this.state(id).actions.filter(action => action.status === 'queued')) {
         const entity = this.engine.entity(id), command = action.command;
         const immediateControl = command.action === 'cancel' || command.action === 'stop_follow';
-        const bodyBusy = this.state(id).actions.find(other => other.id !== action.id && other.channel === 'body'
+        const bodyBusy = this.state(id).actions.find(other => other.id !== action.id && (other.channel === 'body' || other.attemptedFailure)
           && other.status === 'running' && (other.physicalActive || other.dueTick! > this.engine.tick));
         const lookCount = command.action === 'look' ? this.state(id).actions.filter(other => other.id !== action.id
           && other.kind === 'look' && other.startedTick !== undefined && other.status !== 'rejected'
@@ -206,14 +206,16 @@ export class AgentBridge {
           }
         }
         action.startedTick = this.engine.tick;
+        const enteredEngine = !action.result && command.action !== 'cancel';
         action.result ??= command.action === 'cancel' ? { ok: true, message: 'Cancelled the action.' } : this.engine.act(id, command);
+        action.attemptedFailure = enteredEngine && !action.result.ok && (command.action === 'hit' || command.action === 'walk');
         if (action.channel === 'movement' && action.result.ok) movementCommitted = true;
         action.target = action.channel === 'movement' && entity.motion ? clone(entity.motion.destination) : undefined;
         action.position = clone(entity.position);
         action.remainingDistance = action.target ? distance(entity.position, action.target) : 0;
         action.physicalActive = motionTask(action) && action.result.ok && (!!entity.motion || !!entity.following);
         action.motion = action.physicalActive ? clone(entity.motion) : undefined;
-        if (!action.result.ok) this.finish(id, action, 'rejected');
+        if (!action.result.ok && !action.attemptedFailure) this.finish(id, action, 'rejected');
         else if (immediateControl) this.finish(id, action, 'completed');
         else { action.status = 'running'; action.dueTick = command.action === 'look' ? this.engine.tick + 1 : scanning.has(command.action)
           ? this.engine.tick + TURN_TICKS : (Math.floor(this.engine.tick / TURN_TICKS) + 1) * TURN_TICKS; }
@@ -231,6 +233,10 @@ export class AgentBridge {
         this.updateProgress(id, action);
         if (!this.engine.active(entity)) { action.physicalActive = false; this.finish(id, action, 'cancelled'); }
         else if (motionTask(action)) {
+          if (action.attemptedFailure) {
+            if (this.engine.tick >= action.dueTick!) this.finish(id, action, 'completed');
+            continue;
+          }
           action.physicalActive = !!entity.motion || !!entity.following;
           if (terminal(action)) continue;
           if (!entity.motion && !entity.following) {

@@ -6,11 +6,11 @@ import type { Store } from '../store';
 import type { AgentPort } from '../simulation/agent-port';
 import type { AgentBridge, BridgeSnapshot } from '../simulation/agent-bridge';
 import type { WorldConnection } from '../simulation/connection';
-import { agentTools, observeAgent, resumeAgentTool, type AgentToolMemory, type LookState } from './tools';
+import { agentTools, observeAgent, resumeAgentTool, type AgentToolMemory, type LookState, type RepeatedToolFailures } from './tools';
 import { AgentMemory, type MemorySnapshot } from './memory-record';
 import type { AgentMemoryRecord } from '../../src/core/types';
 
-export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; }
+export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; toolFailures?: RepeatedToolFailures; }
 export interface RuntimeSnapshot { version: 1; agents: Record<string, AgentSnapshot>; simulation: BridgeSnapshot; }
 interface Agent extends AgentToolMemory {
   port: AgentPort;
@@ -53,7 +53,7 @@ export class AgentRuntime implements WorldConnection {
         memory.discover(port.knowledge()); return memory.record.learned;
       } }, session, memory,
         get notes() { return memory.record.notes; }, writeMemory: update => memory.write(update), viewAngle: saved?.viewAngle,
-        ...(saved?.look ? { look: { ...saved.look } } : {}), state: 'stopped' };
+        ...(saved?.look ? { look: { ...saved.look } } : {}), ...(saved?.toolFailures ? { toolFailures: structuredClone(saved.toolFailures) } : {}), state: 'stopped' };
       this.agents.set(port.id, agent);
     }
   }
@@ -67,6 +67,7 @@ export class AgentRuntime implements WorldConnection {
     return { version: 1, simulation: this.bridge.snapshot(), agents: Object.fromEntries([...this.agents].map(([id, agent]) => [id, {
       session: agent.session.snapshot(), notes: [...agent.notes], memory: agent.memory.snapshot(), ...(agent.viewAngle ? { viewAngle: agent.viewAngle } : {}),
       ...(agent.look ? { look: { ...agent.look } } : {}),
+      ...(agent.toolFailures ? { toolFailures: structuredClone(agent.toolFailures) } : {}),
     }])) };
   }
   metrics() { return Object.fromEntries([...this.agents].map(([id, agent]) => [id, agent.session.metrics])); }
