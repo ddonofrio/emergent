@@ -114,7 +114,7 @@ test('compaction replaces only the paired prefix and durably retains original co
   let normalRequest: CompletionRequest | undefined;
   const entered = deferred();
   const run = session.run({
-    system: 'Embodied agent.', schemas: [], signal: abort.signal, contextWindow: 2048, maxOutputTokens: 128,
+    system: 'Embodied agent.', schemas: [], signal: abort.signal, contextWindow: 2048, maxTokens: 128,
     persist: snapshot => { saved = snapshot; },
     complete: async request => {
       if (request.purpose === 'compaction') {
@@ -187,7 +187,7 @@ test('pi-ai generation preserves canonical tool result IDs, usage and server-onl
   try {
     const config: ProviderConfig = { id: 'local', type: 'openai-compatible', name: 'Local', baseUrl: 'http://local.invalid/v1', model: 'local', apiKey: 'secret-key' };
     const client = new InferenceClient([config]);
-    const initial: CompletionRequest = { system: 'Entity.', messages: [{ role: 'user', content: 'Begin.' }], tools: [{ name: 'wait_for_event', description: 'Wait.', parameters: { type: 'object', properties: {}, additionalProperties: false } }], maxOutputTokens: 100, purpose: 'agent' };
+    const initial: CompletionRequest = { system: 'Entity.', messages: [{ role: 'user', content: 'Begin.' }], tools: [{ name: 'wait_for_event', description: 'Wait.', parameters: { type: 'object', properties: {}, additionalProperties: false } }], maxTokens: 100, purpose: 'agent' };
     const answer = await client.complete(initial, new AbortController().signal);
     assert.equal(answer.usage?.inputTokens, 11);
     const canonical = { ...answer.calls[0], id: 'canonical-action' };
@@ -208,8 +208,10 @@ test('model discovery uses the configured endpoint and retains advertised capaci
   let endpoint = '';
   globalThis.fetch = async (input, init) => { endpoint = String(input); assert.equal(new Headers(init?.headers).has('authorization'), false); return Response.json({ data: [{ id: 'local', context_length: 8192, max_output_tokens: 1024 }] }); };
   try {
-    const [config] = validateProviders([{ id: 'p', type: 'openai-compatible', name: 'Local', baseUrl: 'http://local.invalid/deployment/v1/', model: 'local', apiKey: '', tokenless: true }]);
-    assert.deepEqual(await discoverModels(config), [{ id: 'local', label: 'local', contextWindow: 8192, maxOutputTokens: 1024 }]);
+    const [config] = validateProviders([{ id: 'p', type: 'openai-compatible', name: 'Local', baseUrl: 'http://local.invalid/deployment/v1/', model: 'local', apiKey: '', tokenless: true, maxOutputTokens: 40960 }]);
+    assert.deepEqual(await discoverModels(config), [{ id: 'local', label: 'local', contextWindow: 8192 }]);
+    assert.equal(Object.hasOwn(config, 'maxOutputTokens'), false, 'Legacy output caps must not survive provider validation.');
+    assert.equal(new InferenceClient([config]).maxTokens, 4096, 'The adapter owns its output default.');
     assert.equal(endpoint, 'http://local.invalid/deployment/v1/models');
   } finally { globalThis.fetch = originalFetch; }
 });
@@ -239,7 +241,7 @@ test('Bedrock pi-ai dispatch receives the configured region and bearer token', a
   } as typeof prototype.send;
   try {
     const client = new InferenceClient([{ id: 'bedrock-test', type: 'amazon-bedrock', name: 'Bedrock', baseUrl: '', model: 'amazon.nova-test-v1:0', region: 'eu-west-1', apiKey: 'bedrock-test-token' }]);
-    const completion = await client.complete({ system: 'Entity.', messages: [{ role: 'user', content: 'Begin.' }], tools: [], maxOutputTokens: 100, purpose: 'agent' }, new AbortController().signal);
+    const completion = await client.complete({ system: 'Entity.', messages: [{ role: 'user', content: 'Begin.' }], tools: [], maxTokens: 100, purpose: 'agent' }, new AbortController().signal);
     assert.equal(completion.content, 'Ready.');
     assert.equal(region, 'eu-west-1');
     assert.equal(token, 'bedrock-test-token');

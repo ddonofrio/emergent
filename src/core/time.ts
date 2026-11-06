@@ -25,7 +25,7 @@ export function formatWorldDuration(tick: number, tenths = false) {
 }
 
 export interface DecisionStatus {
-  state: 'thinking' | 'waiting' | 'ready' | 'moving' | 'disabled';
+  state: 'thinking' | 'shrinking' | 'waiting' | 'ready' | 'moving' | 'disabled';
   attempts?: number;
   message?: string;
 }

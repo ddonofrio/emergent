@@ -10,9 +10,9 @@ interface AgentMetrics { llmCalls?:number; inputTokens?:number; outputTokens?:nu
 interface ModelRequestStatus { state:'unknown'|'ok'|'bad'; inFlight:number; detail?:string; }
 interface Metadata { universe: UniverseManifest; mode: 'llm' | 'waiting'; model: string; inferenceConfig?:InferenceConfig; metrics?:Record<string,AgentMetrics>; providerStatus?:Record<string,ModelRequestStatus>; latestTick: number; runtime: TurnStatus; secondsPerTurn?:number; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; recordedMetrics?:Record<string,AgentMetrics>; recordedSecondsPerTurn?:number; }
-interface ModelProvider { id:string; type:string; name:string; enabled?:boolean; baseUrl:string; model:string; region?:string; tokenless?:boolean; contextWindow?:number; maxOutputTokens?:number; reasoning?:string; hasApiKey?:boolean; apiKey?:string; clearApiKey?:boolean; hasVastToken?:boolean; vastToken?:string; clearVastToken?:boolean; vastContainerLabel?:string; }
+interface ModelProvider { id:string; type:string; name:string; enabled?:boolean; baseUrl:string; model:string; region?:string; tokenless?:boolean; contextWindow?:number; reasoning?:string; hasApiKey?:boolean; apiKey?:string; clearApiKey?:boolean; hasVastToken?:boolean; vastToken?:string; clearVastToken?:boolean; vastContainerLabel?:string; }
 interface InferenceConfig { version:1; parallelRequests?:boolean; providers:ModelProvider[]; }
-interface ProviderModelOption { id:string; label:string; contextWindow?:number; maxOutputTokens?:number; }
+interface ProviderModelOption { id:string; label:string; contextWindow?:number; }
 const universeId=/^\/universes\/([a-z0-9-]+)\/?$/.exec(window.location.pathname)?.[1];
 if(!universeId)throw new Error('A universe route is required.');
 const worldApi=`/api/universes/${universeId}`;
@@ -94,8 +94,8 @@ function readModelRows():ModelProvider[]{
     const field=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement|HTMLSelectElement).value;
     const checked=(name:string)=>(card.querySelector(`[data-field="${name}"]`) as HTMLInputElement).checked;
     const apiKey=field('apiKey').trim(),vastToken=field('vastToken').trim();
-    const contextWindow=Number(field('contextWindow')),maxOutputTokens=Number(field('maxOutputTokens'));
-    return {id:(card as HTMLElement).dataset.id!,type:field('type'),name:field('name'),enabled:checked('enabled'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),tokenless:checked('tokenless'),contextWindow,maxOutputTokens,
+    const contextWindow=Number(field('contextWindow'));
+    return {id:(card as HTMLElement).dataset.id!,type:field('type'),name:field('name'),enabled:checked('enabled'),baseUrl:field('baseUrl'),model:field('model'),region:field('region'),tokenless:checked('tokenless'),contextWindow,
       ...(field('reasoning')?{reasoning:field('reasoning')}:{ }),hasApiKey:(card as HTMLElement).dataset.hasApiKey==='true',clearApiKey:checked('clearApiKey'),...(apiKey?{apiKey}:{}),
       hasVastToken:(card as HTMLElement).dataset.hasVastToken==='true',clearVastToken:checked('clearVastToken'),...(vastToken?{vastToken}:{}),vastContainerLabel:field('vastContainerLabel')};
   });
@@ -129,7 +129,6 @@ function renderModelRows(providers:ModelProvider[]){
     const clearVast=checkbox(grid,'Remove saved gateway token','clearVastToken',provider.clearVastToken===true);
     const vastLabel=settingField(grid,'Vast.ai container label','vastContainerLabel',provider.vastContainerLabel??'','text','C.12345');
     const context=settingField(grid,'Context window (tokens)','contextWindow',String(provider.contextWindow??49152),'number');context.min='8192';context.step='1';
-    const output=settingField(grid,'Maximum output tokens','maxOutputTokens',String(provider.maxOutputTokens??4096),'number');output.min='32';output.step='1';
     const reasoningLabel=document.createElement('label');reasoningLabel.className='model-field';reasoningLabel.textContent='Reasoning';const reasoning=document.createElement('select');reasoning.dataset.field='reasoning';reasoning.add(new Option('Provider default',''));for(const value of ['off','minimal','low','medium','high','xhigh'])reasoning.add(new Option(value,value));reasoning.value=provider.reasoning??'';reasoningLabel.append(reasoning);grid.append(reasoningLabel);
     const updateFields=()=>{const bedrock=type.value==='amazon-bedrock',vast=type.value==='vast-ai';endpoint.parentElement!.hidden=bedrock;region.parentElement!.hidden=!bedrock;vastToken.parentElement!.hidden=!vast;clearVast.parentElement!.hidden=!vast;vastLabel.parentElement!.hidden=!vast;tokenless.parentElement!.hidden=type.value!=='openai-compatible';};
     type.onchange=()=>{if(type.value==='openai')endpoint.value='https://api.openai.com/v1';else if(type.value==='openrouter')endpoint.value='https://openrouter.ai/api/v1';updateFields();};updateFields();
@@ -140,7 +139,7 @@ function renderModelRows(providers:ModelProvider[]){
         const response=await fetch(`${worldApi}/models`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(row)});
         const data=await response.json() as {models?:ProviderModelOption[];error?:string};if(!response.ok)throw new Error(data.error??'Model discovery failed.');
         const models=data.models??[];modelList.replaceChildren(...models.map(value=>new Option(value.label,value.id)));
-        if(!model.value&&models.length){model.value=models[0].id;if(models[0].contextWindow)context.value=String(models[0].contextWindow);if(models[0].maxOutputTokens)output.value=String(models[0].maxOutputTokens);}
+        if(!model.value&&models.length){model.value=models[0].id;if(models[0].contextWindow)context.value=String(models[0].contextWindow);}
         modelStatus.textContent=`${models.length} models available.`;
       }catch(error){modelStatus.textContent=error instanceof Error?error.message:'Model discovery failed.';}
       finally{refresh.disabled=false;}
@@ -482,7 +481,7 @@ function journalEventLabel(event:WorldEvent) {
     const labels:Record<string,string>={walk:'Walking',run:'Running',jump:'Jumping',turn:'Turning',wait:'Waiting',find_material:'Scanning for materials',find_entity:'Searching for living beings',hit:'Striking a block',dig:'Digging with a shovel',strike_held:'Crafting with wood',join:'Joining door halves',open:'Opening a door',close:'Closing a door',place:'Placing an item',throw:'Throwing an item',pickup:'Picking up an item',hold:'Taking an item in hand',store:'Putting an item away',fill:'Filling a bucket',empty:'Emptying a bucket',say:'Speaking',follow:'Following',stop_follow:'Stopping following'};
     const label=labels[action]??'Action';return event.type==='rejected'?`${label} failed`:label;
   }
-  const labels:Record<string,string>={damage:'Block damaged',discovery:'Learned',memory:'Private note',arrived:'Movement complete',scanned:'Material scan complete',blocked:'Movement blocked',collision:'Collision',settled:'Block settled',lost:'Item lost',speech:'Speech',encounter:'Encounter',collapse:'Tree collapse',reflection:'Reflection','context-compacted':'Conversation compacted','agent-error':'Agent paused','entity-control':'Entity control','entity-arrival':'Entity arrival','knowledge-correction':'Knowledge update','follow-ended':'Follow ended','follow-blocked':'Follow blocked',splash:'Water splashed'};
+  const labels:Record<string,string>={damage:'Block damaged',discovery:'Learned',memory:'Private note',arrived:'Movement complete',scanned:'Material scan complete',blocked:'Movement blocked',collision:'Collision',settled:'Block settled',lost:'Item lost',speech:'Speech',encounter:'Encounter',collapse:'Tree collapse',reflection:'Reflection','context-compaction':'Conversation compaction','context-compacted':'Conversation compacted','agent-error':'Agent paused','entity-control':'Entity control','entity-arrival':'Entity arrival','knowledge-correction':'Knowledge update','follow-ended':'Follow ended','follow-blocked':'Follow blocked',splash:'Water splashed'};
   return labels[event.type]??event.type.replaceAll('-',' ');
 }
 function journalEventMessage(event:WorldEvent) {
@@ -503,7 +502,7 @@ $('focus-toggle').onclick=()=>{
   $('main').classList.toggle('focus-collapsed',!open);$('focus-toggle').setAttribute('aria-expanded',String(open));$('focus-toggle').setAttribute('aria-label',`${open?'Collapse':'Expand'} Properties panel`);$('focus-toggle').title=`${open?'Collapse':'Expand'} Properties panel`;
 };
 $('add-model').onclick=()=>{
-  const rows=readModelRows(),number=rows.length+1;renderModelRows([...rows,{id:`model-${Date.now()}-${number}`,type:'openai-compatible',name:`Model ${number}`,enabled:false,baseUrl:'',model:'',contextWindow:49152,maxOutputTokens:4096}]);
+  const rows=readModelRows(),number=rows.length+1;renderModelRows([...rows,{id:`model-${Date.now()}-${number}`,type:'openai-compatible',name:`Model ${number}`,enabled:false,baseUrl:'',model:'',contextWindow:49152}]);
 };
 $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
   event.preventDefault();const status=$('settings-status');status.textContent='Saving configuration...';

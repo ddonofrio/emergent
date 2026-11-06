@@ -1,6 +1,6 @@
 import type { DecisionStatus } from '../../src/core/time';
 import { PersistentSession, type CompletionRequest, type SessionSnapshot, type SessionState } from '../../vendor/littlewhale';
-import { DEFAULT_CONTEXT_WINDOW, InferenceClient, type ProviderConfig } from '../inference/providers';
+import { InferenceClient, type ProviderConfig } from '../inference/providers';
 import { RequestQueue } from '../inference/request-queue';
 import type { Store } from '../store';
 import type { AgentPort } from '../simulation/agent-port';
@@ -74,7 +74,7 @@ export class AgentRuntime implements WorldConnection {
   commit() { this.bridge.commit(); }
   afterStep() { this.bridge.afterStep(); }
   status(): Record<string, DecisionStatus> {
-    return Object.fromEntries([...this.agents].map(([id, agent]) => [id, { state: !agent.port.active() ? 'disabled' : agent.state === 'tool' && agent.port.waiting() ? 'ready' : agent.state === 'retrying' || !this.inference.enabled ? 'waiting' : 'thinking', ...(agent.detail ? { message: agent.detail } : {}) }]));
+    return Object.fromEntries([...this.agents].map(([id, agent]) => [id, { state: !agent.port.active() ? 'disabled' : agent.state === 'tool' && agent.port.waiting() ? 'ready' : agent.state === 'retrying' || !this.inference.enabled ? 'waiting' : agent.state === 'compacting' ? 'shrinking' : 'thinking', ...(agent.detail ? { message: agent.detail } : {}) }]));
   }
   private launch(agent: Agent) {
     const controller = new AbortController(); agent.controller = controller;
@@ -85,16 +85,22 @@ Events arrive through tool results. An event alone does not stop movement or req
 Calls in one response run concurrently, not sequentially. Submit at most one body or locomotion action per response. Scans, turning and hand interactions require a free stationary body; bodyActivity remains busy until its action completes even if you look stationary. Speech and private planning may run alongside an action. Wait for a dependent step's result before issuing the next step. Actions have persistent IDs and are validated at the shared commit boundary.
 World time freezes during every agent's inference or retry. Tool waits let the shared clock advance. Self and creature positions name x, yHeight and z; voxel targets use [x,y,z], where y is height; walk_to uses horizontal x,z.
 Current tool results override old positions, inventory and fallible notes. Learned Knowledge contains every durable discovery you have made; ordinary visible details are observations, not discoveries. Capabilities describe possible uses and prerequisites; available tools describe what you can execute now. Missing hit or pickup while holding an object means you must free your hands, not that nearby material is unreachable. Check hand constraints and bodyActivity before changing position to solve an unavailable action. Visible block counts describe only the local view, never the whole world or your inventory. After a collision or uncertain location, look again. Never assume unseen facts. Call tools to proceed.`;
-    const providers = this.inference.providers.filter(provider => provider.enabled !== false && provider.model);
     agent.job = agent.session.run({
       system, schemas: tools.schemas, tools: tools.executors, signal: controller.signal,
       prepareTools: () => { const current = agentTools(agent.port, agent); return { schemas: current.schemas, tools: current.executors }; },
       resumeTool: (call, signal) => resumeAgentTool(agent.port, agent, call.id, signal),
       complete: (request, signal) => this.complete(agent, request, signal),
-      contextWindow: providers.length ? Math.min(...providers.map(provider => provider.contextWindow ?? DEFAULT_CONTEXT_WINDOW)) : DEFAULT_CONTEXT_WINDOW,
-      maxOutputTokens: providers.length ? Math.min(...providers.map(provider => provider.maxOutputTokens ?? 4096)) : 4096,
+      contextWindow: this.inference.contextWindow,
+      maxTokens: this.inference.maxTokens,
       persist: () => this.persist(),
-      onState: (state, detail) => { agent.state = state; agent.detail = detail; this.hooks.changed(); },
+      onState: (state, detail) => {
+        agent.state = state; agent.detail = detail;
+        if (state === 'compacting') {
+          try { agent.port.recordContextCompaction(); }
+          catch (error) { this.fail(error); throw error; }
+        }
+        this.hooks.changed();
+      },
     }).catch(error => {
       if (!controller.signal.aborted && !this.closed) this.fail(error);
     }).finally(() => {

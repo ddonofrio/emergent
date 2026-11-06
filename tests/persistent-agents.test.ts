@@ -15,7 +15,8 @@ const until = async (predicate: () => boolean) => {
   for (let i = 0; i < 400 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 2));
   assert.ok(predicate(), 'Expected asynchronous agent state.');
 };
-function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state']>; runtime: RuntimeSnapshot }) {
+function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state']>; runtime: RuntimeSnapshot },
+  capacity: { contextWindow?: number } = {}) {
   const blocks: Block[] = [];
   for (let x = -8; x <= 8; x++) for (let z = -8; z <= 16; z++) blocks.push([x, 0, z, 'stone']);
   const engine = new Engine({ ...island, generate: () => ({ blocks, entities: [actor('walker', .5), actor('speaker', 4.5, twoAgents ? 'agent' : 'static')] }) }, restored?.state);
@@ -24,7 +25,7 @@ function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state
   let clock: TurnClock;
   const bridge = new AgentBridge(engine, restored?.runtime.simulation, () => store.record(engine.frame(), undefined, runtime.persistence()));
   const errors: unknown[] = [];
-  runtime = new AgentRuntime(bridge, store, [{ id: 'mock', type: 'openai-compatible', name: 'Mock', baseUrl: 'http://unused.invalid', model: 'mock', apiKey: '' }], restored?.runtime, { changed() { clock?.barrierChanged(); }, fatal(error) { errors.push(error); } });
+  runtime = new AgentRuntime(bridge, store, [{ id: 'mock', type: 'openai-compatible', name: 'Mock', baseUrl: 'http://unused.invalid', model: 'mock', apiKey: '', ...capacity }], restored?.runtime, { changed() { clock?.barrierChanged(); }, fatal(error) { errors.push(error); } });
   const requests: { request: CompletionRequest; respond(name: string, args?: Record<string, unknown>): void; fail(): void }[] = [];
   runtime.inference.complete = (request, signal) => new Promise<Completion>((resolve, reject) => {
     const abort = () => reject(signal.reason); signal.addEventListener('abort', abort, { once: true });
@@ -39,6 +40,21 @@ function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state
     async close() { clock.close(); await new Promise(resolve => setTimeout(resolve, 1)); store.close(); } };
 }
 const resultOf = (request: CompletionRequest) => JSON.parse(request.messages.filter(message => message.role === 'tool').at(-1)!.content!);
+
+test('context compaction identifies its entity in the journal and live activity', async () => {
+  const f = fixture(false, undefined, { contextWindow: 8192 });
+  try {
+    const session = f.runtime.agents.get('walker')!.session;
+    for (let index = 0; index < 8; index++) session.appendUser(`Historical observation ${index}: ${'long local detail '.repeat(250)}`);
+    f.clock.setEnabled(true);
+    await until(() => f.requests[0]?.request.purpose === 'compaction');
+    assert.equal(f.runtime.status().walker.state, 'shrinking');
+    const event = f.engine.recentEvents.findLast(candidate => candidate.type === 'context-compaction');
+    assert.equal(event?.actor, 'walker');
+    assert.equal(event?.message, 'walker started shrinking its conversation context.');
+    assert.ok(f.store.eventsAt(f.engine.tick).some(candidate => candidate.id === event?.id));
+  } finally { await f.close(); }
+});
 
 test('silent walking holds one tool without inference across world seconds and resumes the same conversation', async () => {
   const f = fixture();

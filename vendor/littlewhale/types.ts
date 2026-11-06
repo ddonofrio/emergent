@@ -33,7 +33,7 @@ export interface CompletionRequest {
   system: string;
   messages: Message[];
   tools: ToolSchema[];
-  maxOutputTokens: number;
+  maxTokens: number;
   purpose: 'agent' | 'compaction';
   sessionId?: string;
 }
@@ -66,7 +66,7 @@ export interface SessionMetrics {
   compactionCalls: number;
 }
 
-export type SessionState = 'thinking' | 'tool' | 'retrying' | 'stopped';
+export type SessionState = 'thinking' | 'compacting' | 'tool' | 'retrying' | 'stopped';
 export interface PendingCall {
   call: ToolCall;
   /** A result is persisted as soon as it settles, before model-order publication. */
@@ -104,6 +104,6 @@ export interface SessionRunOptions {
   onState?: (state: SessionState, detail?: string) => void;
   onCompletion?: (completion: Completion, purpose: CompletionRequest['purpose']) => void;
   contextWindow?: number;
-  maxOutputTokens?: number;
+  maxTokens?: number;
   retryDelayMs?: number;
 }

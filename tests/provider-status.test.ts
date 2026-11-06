@@ -9,7 +9,7 @@ import { Engine } from '../src/core/engine';
 import { island } from '../src/universes/first-shore';
 
 const provider = (id = 'model'): ProviderConfig => ({ id, name: 'Readable model name', type: 'openai-compatible', baseUrl: `http://${id}.invalid/v1`, model: 'technical-model-id', apiKey: 'provider-secret' });
-const request: CompletionRequest = { system: 'Entity.', messages: [{ role: 'user', content: 'Begin.' }], tools: [], maxOutputTokens: 100, purpose: 'agent' };
+const request: CompletionRequest = { system: 'Entity.', messages: [{ role: 'user', content: 'Begin.' }], tools: [], maxTokens: 100, purpose: 'agent' };
 const until = async (condition: () => boolean) => {
   for (let index = 0; index < 500 && !condition(); index++) await new Promise(resolve => setTimeout(resolve, 2));
   assert.ok(condition(), 'Expected provider status transition.');

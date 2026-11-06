@@ -16,6 +16,12 @@ test('thinking uses the individual live session even when the physical entity an
   }
 });
 
+test('context compaction uses the shrinking activity indicator', () => {
+  assert.deepEqual(entityDisplayStatus(entity, runtime('shrinking'), true), {
+    text: 'shrinking', thinking: true, title: 'Shrinking the conversation context.',
+  });
+});
+
 test('a disconnected model keeps the waiting indicator while the physical entity is idle', () => {
   const waiting = runtime('waiting', 'idle'); waiting.agents.moss.message = 'Connection refused; retrying.';
   assert.deepEqual(entityDisplayStatus(entity, waiting, true), {

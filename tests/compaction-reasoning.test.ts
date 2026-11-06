@@ -5,9 +5,9 @@ import { compactablePrefix, compactedMessages } from '../vendor/littlewhale/comp
 import { estimateTokens } from '../vendor/littlewhale/tool-pairing';
 import { InferenceClient } from '../server/inference/providers';
 
-const reasoning = 'I considered both routes and chose the reachable landing. '.repeat(1200);
+const reasoning = 'I considered both routes and chose the reachable landing. '.repeat(2400);
 const summary = 'The agent chose to reach the nearby landing. Inspection confirmed it was reachable; a look was rejected while busy. Keep the chosen destination and wait for the current action.';
-const options = { system: 'One embodied agent.', schemas: [], contextWindow: 60000, maxOutputTokens: 40960 };
+const options = { system: 'One embodied agent.', schemas: [], contextWindow: 60000, maxTokens: 4096 };
 const completion = (content: string): Completion => ({ content, calls: [], provider: 'fixture', model: 'fixture', latencyMs: 1 });
 
 function fixture(): SessionSnapshot {

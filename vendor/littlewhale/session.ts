@@ -124,6 +124,7 @@ export class PersistentSession {
             this.event('compaction/start', { prefixLength, summarizedMessages: history.length });
             this.data.metrics.llmCalls++;
             this.data.metrics.compactionCalls++;
+            options.onState?.('compacting');
             await this.save(options);
             let completion: Completion;
             try {
@@ -138,7 +139,7 @@ export class PersistentSession {
                   this.countFailedAttempts(error);
                   throw error;
                 }
-              }, currentOptions, history, this.id, options.maxOutputTokens ?? 4096);
+              }, currentOptions, history, this.id, options.maxTokens ?? 4096);
               signal.throwIfAborted();
               const compacted = compactedMessages(history, prefixLength, completion.content!);
               if (estimateTokens(compacted) >= estimateTokens(history)) throw new Error('Compaction checkpoint did not reduce context.');
@@ -152,11 +153,12 @@ export class PersistentSession {
             }
             options.onCompletion?.(completion, 'compaction');
             await this.save(options);
+            options.onState?.('thinking');
           }
 
           const request: CompletionRequest = {
             system: options.system, messages: structuredClone(this.data.messages), tools: toolkit.schemas,
-            maxOutputTokens: options.maxOutputTokens ?? 4096, purpose: 'agent', sessionId: this.id,
+            maxTokens: options.maxTokens ?? 4096, purpose: 'agent', sessionId: this.id,
           };
           this.data.metrics.llmCalls++;
           await this.save(options);

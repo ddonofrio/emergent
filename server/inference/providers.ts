@@ -20,7 +20,6 @@ export interface ProviderConfig {
   region?: string;
   tokenless?: boolean;
   contextWindow?: number;
-  maxOutputTokens?: number;
   reasoning?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   timeoutMs?: number;
   headers?: Record<string, string>;
@@ -28,14 +27,14 @@ export interface ProviderConfig {
   vastContainerLabel?: string;
 }
 
-export interface ProviderModel { id: string; label: string; contextWindow?: number; maxOutputTokens?: number; }
+export interface ProviderModel { id: string; label: string; contextWindow?: number; }
 export interface ProviderRequestStatus {
   state: 'unknown' | 'ok' | 'bad';
   inFlight: number;
   detail?: string;
 }
 export const DEFAULT_CONTEXT_WINDOW = 49152;
-export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+export const DEFAULT_MAX_TOKENS = 4096;
 const PROVIDER_TYPES = new Set(['openai-compatible', 'openai', 'openrouter', 'vast-ai', 'amazon-bedrock']);
 const REASONING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
@@ -54,7 +53,7 @@ export function validateProviders(value: unknown): ProviderConfig[] {
     if (!PROVIDER_TYPES.has(raw.type as string)) throw new Error('Unsupported provider type.');
     if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') throw new Error('Provider enabled must be boolean.');
     if (raw.tokenless !== undefined && typeof raw.tokenless !== 'boolean') throw new Error('Provider tokenless must be boolean.');
-    for (const key of ['contextWindow', 'maxOutputTokens', 'timeoutMs']) {
+    for (const key of ['contextWindow', 'timeoutMs']) {
       if (raw[key] !== undefined && (!Number.isSafeInteger(raw[key]) || (raw[key] as number) <= 0)) throw new Error(`Provider ${key} must be a positive integer.`);
     }
     for (const key of ['region', 'vastToken', 'vastContainerLabel']) {
@@ -77,7 +76,6 @@ export function validateProviders(value: unknown): ProviderConfig[] {
       ...(raw.enabled === undefined ? {} : { enabled: raw.enabled as boolean }),
       ...(raw.tokenless === undefined ? {} : { tokenless: raw.tokenless as boolean }),
       ...(raw.contextWindow === undefined ? {} : { contextWindow: raw.contextWindow as number }),
-      ...(raw.maxOutputTokens === undefined ? {} : { maxOutputTokens: raw.maxOutputTokens as number }),
       ...(raw.timeoutMs === undefined ? {} : { timeoutMs: raw.timeoutMs as number }),
       ...(raw.reasoning === undefined ? {} : { reasoning: raw.reasoning as ProviderConfig['reasoning'] }),
       ...(raw.region === undefined ? {} : { region: (raw.region as string).trim() }),
@@ -87,7 +85,6 @@ export function validateProviders(value: unknown): ProviderConfig[] {
     };
     const capacity = result.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
     if (capacity < 8192) throw new Error('Context window must be at least 8192 tokens, including the provider core\'s 4096-token safety reserve.');
-    if ((result.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS) >= capacity) throw new Error('Output token limit must be smaller than the context window.');
     return result;
   });
 }
@@ -125,7 +122,7 @@ function modelFor(config: ProviderConfig, id = config.model): Model<Api> {
     reasoning: config.reasoning === undefined ? base?.reasoning ?? false : config.reasoning !== 'off',
     input: ['text'], cost: base?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: config.contextWindow ?? base?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: config.maxOutputTokens ?? base?.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    maxTokens: base?.maxTokens ?? DEFAULT_MAX_TOKENS,
     ...(base?.compat === undefined ? {} : { compat: base.compat }),
     ...(base?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: base.thinkingLevelMap }),
   };
@@ -205,8 +202,14 @@ export class InferenceClient {
   }
   get enabled(): boolean { return this.providers.some(provider => provider.enabled !== false && provider.model); }
   get label(): string { const provider = this.providers.find(provider => provider.enabled !== false && provider.model); return provider ? `${provider.name}: ${provider.model}` : 'No model configured'; }
-  get contextWindow(): number { return this.providers.find(provider => provider.enabled !== false)?.contextWindow ?? DEFAULT_CONTEXT_WINDOW; }
-  get maxOutputTokens(): number { return this.providers.find(provider => provider.enabled !== false)?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS; }
+  get contextWindow(): number {
+    const active = this.providers.filter(provider => provider.enabled !== false && provider.model);
+    return active.length ? Math.min(...active.map(provider => modelFor(provider).contextWindow)) : DEFAULT_CONTEXT_WINDOW;
+  }
+  get maxTokens(): number {
+    const active = this.providers.filter(provider => provider.enabled !== false && provider.model);
+    return active.length ? Math.min(...active.map(provider => modelFor(provider).maxTokens)) : DEFAULT_MAX_TOKENS;
+  }
 
   /** One attempt per configured route. The session owns indefinite cancellable retries. */
   complete(request: CompletionRequest, signal: AbortSignal): Promise<Completion> {
@@ -233,7 +236,7 @@ export class InferenceClient {
           tools: request.tools.map((tool: ToolSchema) => ({ ...tool, parameters: tool.parameters as Tool['parameters'] })),
         };
         const response = await collection.completeSimple(model, context, {
-          signal, maxTokens: Math.min(request.maxOutputTokens, config.maxOutputTokens ?? model.maxTokens),
+          signal, maxTokens: Math.min(request.maxTokens, model.maxTokens),
           maxRetries: 0, timeoutMs: config.timeoutMs ?? 120000, sessionId: request.sessionId,
           ...(config.reasoning && config.reasoning !== 'off' ? { reasoning: config.reasoning } : {}),
           ...(config.region ? { env: { AWS_REGION: config.region } } : {}),
@@ -307,7 +310,7 @@ export async function discoverModels(config: ProviderConfig, signal?: AbortSigna
   }
   // Installed catalog metadata is authoritative for a catalog route at its native endpoint.
   if (config.type === 'openai' && (!config.baseUrl || config.baseUrl === 'https://api.openai.com/v1')) {
-    return openaiProvider().getModels().map(model => ({ id: model.id, label: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxTokens }));
+    return openaiProvider().getModels().map(model => ({ id: model.id, label: model.name, contextWindow: model.contextWindow }));
   }
   const baseUrl = config.baseUrl || (config.type === 'openrouter' ? 'https://openrouter.ai/api/v1' : 'https://api.openai.com/v1');
   const headers: Record<string, string> = { accept: 'application/json', ...providerHeaders(config) };
@@ -322,10 +325,8 @@ export async function discoverModels(config: ProviderConfig, signal?: AbortSigna
     const model = raw as Record<string, unknown>;
     if (typeof model.id !== 'string' || !model.id) return [];
     const capacity = model.context_window ?? model.context_length;
-    const output = model.max_output_tokens ?? model.max_tokens;
     return [{ id: model.id, label: String(model.name ?? model.display_name ?? model.id),
       ...(Number.isSafeInteger(capacity) && (capacity as number) > 0 ? { contextWindow: capacity as number } : {}),
-      ...(Number.isSafeInteger(output) && (output as number) > 0 ? { maxOutputTokens: output as number } : {}),
     }];
   });
 }
