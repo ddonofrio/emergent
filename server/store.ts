@@ -107,9 +107,14 @@ export class Store {
     }
     return Object.keys(totals).length?totals:undefined;
   }
-  secondsPerTurnAt(tick: number) {
-    const row=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = 'world' AND type = 'turn-speed' ORDER BY id DESC LIMIT 1").get(tick) as {data:string} | undefined;
-    return row?((JSON.parse(row.data) as WorldEvent).data as {secondsPerTurn:number}).secondsPerTurn:undefined;
+  secondsPerTurnAt(tick:number) {
+    const rows=this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = 'world' AND type = 'turn-speed' ORDER BY id").all(tick) as {data:string}[];
+    let samples=0,totalSeconds=0;
+    for(const row of rows){
+      const seconds=((JSON.parse(row.data) as WorldEvent).data as {secondsPerTurn?:number}).secondsPerTurn;
+      if(Number.isFinite(seconds)&&seconds!>=0){samples++;totalSeconds+=seconds!;}
+    }
+    return samples?totalSeconds/samples:undefined;
   }
   memoryAt(tick: number, actor: string) {
     const row = this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = ? AND type = 'memory' ORDER BY id DESC LIMIT 1").get(tick, actor) as {data: string} | undefined;

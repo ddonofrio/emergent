@@ -195,6 +195,12 @@ function renderProviderStatus(config:InferenceConfig|undefined=meta?.inferenceCo
   }
 }
 function selectEntity(id: string) { selected = id; detailsSignature='';view.select(id);renderInspector();void loadMemory(); }
+function acceptTurnSpeed(frame:Frame){
+  const event=frame.events.findLast(candidate=>candidate.type==='turn-speed');if(!event)return;
+  const duration=(event.data as {secondsPerTurn?:number}).secondsPerTurn,turns=Math.floor(event.tick/TURN_TICKS);
+  if(!Number.isFinite(duration)||duration!<0||turns<1)return;
+  shownSecondsPerTurn=shownSecondsPerTurn===undefined||turns===1?duration!:(shownSecondsPerTurn*(turns-1)+duration!)/turns;
+}
 async function loadMemory(){
   const request=++memoryRequest,actor=selected,tick=cursor;memoryView=undefined;renderDetails();
   try{const response=await fetch(`${worldApi}/memory-record?tick=${tick}&actor=${encodeURIComponent(actor)}`);if(!response.ok)throw new Error();const record=await response.json() as {notes:string[];learned?:string[]};if(request===memoryRequest){memoryView={actor,tick,...record};renderDetails();}}
@@ -230,7 +236,7 @@ stream.addEventListener('frame', event => {
   liveEvents = [...liveEvents,...frame.events].slice(-200);
   if (isLive) {
     const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;
-    const turnEvent=frame.events.findLast(event=>event.type==='turn-speed');if(turnEvent)shownSecondsPerTurn=(turnEvent.data as {secondsPerTurn:number}).secondsPerTurn;
+    acceptTurnSpeed(frame);
     shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);
     if (frame.events.length) renderJournal();
   }
@@ -276,7 +282,7 @@ function playback(now: number) {
       replayClock = advancePlayback(replayClock, dt, speed, Math.min(destination,replayFrames.at(-1)!.tick));
       let changed = false,memoryChanged=false;
       while (replayFrames.length && replayFrames[0].tick <= replayClock) {
-        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] };const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;const turnEvent=frame.events.findLast(event=>event.type==='turn-speed');if(turnEvent)shownSecondsPerTurn=(turnEvent.data as {secondsPerTurn:number}).secondsPerTurn;view.update(frame,false,speed); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
+        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] };const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;acceptTurnSpeed(frame);view.update(frame,false,speed); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
       }
       if (changed) { renderTimeline(); renderInspector(); renderJournal(); }
       if(memoryChanged)void loadMemory();
@@ -443,11 +449,13 @@ function renderStats(){
   const turns=Math.floor(cursor/TURN_TICKS),realSeconds=shownSecondsPerTurn===undefined?undefined:turns*shownSecondsPerTurn;
   const gameToRealRatio=realSeconds===undefined||realSeconds===0||turns===0?undefined:turns/realSeconds;
   const totals=Object.values(shownMetrics??{}).reduce((sum,metrics)=>({
-    output:sum.output+(metrics.outputTokens??0),input:sum.input+(metrics.inputTokens??0),cache:sum.cache+(metrics.cachedInputTokens??0),
-  }),{output:0,input:0,cache:0});
+    calls:sum.calls+(metrics.llmCalls??0),output:sum.output+(metrics.outputTokens??0),input:sum.input+(metrics.inputTokens??0),cache:sum.cache+(metrics.cachedInputTokens??0),
+  }),{calls:0,output:0,input:0,cache:0});
+  const callsPerTurn=turns?totals.calls/turns:undefined;
   const rows:[string,string][]=[
     ['Turns/Speed',`${Math.floor(cursor/TURN_TICKS)} turns (${shownSecondsPerTurn===undefined?'—':shownSecondsPerTurn.toFixed(2)} sec/turn)`],
     ['Game/Real Time',gameToRealRatio===undefined?'—':`${(gameToRealRatio*100).toFixed(1)} %`],
+    ['Calls/Calls-Turn Ratio',shownMetrics?`${totals.calls.toLocaleString('en-US')} (${callsPerTurn===undefined?'—':callsPerTurn.toLocaleString('en-US',{maximumFractionDigits:2})+':1'})`:'—'],
     ['Tokens out',shownMetrics?`${totals.output.toLocaleString('en-US')} tok`:'— tok'],
     ['Tokens in',shownMetrics?`${totals.input.toLocaleString('en-US')} tok`:'— tok'],
     ['Cached tokens',shownMetrics?`${totals.cache.toLocaleString('en-US')} tok`:'— tok'],

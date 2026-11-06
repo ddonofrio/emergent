@@ -94,6 +94,7 @@ export class UniverseRuntime {
   }
   private tokenMetrics() {
     return Object.fromEntries(Object.entries(this.agents.metrics()).map(([id, metrics]) => [id, {
+      llmCalls: metrics.llmCalls,
       inputTokens: metrics.inputTokens,
       outputTokens: metrics.outputTokens,
       cachedInputTokens: metrics.cachedInputTokens,
@@ -104,7 +105,7 @@ export class UniverseRuntime {
     const queued=frame.events.findLast(event=>event.type==='llm-metrics');
     const previous=queued?JSON.stringify(queued.data):this.recordedMetricsSignature;
     if(signature===previous)return;
-    frame.events.push({id:this.engine.nextEvent++,tick:frame.tick,time:frame.time,day:this.engine.day,actor:'world',type:'llm-metrics',message:'Recorded cumulative LLM token usage.',data:metrics});
+    frame.events.push({id:this.engine.nextEvent++,tick:frame.tick,time:frame.time,day:this.engine.day,actor:'world',type:'llm-metrics',message:'Recorded cumulative LLM usage.',data:metrics});
   }
   private appendTurnSpeed(frame:Frame) {
     if(frame.tick===0||frame.tick%TURN_TICKS!==0||frame.tick<=this.lastRecordedTurnTick)return;
