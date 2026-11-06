@@ -30,7 +30,7 @@ test('background compaction never occupies the serial decision queue and retains
     return new Promise<Response>(resolve => pending.push(resolve));
   });
   const client = new InferenceClient([provider()], undefined, new RequestQueue(false));
-  const background = client.complete({ ...request, purpose: 'compaction', maxTokens: 8192 }, new AbortController().signal);
+  const background = client.complete({ ...request, purpose: 'memory', maxTokens: 8192 }, new AbortController().signal);
   await until(() => pending.length === 1);
   const foreground = client.complete(request, new AbortController().signal);
   await until(() => pending.length === 2);

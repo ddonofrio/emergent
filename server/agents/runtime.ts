@@ -44,7 +44,7 @@ export class AgentRuntime implements WorldConnection {
         save: () => this.persist(),
         publish: (record, source) => this.publishMemory(agent, record, source),
         event: event => {
-          try { port.recordContextCompaction({ ...event }); this.persist(); this.hooks.inferenceChanged?.(); }
+          try { port.recordMemoryCompaction({ ...event }); this.persist(); this.hooks.inferenceChanged?.(); }
           catch (error) { this.fail(error); throw error; }
         },
         fatal: error => this.fail(error),
@@ -98,7 +98,7 @@ export class AgentRuntime implements WorldConnection {
   commit() { this.bridge.commit(); }
   afterStep() { this.bridge.afterStep(); }
   status(): Record<string, DecisionStatus> {
-    return Object.fromEntries([...this.agents].map(([id, agent]) => [id, { state: !agent.port.active() ? 'disabled' : agent.memory.compacting ? 'shrinking' : agent.state === 'tool' && agent.port.waiting() ? 'ready' : agent.state === 'retrying' || !this.inference.enabled ? 'waiting' : 'thinking', ...(agent.detail ? { message: agent.detail } : {}) }]));
+    return Object.fromEntries([...this.agents].map(([id, agent]) => [id, { state: !agent.port.active() ? 'disabled' : agent.state === 'tool' && agent.port.waiting() ? 'ready' : agent.state === 'retrying' || !this.inference.enabled ? 'waiting' : 'thinking', ...(agent.detail ? { message: agent.detail } : {}) }]));
   }
   private syncMemory(agent: Agent) {
     const intent = agent.sourcePort.observe().self.intent;

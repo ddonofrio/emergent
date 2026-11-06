@@ -14,9 +14,9 @@ export function entityDisplayStatus(
   if (!runtime.enabled) return { text: 'paused', thinking: false, title: 'World paused.' };
 
   const decision = runtime.agents[entity.id];
-  if (decision?.state === 'thinking' || decision?.state === 'shrinking' || decision?.state === 'waiting') {
+  if (decision?.state === 'thinking' || decision?.state === 'waiting') {
     return { text: decision.state, thinking: true, title: decision.message ??
-      (decision.state === 'waiting' ? 'Waiting for the model to become available.' : decision.state === 'shrinking' ? 'Shrinking the memory record in the background.' : 'Waiting for the model response.') };
+      (decision.state === 'waiting' ? 'Waiting for the model to become available.' : 'Waiting for the model response.') };
   }
   if (decision?.state === 'disabled') return { text: 'disabled', thinking: false };
   if (decision?.state === 'ready' && entity.status === 'idle') {

@@ -95,7 +95,7 @@ export class AgentMemory {
     this.hooks.save();
     this.hooks.event({ phase: 'started', revision, beforeBytes: memoryBytes(original) });
     const request: CompletionRequest = {
-      system: instructions, tools: [], maxTokens: 8192, purpose: 'compaction', sessionId: this.hooks.sessionId,
+      system: instructions, tools: [], maxTokens: 8192, purpose: 'memory', sessionId: this.hooks.sessionId,
       messages: [{ role: 'user', content: JSON.stringify({ context: this.hooks.context(), record: original }) }],
     };
     void this.run(request, original, revision, controller).catch(error => { if (!this.closed) this.hooks.fatal(error); });

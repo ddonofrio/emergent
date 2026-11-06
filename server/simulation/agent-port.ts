@@ -65,7 +65,7 @@ export interface AgentPort {
   submit(callId: string, action: Action, signal: AbortSignal): Promise<ToolOutcome>;
   cancel(callId: string, actionId: string, signal: AbortSignal): Promise<ToolOutcome>;
   wait(callId: string, options: WaitOptions, signal: AbortSignal): Promise<ToolOutcome>;
-  recordContextCompaction(details?: Record<string, unknown>): void;
+  recordMemoryCompaction(details?: Record<string, unknown>): void;
   recordMemory(record: AgentMemoryRecord, source: 'write' | 'compaction'): void;
   setIntent(intent: AgentIntent): void;
   remember(notes: string[]): void;

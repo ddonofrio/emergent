@@ -215,7 +215,7 @@ export class InferenceClient {
   /** One attempt per configured route. The session owns indefinite cancellable retries. */
   complete(request: CompletionRequest, signal: AbortSignal): Promise<Completion> {
     // Auxiliary memory work must not occupy the serial foreground decision queue.
-    if (request.purpose === 'compaction') return this.request(request, signal);
+    if (request.purpose === 'memory') return this.request(request, signal);
     return this.requestQueue.run(() => this.request(request, signal), signal);
   }
 

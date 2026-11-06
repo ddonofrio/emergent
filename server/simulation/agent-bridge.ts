@@ -86,10 +86,10 @@ export class AgentBridge {
         submit: (callId, command, signal) => this.submit(id, callId, command, signal),
         cancel: (callId, actionId, signal) => this.submit(id, callId, { action: 'cancel', actionId }, signal),
         wait: (callId, options, signal) => this.wait(id, callId, options, signal),
-        recordContextCompaction: details => {
-          this.engine.event(id, 'context-compaction', details?.phase === 'finished'
-            ? `${entity.name} memory compaction ${details.outcome}.`
-            : `${entity.name} started shrinking its memory record.`, details);
+        recordMemoryCompaction: details => {
+          this.engine.event(id, 'memory-compaction', details?.phase === 'finished'
+            ? `${entity.name} background memory compaction ${details.outcome}.`
+            : `${entity.name} started background memory compaction.`, details);
           this.checkpoint();
         },
         recordMemory: (record, source) => {

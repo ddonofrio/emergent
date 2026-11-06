@@ -34,7 +34,7 @@ export interface CompletionRequest {
   messages: Message[];
   tools: ToolSchema[];
   maxTokens: number;
-  purpose: 'agent' | 'compaction';
+  purpose: 'agent' | 'memory';
   sessionId?: string;
 }
 

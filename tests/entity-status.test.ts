@@ -16,9 +16,9 @@ test('thinking uses the individual live session even when the physical entity an
   }
 });
 
-test('context compaction uses the shrinking activity indicator', () => {
-  assert.deepEqual(entityDisplayStatus(entity, runtime('shrinking'), true), {
-    text: 'shrinking', thinking: true, title: 'Shrinking the memory record in the background.',
+test('background memory compaction does not replace the agent activity indicator', () => {
+  assert.deepEqual(entityDisplayStatus(entity, runtime('ready'), true), {
+    text: 'ready', thinking: false, title: 'Action ready; waiting for the shared commit.',
   });
 });
 
