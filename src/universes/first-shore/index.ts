@@ -1,6 +1,7 @@
 import type { Action, Block, Entity, UniverseModule, Vec3, WanderContext } from '../../core/types';
 import { WORLD_DAY_SECONDS } from '../../core/time';
 import { standardMaterials } from '../../core/materials';
+import { isObservedMaterialKnowledge } from '../../core/knowledge';
 import { firstShoreCrafting } from './crafting';
 
 const waterLevel = 0;
@@ -104,6 +105,7 @@ export const island: UniverseModule = {
   },
   relevantKnowledge(observation,knowledge){
     const inventory=observation.self.inventory,held=inventory?.selected===null||!inventory?undefined:inventory.stacks[inventory.selected];
+    if(isObservedMaterialKnowledge(knowledge))return true;
     if(knowledge.startsWith('item-uses:'))return !!inventory?.stacks.some(stack=>stack.kind===knowledge.slice('item-uses:'.length));
     const recipe=this.crafting?.recipes.find(recipe=>recipe.knowledge.id===knowledge);
     if(recipe)return recipe.ingredients.some(ingredient=>inventory?.stacks.some(stack=>stack.kind===ingredient.kind));

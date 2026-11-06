@@ -4,7 +4,7 @@
  */
 import { setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
-import { compactablePrefix, frameSummary, summarizeWithLlm } from './compaction';
+import { compactablePrefix, compactedMessages, summarizeWithLlm } from './compaction';
 import { estimateTokens } from './tool-pairing';
 import type { Completion, CompletionRequest, Message, SessionEvent, SessionMetrics, SessionRunOptions, SessionSnapshot } from './types';
 
@@ -120,8 +120,8 @@ export class PersistentSession {
           const currentOptions = { ...options, tools: toolkit.tools, schemas: toolkit.schemas };
           const prefixLength = compactablePrefix(currentOptions, this.data.messages);
           if (prefixLength > 0) {
-            const prefix = this.data.messages.slice(0, prefixLength);
-            this.event('compaction/start', { prefixLength });
+            const history = structuredClone(this.data.messages);
+            this.event('compaction/start', { prefixLength, summarizedMessages: history.length });
             this.data.metrics.llmCalls++;
             this.data.metrics.compactionCalls++;
             await this.save(options);
@@ -138,12 +138,13 @@ export class PersistentSession {
                   this.countFailedAttempts(error);
                   throw error;
                 }
-              }, currentOptions, prefix, this.id, Math.min(options.maxOutputTokens ?? 4096, 2048));
-              const checkpoint = frameSummary(completion.content!);
-              if (estimateTokens(checkpoint) >= estimateTokens(prefix)) throw new Error('Compaction checkpoint did not reduce context.');
-              this.data.messages.splice(0, prefixLength, checkpoint);
+              }, currentOptions, history, this.id, options.maxOutputTokens ?? 4096);
+              signal.throwIfAborted();
+              const compacted = compactedMessages(history, prefixLength, completion.content!);
+              if (estimateTokens(compacted) >= estimateTokens(history)) throw new Error('Compaction checkpoint did not reduce context.');
+              this.data.messages = compacted;
               this.data.compactions++;
-              this.event('compaction/end', { prefixLength, success: true, checkpoint });
+              this.event('compaction/end', { prefixLength, success: true, checkpoint: compacted[0], reasoningCleared: true });
             } catch (error) {
               this.event('compaction/end', { prefixLength, success: false });
               await this.save(options);

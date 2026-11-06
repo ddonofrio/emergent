@@ -10,10 +10,11 @@ const COMPACTION_INSTRUCTION = [
   'Output concise English bullets under these headings, in order: Self-authored goals and success conditions; Learned facts and hypotheses; Decisions and action results; Work at the end of this excerpt; Private notes; Agent-chosen next step.',
   'Use (none) for empty sections. Preserve exact entity IDs, action IDs, coordinates, quantities, errors, utterances when relevant, and the agent\'s own goals.',
   'Include only information already present. Preserve uncertainty and distinguish observations from guesses. Never invent discoveries, actions, achievements, or goals.',
+  'Cover the entire supplied conversation, including recent exchanges that will remain as text and tool calls without their reasoning. Preserve important decisions and conclusions from reasoning, not the reasoning transcript.',
   'Tool results override narration and private notes. Preserve exact experiment inputs and whether material came from held inventory or a world target. Visible surface counts are local observations, not island totals or inventory.',
   'This excerpt may end before the current situation. Timestamp last sightings with their observed tick; never label an old position as current. Keep only an explicitly agent-chosen next step, or (none). Do not turn an inferred rule into a learned fact.',
   'Merge any previous checkpoint with newer information, dropping stale positions, superseded inventory, repeated waits, routine navigation attempts, and raw reasoning. Retain at most ten private notes.',
-  'Use at most 700 words. Prefer the newest authoritative tool result whenever history conflicts.',
+  'Prefer the newest authoritative tool result whenever history conflicts.',
   'Output only the checkpoint text. Do not call tools or take another action.',
 ].join('\n');
 
@@ -23,7 +24,12 @@ export function frameSummary(summary: string): Message {
   return { role: 'user', content: `${CHECKPOINT_PREAMBLE}\n\n<compacted-summary>\n${summary}\n</compacted-summary>` };
 }
 
-/** Replay the original prefix, then append the directive to preserve cache reuse. */
+/** Reset native replay envelopes so retained messages cannot reinsert old reasoning or its signatures. */
+export function compactedMessages(messages: readonly Message[], prefixLength: number, summary: string): Message[] {
+  return [frameSummary(summary), ...messages.slice(prefixLength).map(({ providerState: _providerState, ...message }) => message)];
+}
+
+/** Summarize all current messages before clearing reasoning from the retained tail. */
 export async function summarizeWithLlm(
   complete: Complete,
   options: Pick<SessionRunOptions, 'system' | 'schemas' | 'signal'>,

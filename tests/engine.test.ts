@@ -121,6 +121,8 @@ test('finite resources and physical reach remain authoritative', () => {
   for (let hit = 0; hit < 3; hit++) assert.equal(engine.act('a', { action: 'hit', target: [0, 1, 2] }).ok, true);
   assert.equal(engine.voxels.get([0, 1, 2]), undefined);
   assert.deepEqual(engine.entity('a').inventory?.stacks, [{ kind: 'wood', count: 1 }]);
+  assert.ok(engine.discoveries.get('a')?.has('blocks-break-after-three-hits'));
+  assert.ok(engine.discoveries.get('a')?.has('item-uses:wood'));
   assert.equal(engine.act('a', { action: 'hit', target: [0, 1, 2] }).ok, false);
   assert.deepEqual(engine.entity('a').inventory?.stacks, [{ kind: 'wood', count: 1 }]);
   assert.equal(engine.act('a', { action: 'run', distance: 4 }).ok, false);
@@ -142,6 +144,17 @@ test('deep water prevents a persistent walk from crossing an unsafe shore', () =
   assert.equal((engine.entity('a').lastAction?.feedback?.issue as { kind: string }).kind, 'water');
   assert.ok(engine.entity('a').position[1] >= 0);
   assert.ok(engine.entity('a').position[2] < 1.3);
+  assert.ok(engine.discoveries.get('a')?.has('deep-water-limit'));
+});
+
+test('a thrown raw block settling into terrain becomes durable learned knowledge', () => {
+  const engine = flatWorld(), entity = engine.entity('a');
+  entity.inventory = { stacks: [{ kind: 'stone', count: 1 }], selected: 0, capacity: 640 };
+  assert.equal(engine.act('a', { action: 'throw', force: 4 }).ok, true);
+  for (let tick = 0; tick < 240 && !engine.discoveries.get('a')?.has('thrown-blocks-settle'); tick++) engine.step();
+  assert.ok(engine.discoveries.get('a')?.has('thrown-blocks-settle'));
+  assert.ok(engine.recentEvents.some(event => event.actor === 'a' && event.type === 'discovery'
+    && (event.data as { knowledge?: string }).knowledge === 'thrown-blocks-settle'));
 });
 
 test('a full inventory rejects pickup atomically and permits topping up an existing stack', () => {

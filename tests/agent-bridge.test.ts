@@ -135,11 +135,33 @@ test('body operations are exclusive while speech remains concurrent', async () =
     advance(20);
     assert.notEqual((await first).action?.status, 'rejected');
     assert.notEqual((await speaking).action?.status, 'rejected');
-    await port.wait('completion-notices', {}, signal);
     const next = port.submit('turn-next-second', { action: 'turn', angle: 90 }, signal);
     bridge.commit(); advance(20);
     assert.equal((await next).action?.status, 'completed');
     assert.equal(engine.entity('a').yaw, 180);
+  } finally { bridge.close(); }
+});
+
+test('look advances simulation time, remains concurrent with movement, and rejects a fourth use in one turn', async () => {
+  const { engine, bridge, port, signal, advance } = fixture();
+  try {
+    const walking = port.submit('walk', { action: 'walk', distance: 4 }, signal);
+    const looks = [-90, 0, 90, 180].map((angle, index) =>
+      port.submit(`look-${index + 1}`, { action: 'look', angle }, signal));
+    bridge.commit();
+    const rejected = await looks[3];
+    assert.equal(rejected.action?.status, 'rejected');
+    assert.match(rejected.action?.result?.message ?? '', /three times this turn/);
+    assert.equal(engine.tick, 0);
+    advance(1);
+    const completed = await Promise.all(looks.slice(0, 3));
+    assert.ok(completed.every(result => result.action?.status === 'completed'));
+    assert.ok(completed.every(result => result.action?.channel === 'perception'));
+    assert.equal(engine.tick, 1);
+    assert.ok(engine.entity('a').position[2] > .5);
+    assert.equal(port.lookCount(0), 3);
+    const cancel = port.cancel('cancel-walk', bridge.snapshot().entities.a.actions.find(action => action.callId === 'walk')!.id, signal);
+    bridge.commit(); await cancel; await walking;
   } finally { bridge.close(); }
 });
 
@@ -194,6 +216,33 @@ test('one observed speech batch releases every parallel wait and is delivered on
   } finally { bridge.close(); }
 });
 
+test('waiting on a terminal action uses an explicit timeout instead of returning as completed again', async () => {
+  const { engine, bridge, port, signal, advance } = fixture();
+  try {
+    assert.equal(engine.act('a', { action: 'say', word: 'one two three' }).ok, true);
+    const rejectedCall = port.submit('rejected-say', { action: 'say', word: 'again' }, signal);
+    bridge.commit();
+    const rejected = await rejectedCall;
+    assert.equal(rejected.action?.status, 'rejected');
+
+    let released = false;
+    const waiting = port.wait('wait-after-rejection', { actionId: rejected.action!.id, seconds: .1, eventTypes: [] }, signal)
+      .then(result => { released = true; return result; });
+    await Promise.resolve();
+    assert.equal(released, false);
+    advance(1);
+    assert.equal(released, false);
+    advance(1);
+    const result = await waiting;
+    assert.equal(result.reason, 'timeout');
+    assert.equal(engine.tick, 2);
+
+    const invalid = await port.wait('terminal-without-time', { actionId: rejected.action!.id, eventTypes: [] }, signal);
+    assert.equal(invalid.reason, 'rejected');
+    assert.match(invalid.events[0].message, /already finished/);
+  } finally { bridge.close(); }
+});
+
 test('walk and a parallel event wait both return on speech without stopping movement', async () => {
   const { engine, bridge, port, signal, advance } = fixture([3.5, 1, .5]);
   try {
@@ -220,13 +269,14 @@ test('scans require a stationary body and retain their results through concurren
     bridge.commit();
     assert.equal((await invalidScan).action?.status, 'rejected');
     assert.deepEqual(engine.entity('a').motion?.destination, destination);
-    const walk = await walking;
-    const stop = port.cancel('stop-walk', walk.action!.id, signal); bridge.commit(); await stop;
+    const walkId = bridge.snapshot().entities.a.actions.find(action => action.callId === 'walk')!.id;
+    const stop = port.cancel('stop-walk', walkId, signal); bridge.commit(); await stop;
+    assert.equal((await walking).action?.status, 'cancelled');
     const scanning = port.submit('scan', { action: 'find_material' }, signal);
-    const speaking = port.submit('speak', { action: 'say', word: 'Hello' }, signal);
     bridge.commit(); advance(15);
+    assert.equal(engine.act('b', { action: 'say', word: 'Hello' }, 'manual').ok, true);
+    bridge.flush();
     const scan = await scanning;
-    await speaking;
     assert.equal(scan.action?.channel, 'body');
     assert.equal(scan.action?.status, 'running');
     assert.equal(engine.entity('a').motion?.kind, 'scan');
@@ -237,6 +287,13 @@ test('scans require a stationary body and retain their results through concurren
     assert.equal(result.action?.result?.feedback?.scanType, 'find_material');
     assert.ok((result.action?.result?.feedback?.materials as unknown[]).length > 0);
     assert.ok(engine.discoveries.get('a')?.has('observed-material:stone'));
+    assert.ok(port.knowledge().some(fact => fact.includes('observed stone terrain')));
+
+    const repeated = port.submit('repeat-scan', { action: 'find_material' }, signal);
+    bridge.commit(); advance(20);
+    const unchanged = await repeated;
+    assert.equal(unchanged.action?.result?.feedback?.unchanged, true);
+    assert.match(unchanged.action?.result?.message ?? '', /Nothing has changed/);
   } finally { bridge.close(); }
 });
 

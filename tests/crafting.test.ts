@@ -49,7 +49,7 @@ test('first holding permanently records all experiment inputs once, revealing on
     resumed.close();
     assert.equal(restored.recentEvents.filter(event => event.type === 'discovery').length, 0, 'Restart must not rediscover held uses.');
     f.engine.entity('maker').inventory = null;
-    assert.equal(f.port.knowledge().includes(uses), false, 'Automatic context remains focused on relevant facts.');
+    assert.equal(f.port.knowledge().includes(uses), true, 'Learned context must retain every authoritative discovery.');
     assert.ok(f.port.recall('wood').facts.includes(uses), 'Permanent methods remain retrievable without owning the item.');
     assert.ok(f.port.recall('top_center').facts.includes('Strike wood at top_center to make a bucket.'));
   } finally { f.bridge.close(); }

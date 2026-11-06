@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { agentTools, localView } from '../server/agents/tools';
+import { agentTools, localView, type AgentToolMemory } from '../server/agents/tools';
 import { AgentBridge } from '../server/simulation/agent-bridge';
 import { Engine } from '../src/core/engine';
 import type { Block, Entity } from '../src/core/types';
@@ -72,12 +72,63 @@ test('a side look refreshes applicable target tools from that local view', async
     const forwardHit = forward.schemas.find(tool => tool.name === 'hit');
     const forwardTargets = (forwardHit?.parameters.properties as {target?:{enum:number[][]}} | undefined)?.target?.enum ?? [];
     assert.equal(forwardTargets.some(target => target.join(',') === '2,1,0'), false);
-    const side = await forward.executors.look({ angle: 90 }, { id: 'look-side', name: 'look', arguments: { angle: 90 } }, f.signal) as { viewAngle: number };
+    const looking = forward.executors.look({ angle: 90 }, { id: 'look-side', name: 'look', arguments: { angle: 90 } }, f.signal);
+    f.bridge.commit(); f.advance(1);
+    const side = await looking as { viewAngle: number; timeAdvancedTicks: number };
     assert.equal(side.viewAngle, 90);
+    assert.equal(side.timeAdvancedTicks, 1);
     assert.equal(memory.viewAngle, 90);
     const refreshed = agentTools(f.port, memory);
     const hit = refreshed.schemas.find(tool => tool.name === 'hit')!;
     const targets = (hit.parameters.properties as {target:{enum:number[][]}}).target.enum;
     assert.ok(targets.some(target => target.join(',') === '2,1,0'));
+  } finally { f.bridge.close(); }
+});
+
+test('look consumes time and is limited to three uses per world turn regardless of angle', async () => {
+  const f = fixture();
+  try {
+    const memory: AgentToolMemory = { notes: [] };
+    const call = async (id: string, angle: number) => {
+      const tools = agentTools(f.port, memory);
+      const pending = tools.executors.look({ angle }, { id, name: 'look', arguments: { angle } }, f.signal) as Promise<Record<string, unknown>>;
+      f.bridge.commit(); f.advance(1);
+      return pending;
+    };
+    const first = await call('look-1', -90);
+    assert.equal(first.timeAdvancedTicks, 1);
+    assert.equal(first.looksUsedThisTurn, 1);
+    const second = await call('look-2', 0);
+    assert.equal(second.looksUsedThisTurn, 2);
+    const third = await call('look-3', 90);
+    assert.equal(third.looksUsedThisTurn, 3);
+    assert.equal(third.lookUnavailable, true);
+    assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'look'), false);
+
+    f.advance(17);
+    assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'look'), true);
+  } finally { f.bridge.close(); }
+});
+
+test('learned context retains every authoritative discovery outside its immediate use context', () => {
+  const f = fixture();
+  try {
+    f.engine.discover('maker', 'deep-water-limit', 'Learned the island boundary.');
+    f.engine.discover('maker', 'thrown-blocks-settle', 'Learned how thrown blocks settle.');
+    const learned = f.port.knowledge();
+    assert.ok(learned.some(fact => fact.includes('island ends at deep water')));
+    assert.ok(learned.some(fact => fact.includes('Thrown blocks settle')));
+  } finally { f.bridge.close(); }
+});
+
+test('say is unavailable after the turn speech budget is spent and returns next turn', () => {
+  const f = fixture();
+  try {
+    assert.equal(f.engine.act('maker', { action: 'say', word: 'one two three' }).ok, true);
+    assert.equal(f.port.remainingSpeechWords(), 0);
+    assert.equal(agentTools(f.port, { notes: [] }).schemas.some(tool => tool.name === 'say'), false);
+    f.advance(20);
+    assert.equal(f.port.remainingSpeechWords(), 3);
+    assert.equal(agentTools(f.port, { notes: [] }).schemas.some(tool => tool.name === 'say'), true);
   } finally { f.bridge.close(); }
 });

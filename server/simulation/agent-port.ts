@@ -16,7 +16,7 @@ export interface SimulationAction {
   id: string;
   callId: string;
   kind: string;
-  channel: 'movement' | 'speech' | 'body';
+  channel: 'movement' | 'speech' | 'perception' | 'body';
   status: 'queued' | 'running' | 'completed' | 'blocked' | 'cancelled' | 'rejected';
   createdTick: number;
   startedTick?: number;
@@ -55,6 +55,8 @@ export interface AgentPort {
   active(): boolean;
   observe(angle?: number): Observation;
   knowledge(angle?: number): string[];
+  lookCount(turn?: number): number;
+  remainingSpeechWords(): number;
   recall(query: string): { facts: string[]; total: number };
   capabilities(view: Observation): ItemCapability[];
   bodyActivity(): BodyActivity | undefined;

@@ -52,11 +52,13 @@ export class AgentBridge {
         active: () => this.engine.active(this.engine.entity(id)),
         observe: (angle = 0) => this.engine.observeAt(id, angle),
         knowledge: (angle = 0) => {
-          const observation = this.engine.observeAt(id, angle);
           return [...(this.engine.discoveries.get(id) ?? [])]
-            .filter(knowledge => this.engine.module.relevantKnowledge?.(observation, knowledge) ?? true)
             .map(knowledge => knowledgeDescription(knowledge, this.engine.module.crafting));
         },
+        lookCount: (turn = Math.floor(this.engine.tick / TURN_TICKS)) => this.state(id).actions.filter(action => action.kind === 'look'
+          && action.startedTick !== undefined && action.status !== 'rejected'
+          && Math.floor(action.startedTick / TURN_TICKS) === turn).length,
+        remainingSpeechWords: () => this.engine.remainingSpeechWords(id),
         capabilities: view => itemCapabilities(this.engine.module.crafting, view),
         recall: query => {
           const terms = query.toLowerCase().trim().split(/\s+/);
@@ -102,22 +104,28 @@ export class AgentBridge {
     if (!action) {
       const position = clone(this.engine.entity(id).position);
       action = { id: `${id}:${++state.sequence}`, callId, command: clone(command), kind: command.action,
-        channel: command.action === 'say' ? 'speech' : command.action !== 'cancel' && moving.has(command.action) ? 'movement' : 'body',
+        channel: command.action === 'say' ? 'speech' : command.action === 'look' ? 'perception' : command.action !== 'cancel' && moving.has(command.action) ? 'movement' : 'body',
         status: 'queued', createdTick: this.engine.tick, origin: position, position: clone(position), distanceTravelled: 0, remainingDistance: 0 };
       state.actions.push(action); this.dirty = true;
     }
-    return this.bind(id, { callId, actionId: action.id }, signal);
+    return this.bind(id, { callId, actionId: action.id, ...(command.action === 'look' ? { eventTypes: [] as [] } : {}) }, signal);
   }
   private wait(id: string, callId: string, options: WaitOptions, signal: AbortSignal) {
     if (this.closed) return Promise.reject(new Error('Simulation connection is closed.'));
     signal.throwIfAborted();
     const state = this.state(id);
     if (state.receipts[callId]) return Promise.resolve(clone(state.receipts[callId]));
-    if (options.actionId && !state.actions.some(action => action.id === options.actionId)) {
+    const referencedAction = options.actionId ? state.actions.find(action => action.id === options.actionId) : undefined;
+    if (options.actionId && !referencedAction) {
       return Promise.resolve(this.outcome(id, 'rejected', undefined, [{ id: 0, tick: this.engine.tick, type: 'error', message: 'Unknown action ID for this entity.' }]));
     }
+    if (referencedAction && terminal(referencedAction) && options.seconds === undefined) {
+      return Promise.resolve(this.outcome(id, 'rejected', undefined, [{ id: 0, tick: this.engine.tick, type: 'error',
+        message: 'That action has already finished. Supply seconds without actionId to wait for future time or events.' }]));
+    }
+    const actionId = referencedAction && !terminal(referencedAction) ? referencedAction.id : undefined;
     const previous = state.requests.find(request => request.callId === callId);
-    return this.bind(id, previous ?? { callId, actionId: options.actionId,
+    return this.bind(id, previous ?? { callId, ...(actionId ? { actionId } : {}),
       ...(options.eventTypes === undefined ? {} : { eventTypes: [...options.eventTypes] }),
       ...(options.seconds === undefined ? {} : { untilTick: this.engine.tick + Math.max(1, Math.ceil(options.seconds * TICKS_PER_SECOND)) }) }, signal);
   }
@@ -155,7 +163,12 @@ export class AgentBridge {
         const immediateControl = command.action === 'cancel' || command.action === 'stop_follow';
         const bodyBusy = this.state(id).actions.find(other => other.id !== action.id && other.channel === 'body'
           && other.status === 'running' && (other.physicalActive || other.dueTick! > this.engine.tick));
-        if (!immediateControl && action.channel !== 'speech' && bodyBusy) {
+        const lookCount = command.action === 'look' ? this.state(id).actions.filter(other => other.id !== action.id
+          && other.kind === 'look' && other.startedTick !== undefined && other.status !== 'rejected'
+          && Math.floor(other.startedTick / TURN_TICKS) === Math.floor(this.engine.tick / TURN_TICKS)).length : 0;
+        if (command.action === 'look' && lookCount >= 3) {
+          action.result = { ok: false, message: 'You have already looked three times this turn. Choose another action or wait for the next turn.' };
+        } else if (!immediateControl && action.channel !== 'speech' && action.channel !== 'perception' && bodyBusy) {
           action.result = { ok: false, message: `Your body is busy with ${bodyBusy.id} until world tick ${bodyBusy.dueTick}. Wait for its completion before starting another body or movement action.` };
         } else if (action.channel === 'body' && !immediateControl && (entity.motion || entity.following)) {
           action.result = { ok: false, message: 'Body interactions require a stationary body. Wait for movement to finish or explicitly cancel it. Speech can continue during movement.' };
@@ -188,7 +201,7 @@ export class AgentBridge {
         action.motion = action.physicalActive ? clone(entity.motion) : undefined;
         if (!action.result.ok) this.finish(id, action, 'rejected');
         else if (immediateControl) this.finish(id, action, 'completed');
-        else { action.status = 'running'; action.dueTick = scanning.has(command.action)
+        else { action.status = 'running'; action.dueTick = command.action === 'look' ? this.engine.tick + 1 : scanning.has(command.action)
           ? this.engine.tick + TURN_TICKS : (Math.floor(this.engine.tick / TURN_TICKS) + 1) * TURN_TICKS; }
         this.engine.event(id, 'simulation-action', `${action.kind}: ${action.status}`, { action: this.publicAction(action) });
         this.dirty = true;
@@ -277,6 +290,7 @@ export class AgentBridge {
   }
   private finish(id: string, action: SimulationAction, status: Extract<SimulationAction['status'], 'completed' | 'blocked' | 'cancelled' | 'rejected'>) {
     if (action.status === status && action.finishedEventId !== undefined) return;
+    if(action.command.action==='look'&&status==='completed')action.result={ok:true,message:'You finish looking around.',feedback:{...action.result?.feedback,outcome:'completed'}};
     action.status = status; action.finishedTick = this.engine.tick;
     const event = this.engine.event(id, `action-${status}`, `${action.kind}: ${status}.`, { actionId: action.id, status, action: this.publicAction(action) });
     action.finishedEventId = event.id;

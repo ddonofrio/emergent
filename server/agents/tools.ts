@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import type { ItemCapability } from '../../src/core/crafting';
 import { isRawBlock } from '../../src/core/materials';
+import { TURN_TICKS } from '../../src/core/time';
 import type { Action, AgentIntent, Observation, Vec3 } from '../../src/core/types';
 import { wakeEventTypes, type ActionProgress, type AgentPort, type BodyActivity, type PerceivedEvent, type ToolOutcome, type WaitOptions } from '../simulation/agent-port';
 import { validateArguments, type ToolExecutor, type ToolSchema } from '../../vendor/littlewhale';
@@ -9,6 +11,14 @@ const integer = { type: 'integer' };
 const text = { type: 'string', minLength: 1, maxLength: 500 };
 const object = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required, additionalProperties: false });
 const coordinates = ([x, y, z]: Vec3) => ({ x, yHeight: y, z });
+
+export interface LookState { signature?: string; }
+export interface AgentToolMemory { notes: string[]; viewAngle?: number; look?: LookState; }
+
+const lookSignature = (value: Record<string, unknown>) => {
+  const { tick: _tick, ...stable } = value;
+  return createHash('sha256').update(JSON.stringify(stable)).digest('hex');
+};
 
 function selfView(view: Observation) {
   const inventory = view.self.inventory, holding = inventory?.selected == null ? undefined : inventory.stacks[inventory.selected];
@@ -36,17 +46,15 @@ export function localView(view: Observation & { viewAngle?: number }, learned: s
 
 export function observeAgent(port: AgentPort, notes: string[], angle = 0) {
   const view = port.observe(angle);
-  return localView(view, port.knowledge(angle), notes, port.capabilities(view), port.bodyActivity());
+  return { ...localView(view, port.knowledge(angle), notes, port.capabilities(view), port.bodyActivity()),
+    speech: { wordsRemainingThisTurn: port.remainingSpeechWords() } };
 }
 
 function currentContext(port: AgentPort) {
   const view = port.observe();
   const bodyActivity = port.bodyActivity();
-  return { self: selfView(view), bodyActivity, learned: port.knowledge(), capabilities: capabilityView(port.capabilities(view), view, bodyActivity), visibleEntities: visibleEntities(view) };
-}
-
-export function resumeAgentTool(port: AgentPort, callId: string, signal: AbortSignal) {
-  return port.resume(callId, signal)?.then(outcome => toolOutcome(outcome, currentContext(port)));
+  return { self: selfView(view), bodyActivity, learned: port.knowledge(), speech: { wordsRemainingThisTurn: port.remainingSpeechWords() },
+    capabilities: capabilityView(port.capabilities(view), view, bodyActivity), visibleEntities: visibleEntities(view) };
 }
 
 const metres = (value: number) => Math.round(value * 1000) / 1000;
@@ -81,6 +89,25 @@ function perceivedEvent(event: PerceivedEvent) {
     ...(event.data === undefined ? {} : { data: event.data }) };
 }
 
+function completedLook(port: AgentPort, memory: AgentToolMemory, angle: number, turn: number, outcome: ToolOutcome, startTick?: number) {
+  const result = observeAgent(port, memory.notes, angle), signature = lookSignature(result);
+  const unchanged = memory.look?.signature === signature, count = port.lookCount(turn);
+  memory.look = { signature };
+  return { ...result, ...(startTick === undefined ? {} : { timeAdvancedTicks: outcome.tick - startTick }),
+    looksUsedThisTurn: count, looksRemainingThisTurn: Math.max(0, 3 - count),
+    ...(outcome.action ? { action: actionProgress(outcome.action) } : {}),
+    ...(outcome.events.length ? { events: outcome.events.map(perceivedEvent) } : {}),
+    ...(unchanged ? { unchanged: true, message: 'Nothing has changed since the previous look; this result contains no new information.' } : {}),
+    ...(count >= 3 ? { lookUnavailable: true, instruction: 'Look is unavailable until the next world turn.' } : {}),
+  };
+}
+
+export function resumeAgentTool(port: AgentPort, memory: AgentToolMemory, callId: string, signal: AbortSignal) {
+  const turn = Math.floor(port.tick / TURN_TICKS), angle = memory.viewAngle ?? 0;
+  return port.resume(callId, signal)?.then(outcome => outcome.action?.kind === 'look' && outcome.reason !== 'rejected'
+    ? completedLook(port, memory, angle, turn, outcome) : toolOutcome(outcome, currentContext(port)));
+}
+
 /** Durable receipts retain execution detail; current context contains only local, occlusion-checked state. */
 export function toolOutcome(outcome: ToolOutcome, current?: ReturnType<typeof currentContext>) {
   const completed = new Map<string, ActionProgress>();
@@ -98,10 +125,11 @@ export function toolOutcome(outcome: ToolOutcome, current?: ReturnType<typeof cu
     events: outcome.events.map(perceivedEvent) };
 }
 
-export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle?: number }) {
+export function agentTools(port: AgentPort, memory: AgentToolMemory) {
   const schemas: ToolSchema[] = [];
   const executors: Record<string, ToolExecutor> = {};
   const viewAngle = memory.viewAngle ?? 0;
+  const looksThisTurn = port.lookCount();
   const view = port.observe(viewAngle);
   const inventory = view.self.inventory;
   const held = inventory?.selected === null || !inventory ? undefined : inventory.stacks[inventory.selected];
@@ -126,11 +154,16 @@ export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle
       return port.submit(call.id, action, signal);
     });
 
-  tool('look', 'Refresh your local field of view with normal range and occlusion. Optional relative angle changes the view without turning. No world time.',
-    object({ angle: { ...number, minimum: -180, maximum: 180 } }), async args => {
-      const angle = args.angle as number | undefined; memory.viewAngle = angle ?? 0;
-      return observeAgent(port, memory.notes, angle);
-    });
+  if (looksThisTurn < 3) {
+    tool('look', 'Spend simulation time refreshing one local, occlusion-aware view without turning your body. Optional relative angle changes the viewing direction. At most three looks may start in one world turn; after the third, look is unavailable until the next turn. An unchanged result contains no new information.',
+      object({ angle: { ...number, minimum: -180, maximum: 180 } }), async (args, call, signal) => {
+        const angle = args.angle as number | undefined, startTick = port.tick, turn = Math.floor(startTick / TURN_TICKS);
+        memory.viewAngle = angle ?? 0;
+        const outcome = await port.submit(call.id, { action: 'look', ...(angle === undefined ? {} : { angle }) }, signal);
+        if (outcome.reason === 'rejected') return outcome;
+        return completedLook(port, memory, angle ?? 0, turn, outcome, startTick);
+      });
+  }
   if (!view.self.following && !bodyActivity) {
     tool('walk_to', 'Walk in a straight line to horizontal x,z (at most 32m); terrain sets y height. This does not route around obstacles. Returns at arrival, blockage or a perceived event. Events preserve movement; a new locomotion action replaces it.',
       object({ x: number, z: number }, ['x', 'z']), (args, call, signal) => {
@@ -149,9 +182,10 @@ export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle
   tool('inspect_jump', 'Check a local jump using normal perception, without moving or revealing unseen terrain.',
     object({ angle: { ...number, minimum: -90, maximum: 90 }, distance: { ...number, minimum: .75, maximum: 2.5 } }, ['angle', 'distance']),
     async args => port.inspectJump(args.angle as number, args.distance as number));
-  submit('say', 'Speak one to three words in clear hearing range; three total per world second. Speaking and hearing preserve concurrent movement.',
+  const remainingSpeechWords = port.remainingSpeechWords();
+  if (remainingSpeechWords > 0) submit('say', `Speak at most ${remainingSpeechWords} ${remainingSpeechWords === 1 ? 'word' : 'words'} in clear hearing range; three total per world turn. The tool is unavailable after the budget is spent until world time enters the next turn. Speaking and hearing preserve concurrent movement.`,
     object({ word: { type: 'string', minLength: 1, maxLength: 100 } }, ['word']));
-  tool('wait_for_event', 'Wait while other actions continue. actionId always returns when that action ends; seconds sets a world-time limit for uncertain replies. Optional eventTypes selects early interruptions; [] waits only for the action or timeout. Omit eventTypes for any event. All queued events are delivered on return, including deferred types.',
+  tool('wait_for_event', 'Wait while other actions continue. actionId must name an ongoing action and returns when it ends. To advance time after an action already finished, omit actionId and supply seconds. Optional eventTypes selects early interruptions; [] waits only for the ongoing action or timeout. Omit eventTypes for any event. All queued events are delivered on return, including deferred types.',
     object({ actionId: text, seconds: { ...number, exclusiveMinimum: 0, maximum: 3600 }, eventTypes: { type: 'array', items: { type: 'string', enum: [...wakeEventTypes] }, maxItems: wakeEventTypes.length, uniqueItems: true } }),
     (args, call, signal) => {
       if (Array.isArray(args.eventTypes) && !args.eventTypes.length && !args.actionId && args.seconds === undefined) throw new Error('An empty eventTypes list requires actionId or seconds.');
@@ -168,7 +202,10 @@ export function agentTools(port: AgentPort, memory: { notes: string[]; viewAngle
   if (view.self.following) submit('stop_follow', 'Stop following at the shared commit boundary.', object({}));
   if (stationary) {
     submit('turn', 'Turn your body by a relative angle.', object({ angle: { ...number, minimum: -360, maximum: 360 } }, ['angle']));
-    for (const name of ['find_material', 'find_entity'] as const) submit(name, 'Scan around for one world second with normal range and occlusion.', object({}));
+    for (const [name, description] of [
+      ['find_material', 'Scan 360 degrees for visible materials over one world second. On completion, returns the nearest visible source of each material and records each observed material once in durable Learned Knowledge. An identical repeated scan says that nothing changed.'],
+      ['find_entity', 'Scan 360 degrees for visible living beings over one world second. On completion, returns every visible being within normal range and occlusion. An identical repeated scan says that nothing changed.'],
+    ] as const) submit(name, description, object({}));
 
     if (!held && view.interactions.hit.length) {
       const choices = limited(view.interactions.hit);

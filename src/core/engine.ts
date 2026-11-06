@@ -53,6 +53,7 @@ export class Engine {
   get time() { return this.tick / TICKS_PER_SECOND; }
   get day() { return Math.floor(this.time / this.module.manifest.daySeconds) + 1; }
   entity(id: string) { const entity = this.entities.find(e => e.id === id); if (!entity) throw new Error('Unknown entity.'); return entity; }
+  remainingSpeechWords(id:string) { return speechWordsRemaining(this.entity(id),this.tick); }
   active(entity: Entity) { return entity.enabled !== false; }
   followersOf(entity:Entity){return this.entities.filter(other=>this.active(other)&&other.id!==entity.id&&other.following?.entityId===entity.id);}
   setEntityEnabled(id: string, enabled: boolean) {
@@ -610,6 +611,10 @@ export class Engine {
     return this.entities.find(other=>this.active(other)&&Math.floor(other.position[0])===target[0]&&Math.floor(other.position[2])===target[2]&&Math.abs(other.position[1]-(target[1]+1))<.05);
   }
   private execute(e: Entity, a: Action): ActionResult {
+    if(a.action==='look'){
+      if(a.angle!==undefined&&(!Number.isFinite(a.angle)||Math.abs(a.angle)>180))return fail('Look angle must be between -180 and 180 degrees.');
+      return {ok:true,message:'You spend a moment looking around.',feedback:{outcome:'started',angle:a.angle??0}};
+    }
     if(a.action==='stop_follow'){
       if(e.following){delete e.following;delete e.motion;e.status='idle';}
       return ok('You stop following. You can choose another action immediately.');
@@ -645,8 +650,10 @@ export class Engine {
       const message=unchanged?'Nothing has changed since the previous scan.':materials
         ?materials.length?`You scan all around and find ${materials.map(item=>item.material).join(', ')}.`:'You scan all around but find no visible block materials.'
         :entities!.length?`You scan all around and see ${entities!.map(other=>`${other.name}, a ${other.kind}, ${other.holding?`holding ${other.holding.kind}${other.holding.contents?` containing ${other.holding.contents}`:''}`:'with empty hands'}`).join('; ')}.`:'You scan all around but see no other living beings.';
-      e.motion={kind:'scan',scanType:a.action,destination:clone(e.position),speed:0,origin:clone(e.position),progress:0,duration:1,startYaw:e.yaw};e.status='scanning';
-      return {ok:true,message,feedback:{outcome:'started',...(materials?{materials}:{entities}),scanType:a.action,scanSignature:signature,scanPosition:clone(e.position),...(unchanged?{unchanged:true,previousScanEventId:previous.scanEventId}:{})}};
+      const result:ActionResult={ok:true,message,feedback:{outcome:'started',...(materials?{materials}:{entities}),scanType:a.action,
+        scanSignature:signature,scanPosition:clone(e.position),facing:e.yaw,...(unchanged?{unchanged:true,previousScanEventId:previous.scanEventId}:{})}};
+      e.motion={kind:'scan',scanType:a.action,destination:clone(e.position),speed:0,origin:clone(e.position),progress:0,duration:1,startYaw:e.yaw,result:clone(result)};e.status='scanning';
+      return result;
     }
     if (a.action === 'turn') {
       if (!Number.isFinite(a.angle) || Math.abs(a.angle!) > 360) return fail('Turn angle must be between -360 and 360 degrees.');
@@ -1007,7 +1014,12 @@ export class Engine {
           const scanType=motion.scanType!,scanMaterials=scanType==='find_material'?this.materialsAround(e.id):undefined;
           const entities=scanType==='find_entity'?this.entitiesAround(e.id):undefined;
           const results=scanMaterials??entities??[];
-          e.lastAction={ok:true,message:'You finish scanning all around.',feedback:{...(scanMaterials?{materials:scanMaterials}:{entities}),scanType,scanSignature:JSON.stringify([...results].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)))),scanPosition:clone(e.position),outcome:'completed',facing:e.yaw}};
+          const scanSignature=JSON.stringify([...results].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))));
+          const started=motion.result?.feedback,unchanged=started?.unchanged===true&&started.scanSignature===scanSignature
+            &&JSON.stringify(started.scanPosition)===JSON.stringify(e.position)&&started.facing===e.yaw;
+          e.lastAction={ok:true,message:unchanged?'Nothing has changed since the previous scan.':'You finish scanning all around.',
+            feedback:{...(scanMaterials?{materials:scanMaterials}:{entities}),scanType,scanSignature,scanPosition:clone(e.position),outcome:'completed',facing:e.yaw,
+              ...(unchanged?{unchanged:true,previousScanEventId:started.previousScanEventId}:{})}};
           const materials=Array.isArray(e.lastAction.feedback?.materials)?e.lastAction.feedback.materials:[];
           for(const observed of materials){
             if(!observed||typeof observed!=='object')continue;

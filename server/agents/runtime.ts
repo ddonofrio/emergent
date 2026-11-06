@@ -6,15 +6,13 @@ import type { Store } from '../store';
 import type { AgentPort } from '../simulation/agent-port';
 import type { AgentBridge, BridgeSnapshot } from '../simulation/agent-bridge';
 import type { WorldConnection } from '../simulation/connection';
-import { agentTools, observeAgent, resumeAgentTool } from './tools';
+import { agentTools, observeAgent, resumeAgentTool, type AgentToolMemory, type LookState } from './tools';
 
-export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; viewAngle?: number; }
+export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; viewAngle?: number; look?: LookState; }
 export interface RuntimeSnapshot { version: 1; agents: Record<string, AgentSnapshot>; simulation: BridgeSnapshot; }
-interface Agent {
+interface Agent extends AgentToolMemory {
   port: AgentPort;
   session: PersistentSession;
-  notes: string[];
-  viewAngle?: number;
   state: SessionState;
   detail?: string;
   controller?: AbortController;
@@ -34,7 +32,8 @@ export class AgentRuntime implements WorldConnection {
     for (const port of bridge.ports()) {
       const saved = snapshot?.agents[port.id];
       const session = new PersistentSession(port.id, saved?.session);
-      const agent: Agent = { port, session, notes: saved?.notes ?? [], viewAngle: saved?.viewAngle, state: 'stopped' };
+      const agent: Agent = { port, session, notes: saved?.notes ?? [], viewAngle: saved?.viewAngle,
+        ...(saved?.look ? { look: { ...saved.look } } : {}), state: 'stopped' };
       if (!saved) session.appendUser(JSON.stringify({ observation: observeAgent(port, agent.notes), instruction: 'Choose your own goals and act through the currently available tools.' }));
       this.agents.set(port.id, agent);
     }
@@ -46,7 +45,10 @@ export class AgentRuntime implements WorldConnection {
     this.hooks.changed();
   }
   persistence(): RuntimeSnapshot {
-    return { version: 1, simulation: this.bridge.snapshot(), agents: Object.fromEntries([...this.agents].map(([id, agent]) => [id, { session: agent.session.snapshot(), notes: [...agent.notes], ...(agent.viewAngle ? { viewAngle: agent.viewAngle } : {}) }])) };
+    return { version: 1, simulation: this.bridge.snapshot(), agents: Object.fromEntries([...this.agents].map(([id, agent]) => [id, {
+      session: agent.session.snapshot(), notes: [...agent.notes], ...(agent.viewAngle ? { viewAngle: agent.viewAngle } : {}),
+      ...(agent.look ? { look: { ...agent.look } } : {}),
+    }])) };
   }
   metrics() { return Object.fromEntries([...this.agents].map(([id, agent]) => [id, agent.session.metrics])); }
   private persist() { this.store.saveAgentState(this.persistence()); }
@@ -82,12 +84,12 @@ You have one continuous private conversation. Choose your own identity, goals an
 Events arrive through tool results. An event alone does not stop movement or require a reply. Only arrival, blockage, explicit cancellation or replacement ends movement. Use wait_for_event to continue an ongoing action, choosing eventTypes if only certain interruptions matter. For an uncertain reply, choose a timeout; silence need not stop your own plans.
 Calls in one response run concurrently, not sequentially. Submit at most one body or locomotion action per response. Scans, turning and hand interactions require a free stationary body; bodyActivity remains busy until its action completes even if you look stationary. Speech and private planning may run alongside an action. Wait for a dependent step's result before issuing the next step. Actions have persistent IDs and are validated at the shared commit boundary.
 World time freezes during every agent's inference or retry. Tool waits let the shared clock advance. Self and creature positions name x, yHeight and z; voxel targets use [x,y,z], where y is height; walk_to uses horizontal x,z.
-Current tool results override old positions, inventory and fallible notes. Learned lists are relevant subsets, not erasures of prior discoveries. Capabilities describe possible uses and prerequisites; available tools describe what you can execute now. Missing hit or pickup while holding an object means you must free your hands, not that nearby material is unreachable. Check hand constraints and bodyActivity before changing position to solve an unavailable action. Visible block counts describe only the local view, never the whole world or your inventory. After a collision or uncertain location, look again. Never assume unseen facts. Call tools to proceed.`;
+Current tool results override old positions, inventory and fallible notes. Learned Knowledge contains every durable discovery you have made; ordinary visible details are observations, not discoveries. Capabilities describe possible uses and prerequisites; available tools describe what you can execute now. Missing hit or pickup while holding an object means you must free your hands, not that nearby material is unreachable. Check hand constraints and bodyActivity before changing position to solve an unavailable action. Visible block counts describe only the local view, never the whole world or your inventory. After a collision or uncertain location, look again. Never assume unseen facts. Call tools to proceed.`;
     const providers = this.inference.providers.filter(provider => provider.enabled !== false && provider.model);
     agent.job = agent.session.run({
       system, schemas: tools.schemas, tools: tools.executors, signal: controller.signal,
       prepareTools: () => { const current = agentTools(agent.port, agent); return { schemas: current.schemas, tools: current.executors }; },
-      resumeTool: (call, signal) => resumeAgentTool(agent.port, call.id, signal),
+      resumeTool: (call, signal) => resumeAgentTool(agent.port, agent, call.id, signal),
       complete: (request, signal) => this.complete(agent, request, signal),
       contextWindow: providers.length ? Math.min(...providers.map(provider => provider.contextWindow ?? DEFAULT_CONTEXT_WINDOW)) : DEFAULT_CONTEXT_WINDOW,
       maxOutputTokens: providers.length ? Math.min(...providers.map(provider => provider.maxOutputTokens ?? 4096)) : 4096,
