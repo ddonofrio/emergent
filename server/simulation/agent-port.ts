@@ -4,6 +4,16 @@ import type { ItemCapability } from '../../src/core/crafting';
 export const wakeEventTypes = ['speech', 'encounter', 'discovery', 'terrain', 'block-impact', 'collision', 'blocked', 'arrived', 'scanned', 'follow-ended', 'follow-blocked', 'rebound-ended', 'action-completed', 'action-blocked', 'action-cancelled', 'action-rejected'] as const;
 export interface WaitOptions { actionId?: string; seconds?: number; eventTypes?: (typeof wakeEventTypes)[number][]; }
 export interface BodyActivity { id: string; kind: string; untilTick?: number; }
+export interface ContextCompactionDetails {
+  pressure: number;
+  contextWindow: number;
+  inputCapacity: number;
+  thresholdTokens: number;
+  projectedInputTokensBefore: number;
+  projectedInputTokensAfter: number;
+  messagesBefore: number;
+  messagesAfter: number;
+}
 
 export interface PerceivedEvent {
   id: number;
@@ -65,6 +75,7 @@ export interface AgentPort {
   submit(callId: string, action: Action, signal: AbortSignal): Promise<ToolOutcome>;
   cancel(callId: string, actionId: string, signal: AbortSignal): Promise<ToolOutcome>;
   wait(callId: string, options: WaitOptions, signal: AbortSignal): Promise<ToolOutcome>;
+  recordContextCompaction(details: ContextCompactionDetails): void;
   recordMemoryCompaction(details?: Record<string, unknown>): void;
   recordMemory(record: AgentMemoryRecord, source: 'write' | 'compaction'): void;
   setIntent(intent: AgentIntent): void;

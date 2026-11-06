@@ -66,6 +66,17 @@ export interface SessionMetrics {
   compactionCalls: number;
 }
 
+export interface ContextCompaction {
+  pressure: number;
+  contextWindow: number;
+  inputCapacity: number;
+  thresholdTokens: number;
+  projectedInputTokensBefore: number;
+  projectedInputTokensAfter: number;
+  messagesBefore: number;
+  messagesAfter: number;
+}
+
 export type SessionState = 'thinking' | 'tool' | 'retrying' | 'stopped';
 export interface PendingCall {
   call: ToolCall;
@@ -82,7 +93,7 @@ export interface SessionEvent {
 export interface SessionSnapshot {
   version: 1;
   id: string;
-  /** Recent model surface. Original messages, including reasoning, remain in events. */
+  /** Compactable model surface. Original messages, including removed reasoning, remain in events. */
   messages: Message[];
   events: SessionEvent[];
   pendingCalls: PendingCall[];
@@ -107,6 +118,7 @@ export interface SessionRunOptions {
   persist?: (snapshot: SessionSnapshot) => void | Promise<void>;
   onState?: (state: SessionState, detail?: string) => void;
   onCompletion?: (completion: Completion, purpose: CompletionRequest['purpose']) => void;
+  onCompaction?: (details: ContextCompaction) => void;
   contextWindow?: number;
   maxTokens?: number;
   retryDelayMs?: number;

@@ -137,7 +137,15 @@ export class PersistentSession {
         options.onState?.('thinking');
         try {
           const toolkit = preparedTools(options);
-          const context = conversationRequest({ ...options, schemas: toolkit.schemas }, this.data.messages);
+          const context = conversationRequest({ ...options, schemas: toolkit.schemas }, this.data.messages, this.data.contextPressure);
+          if (context.compaction) {
+            this.event('compaction/start', context.compaction);
+            this.data.messages = context.history;
+            this.data.compactions++;
+            this.event('compaction/end', { ...context.compaction, success: true, reasoningCleared: true });
+            options.onCompaction?.(context.compaction);
+            await this.save(options);
+          }
           this.data.messages = context.history;
           const request: CompletionRequest = {
             system: options.system, messages: context.messages, tools: toolkit.schemas,

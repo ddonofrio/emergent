@@ -57,7 +57,7 @@ test('a compacted record is durable, visible at its recorded tick, and survives 
     for (let i = 0; i < 10; i++) f.pump();
     assert.ok(f.engine.tick > 0);
     const record = { ...agent.memory.record, notes: ['Explore carefully.'], learned: ['Wood observed.'] };
-    f.requests.find(item => item.request.purpose === 'compaction')!.summarize(record);
+    f.requests.find(item => item.request.purpose === 'memory')!.summarize(record);
     await until(() => !agent.memory.compacting);
     assert.deepEqual(f.store.memoryRecordAt(f.engine.tick, 'walker'), { notes: record.notes, learned: record.learned });
     assert.equal(f.store.memoryRecordAt(0, 'walker').notes.length, 10);
@@ -93,13 +93,13 @@ test('background memory compaction records its entity while the world advances a
     for (let i = 0; i < 20; i++) f.pump();
     assert.ok(f.engine.tick > 0);
     assert.equal(f.runtime.status().walker.state, 'ready');
-    f.requests.find(request => request.request.purpose === 'compaction')!.fail();
+    f.requests.find(request => request.request.purpose === 'memory')!.fail();
     await until(() => !agent.memory.compacting);
     for (let i = 0; i < 5; i++) f.pump();
-    assert.equal(f.requests.filter(request => request.request.purpose === 'compaction').length, 1);
+    assert.equal(f.requests.filter(request => request.request.purpose === 'memory').length, 1);
     assert.equal(f.runtime.ready(), true);
     agent.memory.write({ notes: agent.notes });
-    assert.equal(f.requests.filter(request => request.request.purpose === 'compaction').length, 2);
+    assert.equal(f.requests.filter(request => request.request.purpose === 'memory').length, 2);
     assert.deepEqual(f.errors, []);
   } finally { await f.close(); }
 });
@@ -119,9 +119,9 @@ test('silent walking holds one tool without inference across world seconds and r
     await until(() => f.requests.length === 2);
     assert.equal(f.engine.tick, 80);
     assert.equal(f.requests[1].request.system, first.system);
-    assert.match(f.requests[1].request.messages[0].content!, /Earlier conversation history is no longer included/);
-    assert.notDeepEqual(f.requests[1].request.messages[0], first.messages[0], 'The current observation refreshes while the recent actions stay raw.');
-    assert.equal(f.requests[1].request.messages.filter(message => message.role === 'user').length, 1);
+    assert.match(f.requests[1].request.messages[0].content!, /continuing an existing conversation/);
+    assert.notDeepEqual(f.requests[1].request.messages.at(-1), first.messages.at(-1), 'The current observation refreshes after the cacheable conversation prefix.');
+    assert.equal(f.requests[1].request.messages.filter(message => message.role === 'user').length, 2);
     const result = resultOf(f.requests[1].request);
     assert.equal(result.action.status, 'completed'); assert.equal(result.action.distanceTravelled.toFixed(1), '8.0');
     f.pump(60000); assert.equal(f.engine.tick, 80); assert.deepEqual(f.errors, []);

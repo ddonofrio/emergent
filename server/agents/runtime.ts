@@ -111,8 +111,9 @@ export class AgentRuntime implements WorldConnection {
   }
   private agentContext(agent: Agent) {
     const tools = agentTools(agent.port, agent).schemas;
+    const snapshot = agent.session.snapshot();
     return { system: agent.system, tools, messages: conversationRequest({ system: agent.system ?? '', schemas: tools,
-      currentContext: () => this.currentContext(agent), contextWindow: this.inference.contextWindow, maxTokens: this.inference.maxTokens }, agent.session.snapshot().messages).messages };
+      currentContext: () => this.currentContext(agent), contextWindow: this.inference.contextWindow }, snapshot.messages, snapshot.contextPressure).messages };
   }
   private publishMemory(agent: Agent, record: AgentMemoryRecord, source: 'write' | 'compaction') {
     try {
@@ -125,7 +126,7 @@ export class AgentRuntime implements WorldConnection {
     const controller = new AbortController(); agent.controller = controller;
     const tools = agentTools(agent.port, agent);
     const system = `${agent.port.instructions.replaceAll('{name}', agent.port.name)}
-You retain a fresh observation, your current memory record, and at most ten recent complete action exchanges without old reasoning. Earlier conversation history is forgotten. Choose your own identity, goals and observable success conditions. Keep a small next step, expected observation and reason to reconsider in set_intent when useful; update your own plan after discoveries, repeated blockage or completion. Each success condition must cover the goal you selected. An experiment establishes only the tested inputs, not every option. Keep at most ten private notes with remember; permanent learned knowledge can be searched with recall even after an object is gone. Your memory record may be shortened in the background; preserve important conclusions explicitly.
+You retain a fresh observation and your current memory record. Conversation history grows until context pressure requires compaction; compaction keeps recent complete action exchanges without old reasoning. Choose your own identity, goals and observable success conditions. Keep a small next step, expected observation and reason to reconsider in set_intent when useful; update your own plan after discoveries, repeated blockage or completion. Each success condition must cover the goal you selected. An experiment establishes only the tested inputs, not every option. Keep at most ten private notes with remember; permanent learned knowledge can be searched with recall even after an object is gone. Your memory record may be shortened in the background; preserve important conclusions explicitly.
 Events arrive through tool results. An event alone does not stop movement or require a reply. Only arrival, blockage, explicit cancellation or replacement ends movement. Use wait_for_event to continue an ongoing action, choosing eventTypes if only certain interruptions matter. For an uncertain reply, choose a timeout; silence need not stop your own plans.
 Calls in one response run concurrently, not sequentially. Submit at most one body or locomotion action per response. Scans, turning and hand interactions require a free stationary body; bodyActivity remains busy until its action completes even if you look stationary. Speech and private planning may run alongside an action. Wait for a dependent step's result before issuing the next step. Actions have persistent IDs and are validated at the shared commit boundary.
 World time freezes during every agent's inference or retry. Tool waits let the shared clock advance. Self and creature positions name x, yHeight and z; voxel targets use [x,y,z], where y is height; walk_to uses horizontal x,z.
@@ -140,6 +141,7 @@ Current tool results override old positions, inventory and fallible notes. Learn
       contextWindow: this.inference.contextWindow,
       maxTokens: this.inference.maxTokens,
       persist: () => this.persist(),
+      onCompaction: details => agent.sourcePort.recordContextCompaction(details),
       onState: (state, detail) => {
         agent.state = state; agent.detail = detail;
         this.hooks.changed();

@@ -22,6 +22,25 @@ function successfulResponse() {
   return new Response(`data: ${JSON.stringify(delta)}\n\ndata: ${JSON.stringify(ending)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
 }
 
+test('provider-default reasoning is omitted while explicit levels are forwarded', async t => {
+  const payloads: Record<string, unknown>[] = [];
+  t.mock.method(globalThis, 'fetch', async (_input: unknown, init?: RequestInit) => {
+    payloads.push(JSON.parse(String(init?.body)));
+    return successfulResponse();
+  });
+  const openrouter: ProviderConfig = {
+    id: 'openrouter', name: 'OpenRouter', type: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'openai/gpt-oss-20b', apiKey: 'test-key',
+  };
+  for (const reasoning of [undefined, 'medium', 'off'] as const) {
+    const config = reasoning === undefined ? openrouter : { ...openrouter, reasoning };
+    await new InferenceClient([config]).complete(request, new AbortController().signal);
+  }
+  assert.equal('reasoning' in payloads[0], false);
+  assert.deepEqual(payloads[1].reasoning, { effort: 'medium' });
+  assert.deepEqual(payloads[2].reasoning, { effort: 'none' });
+});
+
 test('background compaction never occupies the serial decision queue and retains reasoning-only truncation usage', async t => {
   const pending: ((response: Response) => void)[] = [];
   const payloads: { max_tokens?: number; max_completion_tokens?: number }[] = [];

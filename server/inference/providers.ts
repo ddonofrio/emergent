@@ -116,15 +116,21 @@ function catalogProvider(type: ProviderConfig['type']): Provider | undefined {
 function modelFor(config: ProviderConfig, id = config.model): Model<Api> {
   const base = catalogProvider(config.type)?.getModels().find(model => model.id === id);
   const api = base?.api ?? (config.type === 'amazon-bedrock' ? 'bedrock-converse-stream' : config.type === 'openai' ? 'openai-responses' : 'openai-completions');
+  const providerDefaultReasoning = config.reasoning === undefined;
+  const reasoning = providerDefaultReasoning ? base?.reasoning ?? false : base?.reasoning ?? true;
+  // pi-ai treats an omitted level as "off" for several chat-completions routes.
+  // Mark off as unavailable only for provider-default requests so it omits the
+  // reasoning parameter and lets the serving endpoint choose its own default.
+  const thinkingLevelMap = providerDefaultReasoning && reasoning ? { ...base?.thinkingLevelMap, off: null } : base?.thinkingLevelMap;
   return {
     id, name: base?.name ?? id, api, provider: config.id,
     baseUrl: config.baseUrl || base?.baseUrl || '',
-    reasoning: config.reasoning === undefined ? base?.reasoning ?? false : config.reasoning !== 'off',
+    reasoning,
     input: ['text'], cost: base?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: config.contextWindow ?? base?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: base?.maxTokens ?? DEFAULT_MAX_TOKENS,
     ...(base?.compat === undefined ? {} : { compat: base.compat }),
-    ...(base?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: base.thinkingLevelMap }),
+    ...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
   };
 }
 

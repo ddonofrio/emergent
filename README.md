@@ -31,7 +31,7 @@ The world engine owns all time. A shared barrier freezes physics whenever any ac
 - `server/turn-clock.ts`: generic clock participant contract from `server/simulation/connection.ts`; runnable without agents.
 - `server/simulation`: persistent action tasks, concurrency, per-entity capability ports and observable event queues.
 - `server/agents`: one conversation per entity and simulation tool contracts; receives scoped ports instead of the engine.
-- `vendor/littlewhale`: headless source adaptations of LittleWhale's session, execution loop, tool dispatch and basic compaction. The only context compactor preserves complete assistant/tool pairs and the original durable conversation. See its [source comparison and license notices](vendor/littlewhale/README.md).
+- `vendor/littlewhale`: headless source adaptations of LittleWhale's session, execution loop, tool dispatch and basic compaction. Conversation history grows to 90% of the configured context window before the compactor preserves a bounded tail of complete assistant/tool pairs; the original conversation remains durable. See its [source comparison and license notices](vendor/littlewhale/README.md).
 - `server/inference`: LittleWhale's pinned pi-ai provider core, native replay, configuration and discovery; no chat UI or Cordis application stack.
 - `server/store.ts`: SQLite WAL, authoritative events, world frames, conversation snapshots, action receipts and server-only inference audits. Replay reads recorded state without models or physics execution.
 

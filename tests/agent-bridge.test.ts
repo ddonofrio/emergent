@@ -19,6 +19,19 @@ function fixture(other?: Vec3) {
   return { engine, bridge, port, signal, advance };
 }
 
+test('conversation compaction is published to the world journal with pressure details', () => {
+  const { engine, bridge, port } = fixture();
+  try {
+    port.recordContextCompaction({ pressure: .9, contextWindow: 10000, inputCapacity: 10000, thresholdTokens: 9000,
+      projectedInputTokensBefore: 8200, projectedInputTokensAfter: 2100, messagesBefore: 60, messagesAfter: 30 });
+    const event = engine.recentEvents.at(-1)!;
+    assert.equal(event.actor, 'a');
+    assert.equal(event.type, 'context-compaction');
+    assert.equal(event.message, 'a compacted its conversation context.');
+    assert.equal((event.data as { pressure: number }).pressure, .9);
+  } finally { bridge.close(); }
+});
+
 test('movement progress uses the committed terrain destination and scoped world tick', async () => {
   const { engine, bridge, port, signal, advance } = fixture();
   try {
