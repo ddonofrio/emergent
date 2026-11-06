@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { PersistentSession, balancedCuts, selectCompactableRange, validateArguments, type Completion, type CompletionRequest, type SessionSnapshot, type ToolCall } from '../vendor/littlewhale';
+import { PersistentSession, balancedCuts, selectCompactableRange, validateArguments, type Completion, type CompletionRequest, type Message, type SessionSnapshot, type ToolCall } from '../vendor/littlewhale';
+import { compactablePrefix, projectedContextTokens } from '../vendor/littlewhale/compaction';
 import { InferenceClient, publicProviders, validateProviders, discoverModels, type ProviderConfig } from '../server/inference/providers';
 
 const response = (calls: ToolCall[], content: string | null = null): Completion => ({
@@ -54,6 +55,7 @@ test('one persistent conversation waits for tool completion and retains every or
     { movement: 'running', heard: ['First', 'Second'] }, { spoken: true },
   ]);
   const snapshot = session.snapshot();
+  assert.equal(snapshot.contextPressure?.inputTokens, 7);
   const oldCall = snapshot.messages.find(message => message.toolCalls)?.toolCalls?.[0].id;
   assert.notEqual(snapshot.pendingCalls[0].call.id, oldCall, 'Wire ID reuse must not reuse a physical receipt.');
   abort.abort(new Error('Pause'));
@@ -104,6 +106,19 @@ test('compaction never splits assistant tool calls from their results', () => {
   const cutoff = selectCompactableRange(messages, 35);
   assert.equal(balancedCuts(messages)[cutoff], true);
   assert.ok(cutoff > 0);
+});
+
+test('provider usage anchors context pressure instead of trusting the conservative whole-history estimate', () => {
+  const options = { system: 'Entity.', schemas: [], contextWindow: 60000, maxTokens: 4096 };
+  const messages: Message[] = Array.from({ length: 8 }, (_, index) => ({ role: 'user', content: `Observation ${index}: ${'local detail '.repeat(1500)}` }));
+  const estimatedTokens = projectedContextTokens(options, messages);
+  assert.ok(estimatedTokens > (60000 - 4096) * .75);
+  const sample = { inputTokens: 29000, estimatedTokens };
+  assert.equal(projectedContextTokens(options, messages, sample), 29000);
+  assert.equal(compactablePrefix({ ...options, tools: {}, signal: new AbortController().signal, complete: async () => response([]) }, messages, sample), 0);
+  messages.push({ role: 'user', content: 'new evidence '.repeat(4000) });
+  assert.ok(projectedContextTokens(options, messages, sample) > (60000 - 4096) * .75);
+  assert.ok(compactablePrefix({ ...options, tools: {}, signal: new AbortController().signal, complete: async () => response([]) }, messages, sample) > 0);
 });
 
 test('compaction replaces only the paired prefix and durably retains original conversation', async () => {

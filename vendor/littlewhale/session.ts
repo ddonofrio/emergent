@@ -62,6 +62,10 @@ export class PersistentSession {
       metrics.inputTokens += completion.usage.inputTokens;
       metrics.outputTokens += completion.usage.outputTokens;
       metrics.cachedInputTokens += completion.usage.cachedInputTokens ?? 0;
+      if (request.purpose === 'agent') this.data.contextPressure = {
+        inputTokens: completion.usage.inputTokens,
+        estimatedTokens: estimateTokens({ system: request.system, tools: request.tools, messages: request.messages }),
+      };
     } else metrics.estimatedInputTokens += estimateTokens(request);
   }
 
@@ -118,7 +122,7 @@ export class PersistentSession {
         try {
           const toolkit = preparedTools(options);
           const currentOptions = { ...options, tools: toolkit.tools, schemas: toolkit.schemas };
-          const prefixLength = compactablePrefix(currentOptions, this.data.messages);
+          const prefixLength = compactablePrefix(currentOptions, this.data.messages, this.data.contextPressure);
           if (prefixLength > 0) {
             const history = structuredClone(this.data.messages);
             this.event('compaction/start', { prefixLength, summarizedMessages: history.length });

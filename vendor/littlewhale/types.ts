@@ -88,6 +88,8 @@ export interface SessionSnapshot {
   pendingCalls: PendingCall[];
   metrics: SessionMetrics;
   compactions: number;
+  /** Provider-reported prompt pressure anchored to the request estimate it measured. */
+  contextPressure?: { inputTokens: number; estimatedTokens: number };
 }
 
 export interface SessionRunOptions {

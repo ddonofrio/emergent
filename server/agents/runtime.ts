@@ -15,6 +15,7 @@ interface Agent extends AgentToolMemory {
   session: PersistentSession;
   state: SessionState;
   detail?: string;
+  compactionPending?: boolean;
   controller?: AbortController;
   job?: Promise<void>;
 }
@@ -93,12 +94,15 @@ Current tool results override old positions, inventory and fallible notes. Learn
       contextWindow: this.inference.contextWindow,
       maxTokens: this.inference.maxTokens,
       persist: () => this.persist(),
+      onCompletion: (_completion, purpose) => { if (purpose === 'compaction') agent.compactionPending = false; },
       onState: (state, detail) => {
         agent.state = state; agent.detail = detail;
-        if (state === 'compacting') {
+        if (state === 'compacting' && !agent.compactionPending) {
+          agent.compactionPending = true;
           try { agent.port.recordContextCompaction(); }
           catch (error) { this.fail(error); throw error; }
         }
+        if (state === 'stopped') agent.compactionPending = false;
         this.hooks.changed();
       },
     }).catch(error => {

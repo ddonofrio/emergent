@@ -41,7 +41,7 @@ function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state
 }
 const resultOf = (request: CompletionRequest) => JSON.parse(request.messages.filter(message => message.role === 'tool').at(-1)!.content!);
 
-test('context compaction identifies its entity in the journal and live activity', async () => {
+test('context compaction identifies its entity once while failed transport attempts retry', async () => {
   const f = fixture(false, undefined, { contextWindow: 8192 });
   try {
     const session = f.runtime.agents.get('walker')!.session;
@@ -53,6 +53,11 @@ test('context compaction identifies its entity in the journal and live activity'
     assert.equal(event?.actor, 'walker');
     assert.equal(event?.message, 'walker started shrinking its conversation context.');
     assert.ok(f.store.eventsAt(f.engine.tick).some(candidate => candidate.id === event?.id));
+    f.requests[0].fail();
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    await until(() => f.requests.length === 2);
+    assert.equal(f.runtime.status().walker.state, 'shrinking');
+    assert.equal(f.engine.recentEvents.filter(candidate => candidate.type === 'context-compaction').length, 1);
   } finally { await f.close(); }
 });
 

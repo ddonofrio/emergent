@@ -3,7 +3,7 @@
  * MIT, Copyright (c) DeepSeek. See README.md for the exact adaptation boundary.
  */
 import { estimateTokens, selectCompactableRange } from './tool-pairing';
-import type { Complete, Completion, Message, SessionRunOptions } from './types';
+import type { Complete, Completion, Message, SessionRunOptions, SessionSnapshot } from './types';
 
 const COMPACTION_INSTRUCTION = [
   'Act as a compaction engine for this embodied agent. Condense the conversation above into a checkpoint that preserves its essential context.',
@@ -50,11 +50,21 @@ export async function summarizeWithLlm(
   return completion;
 }
 
-export function compactablePrefix(options: SessionRunOptions, messages: Message[]): number {
+export function projectedContextTokens(
+  options: Pick<SessionRunOptions, 'system' | 'schemas'>,
+  messages: Message[],
+  sample?: SessionSnapshot['contextPressure'],
+): number {
+  const estimatedTokens = estimateTokens({ system: options.system, tools: options.schemas, messages });
+  if (!sample) return estimatedTokens;
+  return Math.max(0, sample.inputTokens + estimatedTokens - sample.estimatedTokens);
+}
+
+export function compactablePrefix(options: SessionRunOptions, messages: Message[], sample?: SessionSnapshot['contextPressure']): number {
   const contextWindow = options.contextWindow ?? 49152;
   const outputTokens = options.maxTokens ?? 4096;
   const available = contextWindow - outputTokens;
-  const requestTokens = estimateTokens({ system: options.system, tools: options.schemas, messages });
+  const requestTokens = projectedContextTokens(options, messages, sample);
   if (requestTokens < available * 0.75) return 0;
   return selectCompactableRange(messages, Math.max(256, Math.floor(available * 0.25)));
 }
