@@ -38,9 +38,9 @@ test('held wood exposes semantic experiments and learned recipes without reveali
     const pending = tools.executors.strike_held({ point: 'bottom_center' },
       { id: 'shape', name: 'strike_held', arguments: { point: 'bottom_center' } }, f.signal);
     f.bridge.commit(); f.advance(20);
-    const result = await pending as { events: { type: string; message?: string; data?: { knowledge?: string } }[]; current: { self: { position: unknown } } };
+    const result = await pending as { events: { type: string; message?: string; data?: { knowledge?: string } }[]; position: unknown };
     assert.ok(result.events.some(event => event.type === 'discovery' && event.data?.knowledge === 'wood-shape:plank'));
-    assert.deepEqual(result.current.self.position, { x: .5, yHeight: 1, z: .5 });
+    assert.deepEqual(result.position, [.5, 1, .5]);
     assert.equal(f.engine.entity('maker').inventory?.stacks.some(stack => stack.kind === 'plank' && stack.count === 5), true);
 
     const woodIndex = f.engine.entity('maker').inventory!.stacks.findIndex(stack => stack.kind === 'wood');

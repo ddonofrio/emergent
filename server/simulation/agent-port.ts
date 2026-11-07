@@ -3,6 +3,7 @@ import type { ItemCapability } from '../../src/core/crafting';
 
 export const wakeEventTypes = ['speech', 'encounter', 'discovery', 'terrain', 'block-impact', 'collision', 'blocked', 'arrived', 'scanned', 'follow-ended', 'follow-blocked', 'rebound-ended', 'action-completed', 'action-blocked', 'action-cancelled', 'action-rejected'] as const;
 export interface WaitOptions { actionId?: string; seconds?: number; eventTypes?: (typeof wakeEventTypes)[number][]; }
+export type ActionWaitOptions = Pick<WaitOptions, 'eventTypes'>;
 export interface BodyActivity { id: string; kind: string; untilTick?: number; }
 export interface ContextCompactionDetails {
   pressure: number;
@@ -75,9 +76,10 @@ export interface AgentPort {
   /** Release receipts only after the host has durably saved their tool results. */
   retainCalls(callIds: readonly string[]): void;
   inspectJump(angle: number, distance: number): unknown;
-  submit(callId: string, action: Action, signal: AbortSignal): Promise<ToolOutcome>;
+  submit(callId: string, action: Action, signal: AbortSignal, options?: ActionWaitOptions): Promise<ToolOutcome>;
   cancel(callId: string, actionId: string, signal: AbortSignal): Promise<ToolOutcome>;
-  wait(callId: string, options: WaitOptions, signal: AbortSignal): Promise<ToolOutcome>;
+  /** Internal sequence continuations may collect a terminal action's receipt. */
+  wait(callId: string, options: WaitOptions, signal: AbortSignal, allowCompleted?: boolean): Promise<ToolOutcome>;
   yieldTurn(callId: string, signal: AbortSignal): Promise<ToolOutcome>;
   recordContextCompaction(details: ContextCompactionDetails): void;
   recordMemoryCompaction(details?: Record<string, unknown>): void;

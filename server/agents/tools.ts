@@ -4,8 +4,9 @@ import type { ItemCapability } from '../../src/core/crafting';
 import { isRawBlock } from '../../src/core/materials';
 import { TURN_TICKS } from '../../src/core/time';
 import { sanitizeAgentIntent, type Action, type AgentIntent, type Observation, type Vec3 } from '../../src/core/types';
-import { wakeEventTypes, type ActionProgress, type AgentPort, type BodyActivity, type PerceivedEvent, type ToolOutcome, type WaitOptions } from '../simulation/agent-port';
+import { type ActionProgress, type AgentPort, type BodyActivity, type PerceivedEvent, type ToolOutcome, type WaitOptions } from '../simulation/agent-port';
 import { validateArguments, type ToolExecutor, type ToolSchema } from '../../vendor/littlewhale';
+import { eventTypesSchema, namedEventTypesSchema, sequenceActions, sequenceTools, validateEventTypes, type SequenceMemory } from './sequences';
 
 const number = { type: 'number' };
 const integer = { type: 'integer' };
@@ -18,7 +19,7 @@ export interface RepeatedToolFailure { signature: string; count: number; unavail
 export type RepeatedToolFailures = Record<string, RepeatedToolFailure>;
 export interface FailedCallCounter { turn: number; count: number; }
 type RepeatedToolName = 'hit' | 'walk';
-export interface AgentToolMemory {
+export interface AgentToolMemory extends SequenceMemory {
   notes: string[]; viewAngle?: number; look?: LookState;
   toolFailures?: RepeatedToolFailures;
   failedCalls?: FailedCallCounter;
@@ -86,11 +87,10 @@ export function observeAgent(port: AgentPort, notes: string[], angle = 0) {
     speech: { wordsRemainingThisTurn: port.remainingSpeechWords() } };
 }
 
-function currentContext(port: AgentPort) {
-  const view = port.observe();
-  const bodyActivity = port.bodyActivity();
-  return { self: selfView(view), bodyActivity, learned: port.knowledge(), speech: { wordsRemainingThisTurn: port.remainingSpeechWords() },
-    capabilities: capabilityView(port.capabilities(view), view, bodyActivity), visibleEntities: visibleEntities(view) };
+/** Memory is supplied once in the current record, outside the sensory observation. */
+export function currentObservation(port: AgentPort, angle = 0) {
+  const { learned: _learned, notes: _notes, self: { intent: _intent, ...self }, ...observation } = observeAgent(port, [], angle);
+  return { ...observation, self };
 }
 
 const metres = (value: number) => Math.round(value * 1000) / 1000;
@@ -129,7 +129,8 @@ function completedLook(port: AgentPort, memory: AgentToolMemory, angle: number, 
   const result = observeAgent(port, memory.notes, angle), signature = lookSignature(result);
   const unchanged = memory.look?.signature === signature, count = port.lookCount(turn);
   memory.look = { signature };
-  return { ...result, ...(startTick === undefined ? {} : { timeAdvancedTicks: outcome.tick - startTick }),
+  return { tick: outcome.tick, reason: outcome.reason, viewAngle: angle,
+    ...(startTick === undefined ? {} : { timeAdvancedTicks: outcome.tick - startTick }),
     looksUsedThisTurn: count, looksRemainingThisTurn: Math.max(0, 3 - count),
     ...(outcome.action ? { action: actionProgress(outcome.action) } : {}),
     ...(outcome.events.length ? { events: outcome.events.map(perceivedEvent) } : {}),
@@ -141,20 +142,20 @@ function completedLook(port: AgentPort, memory: AgentToolMemory, angle: number, 
 export function resumeAgentTool(port: AgentPort, memory: AgentToolMemory, callId: string, signal: AbortSignal) {
   const turn = Math.floor(port.tick / TURN_TICKS), angle = memory.viewAngle ?? 0;
   return port.resume(callId, signal)?.then(outcome => outcome.action?.kind === 'look' && outcome.reason !== 'rejected'
-    ? completedLook(port, memory, angle, turn, outcome) : toolOutcome(outcome, currentContext(port)));
+    ? completedLook(port, memory, angle, turn, outcome) : toolOutcome(outcome));
 }
 
 /** Durable receipts retain execution detail; current context contains only local, occlusion-checked state. */
-export function toolOutcome(outcome: ToolOutcome, current?: ReturnType<typeof currentContext>) {
+export function toolOutcome(outcome: ToolOutcome) {
   const completed = new Map<string, ActionProgress>();
   for (const event of outcome.events) {
     const action = (event.data as { action?: ActionProgress } | undefined)?.action;
     if (action && terminal(action) && action.id !== outcome.action?.id) completed.set(action.id, action);
   }
   return { tick: outcome.tick, reason: outcome.reason,
-    ...(current ? { current } : { position: outcome.position }),
-    ...(!current && outcome.motion ? { motion: outcome.motion } : {}),
-    ...(!current && outcome.following ? { following: outcome.following } : {}),
+    position: outcome.position,
+    ...(outcome.motion ? { motion: outcome.motion } : {}),
+    ...(outcome.following ? { following: outcome.following } : {}),
     ...(outcome.action ? { action: actionProgress(outcome.action) } : {}),
     ...(completed.size ? { completedActions: [...completed.values()].map(actionProgress) } : {}),
     actions: outcome.actions.filter(action => action.id !== outcome.action?.id).map(actionProgress),
@@ -173,8 +174,8 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
   const stationary = !view.self.motion && !view.self.following && !bodyActivity;
   const limited = <T>(values: T[]) => values.slice(0, 24);
   const repeatedParameters: Record<RepeatedToolName, Record<string, unknown>> = {
-    walk: object({ distance: { ...number, exclusiveMinimum: 0, maximum: 32 }, angle: { ...number, minimum: -180, maximum: 180 } }, ['distance']),
-    hit: object({ target: { type: 'array', items: integer, minItems: 3, maxItems: 3 } }, ['target']),
+    walk: object({ distance: { ...number, exclusiveMinimum: 0, maximum: 32 }, angle: { ...number, minimum: -180, maximum: 180 }, eventTypes: eventTypesSchema }, ['distance']),
+    hit: object({ target: { type: 'array', items: integer, minItems: 3, maxItems: 3 }, eventTypes: eventTypesSchema }, ['target']),
   };
   const repeatedSignature = (name: RepeatedToolName, args: Record<string, unknown>) => {
     try { validateArguments({ name, description: '', parameters: repeatedParameters[name] }, args); }
@@ -186,7 +187,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
   const target = (values: Vec3[], description: string) => ({ type: 'array', items: integer, minItems: 3, maxItems: 3,
     enum: limited(values), description: `${description} Coordinates are [x,y,z], with y as height.` });
   const present = (result: unknown) => result && typeof result === 'object' && 'reason' in result && 'actions' in result && 'events' in result
-    ? toolOutcome(result as ToolOutcome, currentContext(port)) : result;
+    ? toolOutcome(result as ToolOutcome) : result;
   const failureReason = (result: unknown) => {
     if (!result || typeof result !== 'object') return undefined;
     const value = result as { error?: unknown; reason?: unknown; action?: { result?: { ok?: unknown; message?: unknown } }; events?: { message?: unknown }[] };
@@ -215,7 +216,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
     const control = repeatedToolControl(name, count, memory.failedCalls.count, passTurn, reason);
     let forcedTurn: ReturnType<typeof toolOutcome> | undefined;
     if (passTurn && Math.floor(port.tick / TURN_TICKS) === startTurn) {
-      forcedTurn = toolOutcome(await port.yieldTurn(call.id, signal), currentContext(port));
+      forcedTurn = toolOutcome(await port.yieldTurn(call.id, signal));
     }
     const displayed = present(result);
     return {
@@ -225,53 +226,67 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
     };
   };
   const tool = (name: string, description: string, parameters: Record<string, unknown>, execute: ToolExecutor, advertise = true) => {
-    const schema = { name, description, parameters };
+    const physical = sequenceActions.has(name) || ['follow', 'stop_follow', 'cancel_action', 'wait_for_event'].includes(name);
+    const filtered = sequenceActions.has(name) || name === 'follow' || name === 'stop_follow';
+    const schema = { name, description, parameters: filtered
+      ? { ...parameters, properties: { ...parameters.properties as Record<string, unknown>, eventTypes: eventTypesSchema } } : parameters };
     if (advertise && !memory.toolFailures?.[name]?.unavailable) schemas.push(schema);
     executors[name] = async (args, call, signal) => {
-      unlockWithOtherTool(memory, name);
-      const startTurn = Math.floor(port.tick / TURN_TICKS);
-      const locked = memory.toolFailures?.[name];
-      if (locked?.unavailable) return fail(name, args, call, signal, startTurn,
-        { error: locked.reason ?? `${name} is unavailable until you use another tool.` },
-        locked.reason ?? `${name} is unavailable until you use another tool.`, false);
-      const repeated = name === 'hit' || name === 'walk', signature = repeated ? repeatedSignature(name, args) : undefined;
-      let attemptOnly = false;
-      try { validateArguments(schema, args); }
-      catch (error) {
-        // A structurally valid hit may name a stale or empty target. Let the
-        // simulation execute the physical attempt instead of rejecting its enum.
-        if (name === 'hit' && signature) attemptOnly = true;
-        else {
-          signal.throwIfAborted();
-          const reason = error instanceof Error ? error.message : 'Tool arguments are invalid.';
+      const internalStep = memory.executingSequence && call.id === `${memory.sequence?.id}:step:${memory.sequence?.index}`;
+      if (physical && memory.executingSequence && !internalStep) return { error: 'A sequence must be the only physical call in its response.' };
+      if (physical) { memory.physicalCalls ??= new Set(); memory.physicalCalls.add(call.id); }
+      try {
+        unlockWithOtherTool(memory, name);
+        const startTurn = Math.floor(port.tick / TURN_TICKS);
+        const locked = memory.toolFailures?.[name];
+        if (locked?.unavailable) return fail(name, args, call, signal, startTurn,
+          { error: locked.reason ?? `${name} is unavailable until you use another tool.` },
+          locked.reason ?? `${name} is unavailable until you use another tool.`, false);
+        try { validateEventTypes(args.eventTypes); }
+        catch (error) {
+          const reason = error instanceof Error ? error.message : 'Invalid event filter.';
           return fail(name, args, call, signal, startTurn, { error: reason }, reason);
         }
-      }
-      let result: unknown;
-      try { result = await execute(attemptOnly ? { ...args, attemptOnly: true } : args, call, signal); }
-      catch (error) {
-        signal.throwIfAborted();
-        const reason = error instanceof Error ? error.message : 'Tool execution failed.';
-        return fail(name, args, call, signal, startTurn, { error: reason }, reason);
-      }
-      const reason = failureReason(result);
-      if (reason) return fail(name, args, call, signal, startTurn, result, reason);
-      clearToolFailure(memory, name);
-      return present(result);
+        const repeated = name === 'hit' || name === 'walk', signature = repeated ? repeatedSignature(name, args) : undefined;
+        let attemptOnly = false;
+        try { validateArguments(schema, args); }
+        catch (error) {
+          // A structurally valid hit may name a stale or empty target. Let the
+          // simulation execute the physical attempt instead of rejecting its enum.
+          if (name === 'hit' && signature) attemptOnly = true;
+          else {
+            signal.throwIfAborted();
+            const reason = error instanceof Error ? error.message : 'Tool arguments are invalid.';
+            return fail(name, args, call, signal, startTurn, { error: reason }, reason);
+          }
+        }
+        let result: unknown;
+        try { result = await execute(attemptOnly ? { ...args, attemptOnly: true } : args, call, signal); }
+        catch (error) {
+          signal.throwIfAborted();
+          const reason = error instanceof Error ? error.message : 'Tool execution failed.';
+          return fail(name, args, call, signal, startTurn, { error: reason }, reason);
+        }
+        const reason = failureReason(result);
+        if (reason) return fail(name, args, call, signal, startTurn, result, reason);
+        clearToolFailure(memory, name);
+        return present(result);
+      } finally { if (physical) memory.physicalCalls?.delete(call.id); }
     };
   };
   const submit = (name: Action['action'], description: string, parameters: Record<string, unknown>, prepare: (args: Record<string, unknown>) => Action = args => ({ ...args, action: name } as Action), advertise = true) =>
     tool(name, description, parameters, (args, call, signal) => {
-      const action = prepare(args); memory.viewAngle = 0;
-      return port.submit(call.id, action, signal);
+      const { eventTypes, ...physicalArgs } = args;
+      const action = prepare(physicalArgs); memory.viewAngle = 0;
+      return port.submit(call.id, action, signal, { eventTypes: eventTypes as WaitOptions['eventTypes'] });
     }, advertise);
 
   if (looksThisTurn < 3) {
-    tool('look', 'Spend simulation time refreshing one local, occlusion-aware view without turning your body. Optional relative angle changes the viewing direction. At most three looks may start in one world turn; after the third, look is unavailable until the next turn. An unchanged result contains no new information.',
+    tool('look', 'Refresh your local view without turning. At most three looks per world turn. The next current observation contains the view.',
       object({ angle: { ...number, minimum: -180, maximum: 180 } }), async (args, call, signal) => {
         const angle = args.angle as number | undefined, startTick = port.tick, turn = Math.floor(startTick / TURN_TICKS);
         memory.viewAngle = angle ?? 0;
-        const outcome = await port.submit(call.id, { action: 'look', ...(angle === undefined ? {} : { angle }) }, signal);
+        const outcome = await port.submit(call.id, { action: 'look', ...(angle === undefined ? {} : { angle }) }, signal, { eventTypes: args.eventTypes as WaitOptions['eventTypes'] });
         if (outcome.reason === 'rejected') return outcome;
         return completedLook(port, memory, angle ?? 0, turn, outcome, startTick);
       });
@@ -284,7 +299,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
     tool('walk_to', 'Walk in a straight line to horizontal x,z (at most 32m); terrain sets y height. This does not route around obstacles. Returns at arrival, blockage or a perceived event. Events preserve movement; a new locomotion action replaces it.',
       object({ x: number, z: number }, ['x', 'z']), (args, call, signal) => {
         memory.viewAngle = 0;
-        return port.submit(call.id, { action: 'walk', target: [args.x as number, port.observe().self.position[1], args.z as number] }, signal);
+        return port.submit(call.id, { action: 'walk', target: [args.x as number, port.observe().self.position[1], args.z as number] }, signal, { eventTypes: args.eventTypes as WaitOptions['eventTypes'] });
       });
     for (const [name, description, maximum] of [
       ['walk', 'Walk a relative distance and optional body-relative angle. Events return progress while movement continues.', 32],
@@ -305,8 +320,8 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
   else tool('say', 'Speak in clear hearing range.',
     object({ word: { type: 'string', minLength: 1, maxLength: 100 } }, ['word']),
     async () => ({ error: 'say is unavailable because the speech budget is exhausted until the next world turn. Use wait_for_event to advance time.' }), false);
-  tool('wait_for_event', 'Wait while other actions continue. actionId must name an ongoing action and returns when it ends. To advance time after an action already finished, omit actionId and supply seconds. Optional eventTypes selects early interruptions; [] waits only for the ongoing action or timeout. Omit eventTypes for any event. All queued events are delivered on return, including deferred types.',
-    object({ actionId: text, seconds: { ...number, exclusiveMinimum: 0, maximum: 3600 }, eventTypes: { type: 'array', items: { type: 'string', enum: [...wakeEventTypes] }, maxItems: wakeEventTypes.length, uniqueItems: true } }),
+  tool('wait_for_event', 'Wait for an ongoing actionId, selected event or timeout. After an action ends, omit actionId to wait again. An empty eventTypes needs actionId or seconds.',
+    object({ actionId: text, seconds: { ...number, exclusiveMinimum: 0, maximum: 3600 }, eventTypes: namedEventTypesSchema }),
     (args, call, signal) => {
       if (Array.isArray(args.eventTypes) && !args.eventTypes.length && !args.actionId && args.seconds === undefined) throw new Error('An empty eventTypes list requires actionId or seconds.');
       return port.wait(call.id, args as WaitOptions, signal);
@@ -316,7 +331,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
 
   if (!bodyActivity && view.interactions.follow.length) {
     const choices = view.interactions.follow.map(entity => entity.id);
-    submit('follow', `Follow one currently visible creature until blocked, cancelled or unavailable. Current choices: ${view.interactions.follow.map(entity => `${entity.id} (${entity.name}, ${entity.metres}m)`).join(', ')}.`,
+    submit('follow', 'Follow a visible creature until blocked, cancelled or unavailable.',
       object({ entityId: { ...text, enum: choices } }, ['entityId']), args => ({ action: 'follow', entityId: args.entityId as string, ...(viewAngle ? { angle: viewAngle } : {}) }));
   }
   if (view.self.following) submit('stop_follow', 'Stop following at the shared commit boundary.', object({}));
@@ -329,12 +344,12 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
 
     if (!held && view.interactions.hit.length && !memory.toolFailures?.hit?.unavailable) {
       const choices = limited(view.interactions.hit);
-      submit('hit', `Strike one currently reachable block with empty hands. Targets: ${choices.map(item => `${item.kind} [${item.target.join(',')}]${item.cracks ? `, cracks ${item.cracks}/3` : ''}`).join('; ')}.`,
+      submit('hit', 'Strike a reachable block with empty hands. Current cracks and materials are in observation.interactions.hit.',
         object({ target: target(choices.map(item => item.target), 'Choose one current reachable block target.') }, ['target']));
     }
     if (!held && view.interactions.pickup.length) {
       const choices = limited(view.interactions.pickup);
-      submit('pickup', `Pick up one currently reachable loose item. Choices: ${choices.map(item => `${item.itemId} (${item.kind}, ${item.metres}m)`).join(', ')}.`,
+      submit('pickup', 'Pick up a reachable loose item with empty hands.',
         object({ itemId: { ...text, enum: choices.map(item => item.itemId) } }, ['itemId']));
     }
     if (held) {
@@ -351,13 +366,13 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
             const experiment = experiments.find(experiment => experiment.point === args.point)!;
             if (experiment.orientations && !experiment.orientations.includes(args.orientation as 'up' | 'down')) throw new Error(`${experiment.point} requires orientation ${experiment.orientations.join(' or ')}.`);
             memory.viewAngle = 0;
-            return port.submit(call.id, { action: 'strike_held', impact: experiment.impact, ...(args.orientation ? { orientation: args.orientation as 'up' | 'down' } : {}) }, signal);
+            return port.submit(call.id, { action: 'strike_held', impact: experiment.impact, ...(args.orientation ? { orientation: args.orientation as 'up' | 'down' } : {}) }, signal, { eventTypes: args.eventTypes as WaitOptions['eventTypes'] });
           });
       }
       const digging = capabilities.find(capability => capability.action === 'dig' && capability.available);
       if (digging) {
         const choices = limited(view.interactions.hit);
-        submit('dig', `${digging.description} Targets: ${choices.map(item => `${item.kind} [${item.target.join(',')}]`).join('; ')}.`,
+        submit('dig', digging.description,
           object({ target: target(choices.map(item => item.target), 'Choose one current dig target.') }, ['target']));
       }
       if (capabilities.some(capability => capability.action === 'fill' && capability.available)) submit('fill', 'Fill one held empty container from a current compatible source.',
@@ -367,7 +382,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
     }
 
     const otherStacks = inventory?.stacks.flatMap((_stack, index) => index === inventory.selected ? [] : [index]) ?? [];
-    if (otherStacks.length) submit('hold', `Take one owned stack into your hands. Choices: ${otherStacks.map(index => `${index} (${inventory!.stacks[index].count} x ${inventory!.stacks[index].kind})`).join(', ')}.`,
+    if (otherStacks.length) submit('hold', 'Take an owned stack into your hands; stack indices refer to your current inventory.',
       object({ stack: { type: 'integer', enum: otherStacks } }, ['stack']));
     const combinations = capabilities.filter(capability => capability.action === 'join' && capability.available);
     if (combinations.length) submit('join', combinations.map(capability => `${capability.recipeId}: ${capability.description}`).join(' '),
@@ -379,7 +394,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
     }
   }
 
-  tool('set_intent', 'Record your own goal and a success condition covering it. Optional nextStep, expectedObservation and reconsiderWhen describe your chosen experiment or plan. Reassess after discoveries, blockage or completion. This replaces the previous intent; preserve fields you still want. No world time.',
+  tool('set_intent', 'Replace your goal, success condition and assessment, optionally recording your next step and when to reconsider. Preserve fields you still need. No world time.',
     object({ goal: text, successCondition: text, assessment: text, nextStep: text, expectedObservation: text, reconsiderWhen: text, status: { type: 'string', enum: ['active', 'completed', 'abandoned', 'blocked'] } }, ['goal', 'successCondition', 'status']),
     async args => {
       const intent = args as unknown as AgentIntent;
@@ -388,7 +403,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
       }
       if (memory.writeMemory) memory.writeMemory({ intent });
       else port.setIntent(intent);
-      return { intent, assessmentBy: 'agent' };
+      return { updated: 'intent', assessmentBy: 'agent' };
     });
   tool('recall', 'Search your permanent Learned Knowledge by item or topic, including objects you no longer own. Returns up to twenty matching facts you have already discovered; refine the query if total is larger. No world time.',
     object({ query: text }, ['query']), async args => port.recall(args.query as string));
@@ -398,7 +413,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
       const notes = [...args.notes as string[]];
       if (memory.writeMemory) memory.writeMemory({ notes });
       else { memory.notes = notes; port.remember(notes); }
-      return { notes };
+      return { updated: 'notes', count: notes.length };
     });
   // Keep non-advertised dispatchers for stale or hallucinated calls so their
   // failures enter the same counters instead of starting simulation work.
@@ -413,5 +428,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
             : 'hit is not currently available because no reachable block target is listed. Use another listed tool.';
     tool('hit', 'Strike a block with empty hands.', repeatedParameters.hit, async () => ({ error: reason }), false);
   }
-  return { schemas, executors };
+  const sequences = sequenceTools(port, memory, () => agentTools(port, memory),
+    (callId, signal) => resumeAgentTool(port, memory, callId, signal), toolOutcome);
+  return { schemas: [...schemas, ...sequences.schemas], executors: { ...executors, ...sequences.executors } };
 }

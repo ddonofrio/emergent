@@ -3,7 +3,7 @@ import { knowledgeDescription } from '../../src/core/knowledge';
 import { itemCapabilities } from '../../src/core/crafting';
 import { TURN_TICKS, TICKS_PER_SECOND } from '../../src/core/time';
 import { clone, distance, type Action, type WorldEvent } from '../../src/core/types';
-import type { ActionProgress, AgentPort, PerceivedEvent, SimulationAction, ToolOutcome, WaitOptions } from './agent-port';
+import type { ActionProgress, ActionWaitOptions, AgentPort, PerceivedEvent, SimulationAction, ToolOutcome, WaitOptions } from './agent-port';
 
 interface WaitRequest { callId: string; actionId?: string; untilTick?: number; eventTypes?: WaitOptions['eventTypes']; }
 interface EntityTasks {
@@ -93,9 +93,9 @@ export class AgentBridge {
           const pending = new Set(callIds.flatMap(callId => [callId, failureYieldCallId(callId)]));
           this.retainedCalls.set(id, pending); this.trim(this.state(id), pending);
         },
-        submit: (callId, command, signal) => this.submit(id, callId, command, signal),
+        submit: (callId, command, signal, options) => this.submit(id, callId, command, signal, options),
         cancel: (callId, actionId, signal) => this.submit(id, callId, { action: 'cancel', actionId }, signal),
-        wait: (callId, options, signal) => this.wait(id, callId, options, signal),
+        wait: (callId, options, signal, allowCompleted) => this.wait(id, callId, options, signal, allowCompleted),
         yieldTurn: (callId, signal) => {
           const remainingTicks = Math.max(1, (Math.floor(this.engine.tick / TURN_TICKS) + 1) * TURN_TICKS - this.engine.tick);
           return this.wait(id, failureYieldCallId(callId), { seconds: remainingTicks / TICKS_PER_SECOND, eventTypes: [] }, signal);
@@ -123,7 +123,7 @@ export class AgentBridge {
     });
   }
   private state(id: string) { return this.entities[id]; }
-  private submit(id: string, callId: string, command: SimulationAction['command'], signal: AbortSignal) {
+  private submit(id: string, callId: string, command: SimulationAction['command'], signal: AbortSignal, options: ActionWaitOptions = {}) {
     if (this.closed) return Promise.reject(new Error('Simulation connection is closed.'));
     signal.throwIfAborted();
     const state = this.state(id);
@@ -136,9 +136,11 @@ export class AgentBridge {
         status: 'queued', createdTick: this.engine.tick, origin: position, position: clone(position), distanceTravelled: 0, remainingDistance: 0 };
       state.actions.push(action); this.dirty = true;
     }
-    return this.bind(id, { callId, actionId: action.id, ...(command.action === 'look' ? { eventTypes: [] as [] } : {}) }, signal);
+    const previous = state.requests.find(request => request.callId === callId);
+    return this.bind(id, previous ?? { callId, actionId: action.id,
+      ...(options.eventTypes !== undefined ? { eventTypes: [...options.eventTypes] } : command.action === 'look' ? { eventTypes: [] as [] } : {}) }, signal);
   }
-  private wait(id: string, callId: string, options: WaitOptions, signal: AbortSignal) {
+  private wait(id: string, callId: string, options: WaitOptions, signal: AbortSignal, allowCompleted = false) {
     if (this.closed) return Promise.reject(new Error('Simulation connection is closed.'));
     signal.throwIfAborted();
     const state = this.state(id);
@@ -147,11 +149,11 @@ export class AgentBridge {
     if (options.actionId && !referencedAction) {
       return Promise.resolve(this.outcome(id, 'rejected', undefined, [{ id: 0, tick: this.engine.tick, type: 'error', message: 'Unknown action ID for this entity.' }]));
     }
-    if (referencedAction && terminal(referencedAction) && options.seconds === undefined) {
+    if (referencedAction && terminal(referencedAction) && options.seconds === undefined && !allowCompleted) {
       return Promise.resolve(this.outcome(id, 'rejected', undefined, [{ id: 0, tick: this.engine.tick, type: 'error',
         message: 'That action has already finished. Supply seconds without actionId to wait for future time or events.' }]));
     }
-    const actionId = referencedAction && !terminal(referencedAction) ? referencedAction.id : undefined;
+    const actionId = referencedAction && (allowCompleted || !terminal(referencedAction)) ? referencedAction.id : undefined;
     const previous = state.requests.find(request => request.callId === callId);
     return this.bind(id, previous ?? { callId, ...(actionId ? { actionId } : {}),
       ...(options.eventTypes === undefined ? {} : { eventTypes: [...options.eventTypes] }),

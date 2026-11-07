@@ -6,11 +6,12 @@ import type { Store } from '../store';
 import type { AgentPort } from '../simulation/agent-port';
 import type { AgentBridge, BridgeSnapshot } from '../simulation/agent-bridge';
 import type { WorldConnection } from '../simulation/connection';
-import { agentTools, observeAgent, resumeAgentTool, type AgentToolMemory, type FailedCallCounter, type LookState, type RepeatedToolFailures } from './tools';
+import { agentTools, currentObservation, resumeAgentTool, type AgentToolMemory, type FailedCallCounter, type LookState, type RepeatedToolFailures } from './tools';
+import { sequenceContext, sequenceRetainedCalls, type SavedSequence, type SequenceRun } from './sequences';
 import { AgentMemory, type MemorySnapshot } from './memory-record';
 import { sanitizeAgentIntent, type AgentMemoryRecord } from '../../src/core/types';
 
-export interface AgentSnapshot { session: SessionSnapshot; notes?: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; toolFailures?: RepeatedToolFailures; failedCalls?: FailedCallCounter; }
+export interface AgentSnapshot { session: SessionSnapshot; notes?: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; toolFailures?: RepeatedToolFailures; failedCalls?: FailedCallCounter; sequence?: SequenceRun; routines?: SavedSequence[]; }
 export interface RuntimeSnapshot { version: 1; agents: Record<string, AgentSnapshot>; simulation: BridgeSnapshot; }
 interface Agent extends AgentToolMemory {
   port: AgentPort;
@@ -82,11 +83,14 @@ export class AgentRuntime implements WorldConnection {
         memory.discover(port.knowledge()); return memory.record.learned;
       } }, session, memory,
         get notes() { return memory.record.notes; }, writeMemory: update => memory.write(update), viewAngle: saved?.viewAngle,
+        ...(saved?.sequence ? { sequence: structuredClone(saved.sequence) } : {}),
+        ...(saved?.routines ? { routines: structuredClone(saved.routines) } : {}),
+        saveTools: () => { this.dirtyAgents.add(port.id); this.persist(agent); },
         ...(saved?.look ? { look: { ...saved.look } } : {}), ...(saved?.toolFailures ? { toolFailures: structuredClone(saved.toolFailures) } : {}), state: 'stopped' };
       if (saved?.failedCalls) agent.failedCalls = { ...saved.failedCalls };
       this.agents.set(port.id, agent);
       this.dirtyAgents.add(port.id);
-      port.retainCalls(session.snapshot().pendingCalls.filter(pending => !pending.result).map(pending => pending.call.id));
+      port.retainCalls([...session.snapshot().pendingCalls.filter(pending => !pending.result).map(pending => pending.call.id), ...sequenceRetainedCalls(agent)]);
     }
   }
   get mode(): 'llm' | 'waiting' { return this.inference.enabled ? 'llm' : 'waiting'; }
@@ -109,6 +113,8 @@ export class AgentRuntime implements WorldConnection {
       ...(agent.look ? { look: { ...agent.look } } : {}),
       ...(agent.toolFailures ? { toolFailures: structuredClone(agent.toolFailures) } : {}),
       ...(agent.failedCalls ? { failedCalls: { ...agent.failedCalls } } : {}),
+      ...(agent.sequence ? { sequence: structuredClone(agent.sequence) } : {}),
+      ...(agent.routines?.length ? { routines: structuredClone(agent.routines) } : {}),
     };
   }
   metrics() { return Object.fromEntries([...this.agents].map(([id, agent]) => [id, agent.session.metrics])); }
@@ -116,7 +122,7 @@ export class AgentRuntime implements WorldConnection {
     try {
       const snapshot = this.agentSnapshot(agent);
       this.store.saveAgentSession(agent.port.id, snapshot);
-      agent.port.retainCalls(snapshot.session.pendingCalls.filter(pending => !pending.result).map(pending => pending.call.id));
+      agent.port.retainCalls([...snapshot.session.pendingCalls.filter(pending => !pending.result).map(pending => pending.call.id), ...sequenceRetainedCalls(agent)]);
     }
     catch (error) { this.fail(error); throw error; }
   }
@@ -154,7 +160,7 @@ export class AgentRuntime implements WorldConnection {
   }
   private currentContext(agent: Agent) {
     this.syncMemory(agent);
-    return JSON.stringify({ record: agent.memory.record, observation: observeAgent(agent.port, agent.notes) });
+    return JSON.stringify({ record: agent.memory.record, observation: currentObservation(agent.port, agent.viewAngle), ...sequenceContext(agent) });
   }
   private agentContext(agent: Agent) {
     const tools = agentTools(agent.port, agent).schemas;
@@ -174,17 +180,18 @@ export class AgentRuntime implements WorldConnection {
     const controller = new AbortController(); agent.controller = controller;
     const tools = agentTools(agent.port, agent);
     const system = `${agent.port.instructions.replaceAll('{name}', agent.port.name)}
-You retain a fresh observation and your current memory record. Conversation history grows until context pressure requires compaction; compaction keeps recent complete action exchanges without old reasoning. Choose your own goals and observable success conditions. Keep a small next step, expected observation and reason to reconsider in set_intent when useful; update your own plan after discoveries, repeated blockage or completion. Each success condition must cover the goal you selected. An experiment establishes only the tested inputs, not every option. Keep at most ten private notes with remember; permanent learned knowledge can be searched with recall even after an object is gone. Your memory record may be shortened in the background; preserve important conclusions explicitly.
-Events arrive through tool results. An event alone does not stop movement or require a reply. Only arrival, blockage, explicit cancellation or replacement ends movement. Use wait_for_event to continue an ongoing action, choosing eventTypes if only certain interruptions matter. For an uncertain reply, choose a timeout; silence need not stop your own plans.
-Calls in one response run concurrently, not sequentially. Submit at most one body or locomotion action per response. Scans, turning and hand interactions require a free stationary body; bodyActivity remains busy until its action completes even if you look stationary. Speech and private planning may run alongside an action. Wait for a dependent step's result before issuing the next step. Actions have persistent IDs and are validated at the shared commit boundary.
-World time freezes during every agent's inference or retry. Tool waits let the shared clock advance. Self and creature positions name x, yHeight and z; voxel targets use [x,y,z], where y is height; walk_to uses horizontal x,z.
-Current tool results override old positions, inventory and fallible notes. Learned Knowledge is a condensed record of your discoveries; recall can search their original details. Ordinary visible details are observations, not discoveries. Capabilities describe possible uses and prerequisites; available tools describe what you can execute now. Missing hit or pickup while holding an object means you must free your hands, not that nearby material is unreachable. Check hand constraints and bodyActivity before changing position to solve an unavailable action. Visible block counts describe only the local view, never the whole world or your inventory. After a collision or uncertain location, look again. Never assume unseen facts. Call tools to proceed.`;
+Each request ends with your current memory record and local observation, superseding old state. Tool receipts describe what happened. History is compacted under context pressure; use remember for at most ten private notes and recall for original discoveries. Preserve useful techniques, uncertainty and commitments. An experiment establishes only the tested inputs. Use set_intent for your own goal, success condition and optional next step; reconsider after discoveries, blockage or completion.
+Choose eventTypes when starting an action or waiting; event names are listed on wait_for_event. [] defers events until completion; ordinary actions without a filter return on any event (look normally waits for completion). Deferred events remain available. An event does not stop movement or require a reply. Use wait_for_event to continue; choose a timeout for uncertain replies.
+Calls in one response run concurrently. Submit at most one body or locomotion action; speech and private planning can accompany ordinary movement. For predictable dependent steps, use run_sequence as the only physical call. Its steps are checked separately and consume normal world time. After interruption, resume with its sequenceId or cancel the remaining steps. Save your own reusable procedures with save_sequence; read them before reuse when needed. Saved procedures are not proof of success.
+Scans and hand interactions need a free stationary body. Check bodyActivity and hand constraints before repositioning. World time freezes during inference or retry; tool waits open the shared clock. Self positions use x,yHeight,z; block targets use [x,y,z]; walk_to uses horizontal x,z. Capabilities describe uses and prerequisites; listed tools describe current availability. Visible counts are local observations. Never assume unseen facts. Call tools to proceed.`;
     agent.system = system;
     agent.job = agent.session.run({
       system, schemas: tools.schemas, tools: tools.executors, signal: controller.signal,
       currentContext: () => this.currentContext(agent),
       prepareTools: () => { const current = agentTools(agent.port, agent); return { schemas: current.schemas, tools: current.executors }; },
-      resumeTool: (call, signal) => resumeAgentTool(agent.port, agent, call.id, signal),
+      resumeTool: (call, signal) => call.name === 'run_sequence'
+        ? agentTools(agent.port, agent).executors.run_sequence(call.arguments, call, signal)
+        : resumeAgentTool(agent.port, agent, call.id, signal),
       complete: (request, signal) => this.complete(agent, request, signal),
       contextWindow: this.inference.contextWindow,
       maxTokens: this.inference.maxTokens,

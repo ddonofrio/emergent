@@ -45,6 +45,7 @@ function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state
     async close() { clock.close(); await new Promise(resolve => setTimeout(resolve, 1)); store.close(); } };
 }
 const resultOf = (request: CompletionRequest) => JSON.parse(request.messages.filter(message => message.role === 'tool').at(-1)!.content!);
+const contextOf = (request: CompletionRequest) => JSON.parse(request.messages.at(-1)!.content!.split('\n\n').at(-1)!);
 
 test('a compacted record is durable, visible at its recorded tick, and survives restart while original discoveries remain searchable', async () => {
   const f = fixture();
@@ -236,9 +237,9 @@ test('state-dependent tools refresh after taking raw wood into the hands', async
     for (let i = 0; i < 80 && f.requests.length < 2; i++) { f.pump(); await Promise.resolve(); }
     await until(() => f.requests.length === 2);
     const discovery = resultOf(f.requests[1].request);
-    assert.equal(discovery.current.bodyActivity.id, discovery.action.id);
+    assert.equal(contextOf(f.requests[1].request).observation.bodyActivity.id, discovery.action.id);
     assert.equal(f.requests[1].request.tools.some(tool => tool.name === 'strike_held'), false);
-    assert.ok(discovery.current.learned.some((fact: string) => fact.includes('front_corner')));
+    assert.ok(contextOf(f.requests[1].request).record.learned.some((fact: string) => fact.includes('front_corner')));
     f.requests[1].respond('wait_for_event', { actionId: discovery.action.id, eventTypes: [] });
     await until(() => f.runtime.ready());
     for (let i = 0; i < 80 && f.requests.length < 3; i++) { f.pump(); await Promise.resolve(); }
@@ -250,9 +251,9 @@ test('state-dependent tools refresh after taking raw wood into the hands', async
     assert.deepEqual((strike.parameters.properties as {point:{enum:string[]}}).point.enum,
       ['top_center', 'bottom_center', 'front_center', 'side_center', 'front_corner', 'front_edge']);
     assert.equal(strike.description.includes('plank'), false, 'Undiscovered products stay out of the affordance description.');
-    const result = resultOf(f.requests[2].request);
-    assert.equal(result.current.self.inventory.selected, 0);
-    assert.deepEqual(result.current.self.intent, f.engine.entity('walker').intent);
+    const context = contextOf(f.requests[2].request);
+    assert.equal(context.observation.self.inventory.selected, 0);
+    assert.deepEqual(context.record.intent, f.engine.entity('walker').intent);
     assert.deepEqual(f.errors, []);
   } finally { await f.close(); }
 });
@@ -274,7 +275,7 @@ test('restart rebinds a committed body operation even when its tool is temporari
     const result = resultOf(resumed.requests[0].request);
     assert.equal(result.error, undefined);
     assert.equal(result.action.kind, 'hold');
-    assert.equal(result.current.self.inventory.selected, 0);
+    assert.equal(contextOf(resumed.requests[0].request).observation.self.inventory.selected, 0);
     assert.equal(resumed.bridge.snapshot().entities.walker.actions.filter(action => action.kind === 'hold').length, 1);
     assert.deepEqual(resumed.errors, []);
   } finally { if (resumed) await resumed.close(); else await f.close(); }
