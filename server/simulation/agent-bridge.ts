@@ -24,6 +24,7 @@ const ongoing = (action: SimulationAction) => !terminal(action) || action.physic
 const ACTION_HISTORY_LIMIT = 200;
 const RECEIPT_HISTORY_LIMIT = 1024;
 const SEEN_EVENT_LIMIT = 1024;
+const failureYieldCallId = (callId: string) => `${callId}:failure-yield`;
 
 /** Persistent simulation tasks outlive individual tool responses and model requests. */
 export class AgentBridge {
@@ -78,6 +79,10 @@ export class AgentBridge {
           if (this.closed) return Promise.reject(new Error('Simulation connection is closed.'));
           signal.throwIfAborted();
           const state = this.state(id);
+          const yieldId = failureYieldCallId(callId);
+          if (state.receipts[yieldId]) return Promise.resolve(clone(state.receipts[yieldId]));
+          const yieldRequest = state.requests.find(request => request.callId === yieldId);
+          if (yieldRequest) return this.bind(id, yieldRequest, signal);
           if (state.receipts[callId]) return Promise.resolve(clone(state.receipts[callId]));
           const action = state.actions.find(action => action.callId === callId);
           const request = state.requests.find(request => request.callId === callId);
@@ -86,6 +91,10 @@ export class AgentBridge {
         submit: (callId, command, signal) => this.submit(id, callId, command, signal),
         cancel: (callId, actionId, signal) => this.submit(id, callId, { action: 'cancel', actionId }, signal),
         wait: (callId, options, signal) => this.wait(id, callId, options, signal),
+        yieldTurn: (callId, signal) => {
+          const remainingTicks = Math.max(1, (Math.floor(this.engine.tick / TURN_TICKS) + 1) * TURN_TICKS - this.engine.tick);
+          return this.wait(id, failureYieldCallId(callId), { seconds: remainingTicks / TICKS_PER_SECOND, eventTypes: [] }, signal);
+        },
         recordContextCompaction: details => {
           this.engine.event(id, 'context-compaction', `${entity.name} compacted its conversation context.`, clone(details));
           this.checkpoint();

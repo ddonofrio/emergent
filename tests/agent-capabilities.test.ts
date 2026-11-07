@@ -57,8 +57,10 @@ test('front-edge wood experiments require an explicit orientation before enterin
   const f = fixture();
   try {
     const tools = agentTools(f.port, { notes: [] });
-    await assert.rejects(tools.executors.strike_held({ point: 'front_edge' },
-      { id: 'edge', name: 'strike_held', arguments: { point: 'front_edge' } }, f.signal), /orientation/);
+    const result = await tools.executors.strike_held({ point: 'front_edge' },
+      { id: 'edge', name: 'strike_held', arguments: { point: 'front_edge' } }, f.signal) as any;
+    assert.match(result.error, /orientation/);
+    assert.equal(result.toolControl.failures, 1);
     assert.equal(f.bridge.snapshot().entities.maker.actions.length, 0);
   } finally { f.bridge.close(); }
 });
@@ -162,13 +164,14 @@ test('repeated well-formed hit and walk failures lock after three attempts and a
     };
 
     const firstHit = await failedHit('miss-1');
-    assert.equal(firstHit.toolControl, undefined);
+    assert.equal(firstHit.toolControl.failures, 1);
     assert.equal(memory.toolFailures?.hit?.count, 1);
     const secondHit = await failedHit('miss-2');
     assert.equal(secondHit.toolControl.failures, 2);
-    assert.match(secondHit.toolControl.message, /repeated.*nothing/i);
+    assert.match(secondHit.toolControl.message, /same.*nothing/i);
     const thirdHit = await failedHit('miss-3');
     assert.equal(thirdHit.toolControl.unavailable, true);
+    assert.equal(thirdHit.toolControl.passTurn, true);
     assert.equal(memory.toolFailures?.hit?.unavailable, true);
 
     const lockedHitTools = agentTools(f.port, memory);
@@ -176,14 +179,16 @@ test('repeated well-formed hit and walk failures lock after three attempts and a
     const lockedHit = await lockedHitTools.executors.hit({ target: [0, 1, 1] },
       { id: 'miss-4', name: 'hit', arguments: { target: [0, 1, 1] } }, f.signal) as any;
     assert.equal(lockedHit.toolControl.unavailable, true);
-    await assert.rejects(lockedHitTools.executors.hit({ target: '[0,1,1]' },
-      { id: 'bad-hit', name: 'hit', arguments: { target: '[0,1,1]' } }, f.signal), /array/);
+    const malformedLockedHit = await lockedHitTools.executors.hit({ target: '[0,1,1]' },
+      { id: 'bad-hit', name: 'hit', arguments: { target: '[0,1,1]' } }, f.signal) as any;
+    assert.equal(malformedLockedHit.toolControl.unavailable, true);
     assert.equal(memory.toolFailures?.hit?.count, 3);
 
     const recall = agentTools(f.port, memory);
     await recall.executors.recall({ query: 'wood' }, { id: 'recall', name: 'recall', arguments: { query: 'wood' } }, f.signal);
     assert.equal(memory.toolFailures?.hit, undefined);
     assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'hit'), true);
+    f.advance(20);
 
     const turning = agentTools(f.port, memory).executors.turn({ angle: 90 },
       { id: 'turning', name: 'turn', arguments: { angle: 90 } }, f.signal);
@@ -196,19 +201,75 @@ test('repeated well-formed hit and walk failures lock after three attempts and a
       f.bridge.commit();
       return result as Promise<any>;
     };
-    assert.equal((await failedWalk('walk-1')).toolControl, undefined);
+    assert.equal((await failedWalk('walk-1')).toolControl.failures, 1);
     assert.equal((await failedWalk('walk-2')).toolControl.failures, 2);
-    assert.equal((await failedWalk('walk-3')).toolControl.unavailable, true);
+    const thirdWalk = failedWalk('walk-3');
+    f.advance(20);
+    assert.equal((await thirdWalk).toolControl.unavailable, true);
     assert.equal(memory.toolFailures?.walk?.unavailable, true);
-    f.advance(20); await turning;
+    await turning;
     assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'walk'), false);
 
     const unlock = agentTools(f.port, memory);
     await unlock.executors.recall({ query: 'wood' }, { id: 'unlock', name: 'recall', arguments: { query: 'wood' } }, f.signal);
     assert.equal(memory.toolFailures?.walk, undefined);
     assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'walk'), true);
-    await assert.rejects(agentTools(f.port, memory).executors.walk({ distance: '2' },
-      { id: 'bad-walk', name: 'walk', arguments: { distance: '2' } }, f.signal), /number/);
-    assert.equal(memory.toolFailures?.walk, undefined);
+    const malformedWalk = await agentTools(f.port, memory).executors.walk({ distance: '2' },
+      { id: 'bad-walk', name: 'walk', arguments: { distance: '2' } }, f.signal) as any;
+    assert.match(malformedWalk.error, /number/);
+    assert.equal((memory.toolFailures as Record<string, { count: number }> | undefined)?.walk?.count, 1);
+  } finally { f.bridge.close(); }
+});
+
+test('three malformed calls remove that tool and pass the turn until another tool is used', async () => {
+  const f = fixture();
+  try {
+    f.engine.entity('maker').inventory = null;
+    const memory: AgentToolMemory = { notes: [] };
+    const malformedHit = (id: string, target: string) => agentTools(f.port, memory).executors.hit({ target },
+      { id, name: 'hit', arguments: { target } }, f.signal) as Promise<any>;
+    assert.equal((await malformedHit('bad-hit-1', '[0,1,1]')).toolControl.failures, 1);
+    assert.equal((await malformedHit('bad-hit-2', '[1,1,1]')).toolControl.failures, 2);
+    const third = malformedHit('bad-hit-3', '[2,1,1]');
+    f.advance(20);
+    const result = await third;
+    assert.equal(result.toolControl.unavailable, true);
+    assert.equal(result.toolControl.passTurn, true);
+    assert.equal(result.forcedTurn.tick, 20);
+    assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'hit'), false);
+
+    const tools = agentTools(f.port, memory);
+    await tools.executors.recall({ query: 'wood' }, { id: 'use-other', name: 'recall', arguments: { query: 'wood' } }, f.signal);
+    assert.equal(memory.toolFailures?.hit, undefined);
+    assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'hit'), true);
+  } finally { f.bridge.close(); }
+});
+
+test('three interleaved failed calls pass the turn without removing tools below their own limit', async () => {
+  const f = fixture();
+  try {
+    f.engine.entity('maker').inventory = null;
+    const memory: AgentToolMemory = { notes: [] };
+    const hit = await agentTools(f.port, memory).executors.hit({ target: '[0,1,1]' },
+      { id: 'interleaved-hit', name: 'hit', arguments: { target: '[0,1,1]' } }, f.signal) as any;
+    const walk = await agentTools(f.port, memory).executors.walk({ distance: 'two' },
+      { id: 'interleaved-walk', name: 'walk', arguments: { distance: 'two' } }, f.signal) as any;
+    assert.equal(hit.toolControl.failures, 1);
+    assert.equal(walk.toolControl.failures, 1);
+
+    const third = agentTools(f.port, memory).executors.inspect_jump({ angle: 'left', distance: 1 },
+      { id: 'interleaved-jump', name: 'inspect_jump', arguments: { angle: 'left', distance: 1 } }, f.signal) as Promise<any>;
+    f.advance(20);
+    const jump = await third;
+    assert.equal(jump.toolControl.passTurn, true);
+    assert.equal(jump.toolControl.unavailable, undefined);
+    assert.equal(jump.forcedTurn.tick, 20);
+    assert.equal(memory.toolFailures?.hit?.unavailable, undefined);
+    assert.equal(memory.toolFailures?.walk?.unavailable, undefined);
+    assert.equal(memory.toolFailures?.inspect_jump?.unavailable, undefined);
+    const names = agentTools(f.port, memory).schemas.map(tool => tool.name);
+    assert.ok(names.includes('hit'));
+    assert.ok(names.includes('walk'));
+    assert.ok(names.includes('inspect_jump'));
   } finally { f.bridge.close(); }
 });

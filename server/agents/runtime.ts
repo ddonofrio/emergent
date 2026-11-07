@@ -6,11 +6,11 @@ import type { Store } from '../store';
 import type { AgentPort } from '../simulation/agent-port';
 import type { AgentBridge, BridgeSnapshot } from '../simulation/agent-bridge';
 import type { WorldConnection } from '../simulation/connection';
-import { agentTools, observeAgent, resumeAgentTool, type AgentToolMemory, type LookState, type RepeatedToolFailures } from './tools';
+import { agentTools, observeAgent, resumeAgentTool, type AgentToolMemory, type FailedCallCounter, type LookState, type RepeatedToolFailures } from './tools';
 import { AgentMemory, type MemorySnapshot } from './memory-record';
 import type { AgentMemoryRecord } from '../../src/core/types';
 
-export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; toolFailures?: RepeatedToolFailures; }
+export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; toolFailures?: RepeatedToolFailures; failedCalls?: FailedCallCounter; }
 export interface RuntimeSnapshot { version: 1; agents: Record<string, AgentSnapshot>; simulation: BridgeSnapshot; }
 interface Agent extends AgentToolMemory {
   port: AgentPort;
@@ -54,6 +54,7 @@ export class AgentRuntime implements WorldConnection {
       } }, session, memory,
         get notes() { return memory.record.notes; }, writeMemory: update => memory.write(update), viewAngle: saved?.viewAngle,
         ...(saved?.look ? { look: { ...saved.look } } : {}), ...(saved?.toolFailures ? { toolFailures: structuredClone(saved.toolFailures) } : {}), state: 'stopped' };
+      if (saved?.failedCalls) agent.failedCalls = { ...saved.failedCalls };
       this.agents.set(port.id, agent);
     }
   }
@@ -68,6 +69,7 @@ export class AgentRuntime implements WorldConnection {
       session: agent.session.snapshot(), notes: [...agent.notes], memory: agent.memory.snapshot(), ...(agent.viewAngle ? { viewAngle: agent.viewAngle } : {}),
       ...(agent.look ? { look: { ...agent.look } } : {}),
       ...(agent.toolFailures ? { toolFailures: structuredClone(agent.toolFailures) } : {}),
+      ...(agent.failedCalls ? { failedCalls: { ...agent.failedCalls } } : {}),
     }])) };
   }
   metrics() { return Object.fromEntries([...this.agents].map(([id, agent]) => [id, agent.session.metrics])); }

@@ -13,41 +13,41 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
 const coordinates = ([x, y, z]: Vec3) => ({ x, yHeight: y, z });
 
 export interface LookState { signature?: string; }
-export type RepeatedToolName = 'hit' | 'walk';
-export interface RepeatedToolFailure { signature: string; count: number; unavailable?: boolean; }
-export type RepeatedToolFailures = Partial<Record<RepeatedToolName, RepeatedToolFailure>>;
+export interface RepeatedToolFailure { signature: string; count: number; unavailable?: boolean; reason?: string; }
+export type RepeatedToolFailures = Record<string, RepeatedToolFailure>;
+export interface FailedCallCounter { turn: number; count: number; }
+type RepeatedToolName = 'hit' | 'walk';
 export interface AgentToolMemory {
   notes: string[]; viewAngle?: number; look?: LookState;
   toolFailures?: RepeatedToolFailures;
+  failedCalls?: FailedCallCounter;
   writeMemory?: (update: { notes?: string[]; intent?: AgentIntent }) => void;
 }
 
-const repeatedToolNames = new Set<RepeatedToolName>(['hit', 'walk']);
-const repeatedToolName = (name: string): name is RepeatedToolName => repeatedToolNames.has(name as RepeatedToolName);
-
-function clearToolFailure(memory: AgentToolMemory, name: RepeatedToolName) {
+function clearToolFailure(memory: AgentToolMemory, name: string) {
   if (!memory.toolFailures?.[name]) return;
   delete memory.toolFailures[name];
-  if (!memory.toolFailures.hit && !memory.toolFailures.walk) delete memory.toolFailures;
+  if (!Object.keys(memory.toolFailures).length) delete memory.toolFailures;
 }
 
 function unlockWithOtherTool(memory: AgentToolMemory, name: string) {
-  if (name !== 'hit') clearToolFailure(memory, 'hit');
-  if (name !== 'walk') clearToolFailure(memory, 'walk');
+  for (const [failedName, failure] of Object.entries(memory.toolFailures ?? {})) {
+    if (failedName !== name && failure.unavailable) clearToolFailure(memory, failedName);
+  }
 }
 
-function repeatedToolControl(name: RepeatedToolName, count: number) {
-  if (count === 2) return {
-    tool: name, repeatedFailure: true, failures: count,
-    message: name === 'hit'
-      ? 'You repeated the same failed hit. There is nothing you can strike at that target.'
-      : 'You repeated the same failed walk. You still cannot move that way.',
+function repeatedToolControl(name: string, count: number, failedCalls: number, passTurn: boolean, reason: string) {
+  return {
+    tool: name, failed: true, failures: count, failedCallsThisTurn: failedCalls,
+    ...(count >= 2 ? { repeatedFailure: true } : {}),
+    ...(count >= 3 ? { unavailable: true } : {}),
+    ...(passTurn ? { passTurn: true } : {}),
+    message: count >= 3
+      ? `${name} has failed three times and is unavailable until you use another tool. ${reason}`
+      : passTurn
+        ? `Three tool calls have failed this turn. Passing the turn. ${reason}`
+        : count === 2 ? `The same ${name} call has failed twice. ${reason}` : reason,
   };
-  if (count >= 3) return {
-    tool: name, repeatedFailure: true, failures: count, unavailable: true,
-    message: `${name} has failed three times and is unavailable until you use another tool.`,
-  };
-  return undefined;
 }
 
 const lookSignature = (value: Record<string, unknown>) => {
@@ -186,40 +186,77 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
     enum: limited(values), description: `${description} Coordinates are [x,y,z], with y as height.` });
   const present = (result: unknown) => result && typeof result === 'object' && 'reason' in result && 'actions' in result && 'events' in result
     ? toolOutcome(result as ToolOutcome, currentContext(port)) : result;
+  const failureReason = (result: unknown) => {
+    if (!result || typeof result !== 'object') return undefined;
+    const value = result as { error?: unknown; reason?: unknown; action?: { result?: { ok?: unknown; message?: unknown } }; events?: { message?: unknown }[] };
+    if (typeof value.error === 'string') return value.error;
+    if (value.action?.result?.ok === false) return typeof value.action.result.message === 'string' ? value.action.result.message : 'The tool call failed.';
+    if (value.reason === 'rejected') {
+      const message = value.events?.find(event => typeof event.message === 'string')?.message;
+      return typeof message === 'string' ? message : 'The tool call was rejected.';
+    }
+    return undefined;
+  };
+  const fail = async (name: string, args: Record<string, unknown>, call: Parameters<ToolExecutor>[1], signal: AbortSignal,
+    startTurn: number, result: unknown, reason: string, incrementTool = true) => {
+    const signature = createHash('sha256').update(JSON.stringify(args)).digest('hex');
+    const previous = memory.toolFailures?.[name];
+    const count = incrementTool ? (previous?.count ?? 0) + 1 : previous?.count ?? 1;
+    memory.toolFailures ??= {};
+    const newlyUnavailable = incrementTool && count >= 3 && !previous?.unavailable;
+    memory.toolFailures[name] = {
+      signature, count, reason,
+      ...((previous?.unavailable || count >= 3) ? { unavailable: true } : {}),
+    };
+    if (memory.failedCalls?.turn !== startTurn) memory.failedCalls = { turn: startTurn, count: 0 };
+    memory.failedCalls.count++;
+    const passTurn = newlyUnavailable || memory.failedCalls.count >= 3;
+    const control = repeatedToolControl(name, count, memory.failedCalls.count, passTurn, reason);
+    let forcedTurn: ReturnType<typeof toolOutcome> | undefined;
+    if (passTurn && Math.floor(port.tick / TURN_TICKS) === startTurn) {
+      forcedTurn = toolOutcome(await port.yieldTurn(call.id, signal), currentContext(port));
+    }
+    const displayed = present(result);
+    return {
+      ...(displayed && typeof displayed === 'object' ? displayed : { error: reason }),
+      toolControl: control,
+      ...(passTurn ? { forcedTurn: forcedTurn ?? { tick: port.tick, reason: 'The world already advanced to the next turn.' } } : {}),
+    };
+  };
   const tool = (name: string, description: string, parameters: Record<string, unknown>, execute: ToolExecutor, advertise = true) => {
     const schema = { name, description, parameters };
-    if (advertise) schemas.push(schema);
+    if (advertise && !memory.toolFailures?.[name]?.unavailable) schemas.push(schema);
     executors[name] = async (args, call, signal) => {
       unlockWithOtherTool(memory, name);
-      const repeated = repeatedToolName(name), signature = repeated ? repeatedSignature(name, args) : undefined;
-      if (repeated && !signature) validateArguments(schema, args);
-      if (repeated && memory.toolFailures?.[name]?.unavailable) {
-        return { error: repeatedToolControl(name, memory.toolFailures[name]!.count)!.message,
-          toolControl: repeatedToolControl(name, memory.toolFailures[name]!.count) };
-      }
+      const startTurn = Math.floor(port.tick / TURN_TICKS);
+      const locked = memory.toolFailures?.[name];
+      if (locked?.unavailable) return fail(name, args, call, signal, startTurn,
+        { error: locked.reason ?? `${name} is unavailable until you use another tool.` },
+        locked.reason ?? `${name} is unavailable until you use another tool.`, false);
+      const repeated = name === 'hit' || name === 'walk', signature = repeated ? repeatedSignature(name, args) : undefined;
       let attemptOnly = false;
       try { validateArguments(schema, args); }
       catch (error) {
         // A structurally valid hit may name a stale or empty target. Let the
         // simulation execute the physical attempt instead of rejecting its enum.
-        if (!repeated || !signature) throw error;
-        attemptOnly = name === 'hit';
+        if (name === 'hit' && signature) attemptOnly = true;
+        else {
+          signal.throwIfAborted();
+          const reason = error instanceof Error ? error.message : 'Tool arguments are invalid.';
+          return fail(name, args, call, signal, startTurn, { error: reason }, reason);
+        }
       }
-      const result = await execute(attemptOnly ? { ...args, attemptOnly: true } : args, call, signal);
-      if (!repeated || !signature) return present(result);
-      const outcome = result as ToolOutcome, dispatchError = result && typeof result === 'object' && 'error' in result;
-      const failed = outcome?.action?.result?.ok === false || dispatchError;
-      if (!failed) {
-        clearToolFailure(memory, name);
-        return present(result);
+      let result: unknown;
+      try { result = await execute(attemptOnly ? { ...args, attemptOnly: true } : args, call, signal); }
+      catch (error) {
+        signal.throwIfAborted();
+        const reason = error instanceof Error ? error.message : 'Tool execution failed.';
+        return fail(name, args, call, signal, startTurn, { error: reason }, reason);
       }
-      const previous = memory.toolFailures?.[name];
-      const count = previous?.signature === signature ? previous.count + 1 : 1;
-      memory.toolFailures ??= {};
-      memory.toolFailures[name] = { signature, count, ...(count >= 3 ? { unavailable: true } : {}) };
-      const displayed = present(result);
-      const control = repeatedToolControl(name, count);
-      return control && displayed && typeof displayed === 'object' ? { ...displayed, toolControl: control } : displayed;
+      const reason = failureReason(result);
+      if (reason) return fail(name, args, call, signal, startTurn, result, reason);
+      clearToolFailure(memory, name);
+      return present(result);
     };
   };
   const submit = (name: Action['action'], description: string, parameters: Record<string, unknown>, prepare: (args: Record<string, unknown>) => Action = args => ({ ...args, action: name } as Action), advertise = true) =>
@@ -351,12 +388,18 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
       else { memory.notes = notes; port.remember(notes); }
       return { notes };
     });
-  // Keep non-advertised dispatchers for stale or hallucinated calls. Argument
-  // shape is still validated exactly; only well-formed walk and hit calls take
-  // part in repeated-failure control.
+  // Keep non-advertised dispatchers for stale or hallucinated calls so their
+  // failures enter the same counters instead of starting simulation work.
   if (!executors.walk) tool('walk', 'Walk a relative distance and optional body-relative angle.', repeatedParameters.walk,
     async () => ({ error: 'walk is not currently available. Use a listed tool or wait for the current action.' }), false);
-  if (!executors.hit) submit('hit', 'Strike a block with empty hands.', repeatedParameters.hit,
-    args => ({ ...args, action: 'hit', ...(!held && stationary ? { attemptOnly: true } : {}) } as Action), false);
+  if (!executors.hit) {
+    const reason = view.following
+      ? `hit is unavailable while following ${view.following.name}. Use stop_follow first.`
+      : held ? 'hit requires empty hands. Use store first.'
+        : bodyActivity ? `hit is unavailable while your body is busy with ${bodyActivity.id}. Wait for that action to finish.`
+          : view.self.motion ? 'hit is unavailable while moving. Wait for movement to finish or cancel it.'
+            : 'hit is not currently available because no reachable block target is listed. Use another listed tool.';
+    tool('hit', 'Strike a block with empty hands.', repeatedParameters.hit, async () => ({ error: reason }), false);
+  }
   return { schemas, executors };
 }

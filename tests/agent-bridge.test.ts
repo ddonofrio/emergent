@@ -391,6 +391,26 @@ test('filtered event choice and deferred events survive restart until timeout', 
   } finally { bridge.close(); }
 });
 
+test('a forced failure turn survives restart and resumes from the original tool call ID', async () => {
+  const setup = fixture();
+  const paused = new AbortController();
+  const pending = setup.port.yieldTurn('failed-tool-call', paused.signal);
+  const cancelled = assert.rejects(pending, /Pause/);
+  const state = setup.engine.state(), snapshot = setup.bridge.snapshot();
+  paused.abort(new Error('Pause')); await cancelled; setup.bridge.close();
+
+  const engine = new Engine(island, state), bridge = new AgentBridge(engine, snapshot), port = bridge.ports()[0];
+  try {
+    const resumed = port.resume('failed-tool-call', new AbortController().signal)!;
+    assert.ok(resumed);
+    for (let tick = 0; tick < 20; tick++) { engine.step(); bridge.afterStep(); }
+    const result = await resumed;
+    assert.equal(result.reason, 'timeout');
+    assert.equal(result.tick, 20);
+    assert.ok(Object.keys(bridge.snapshot().entities.a.receipts).some(id => id.startsWith('failed-tool-call:')));
+  } finally { bridge.close(); }
+});
+
 test('closing a bridge revokes pending waits and prevents deferred checkpoints', async () => {
   const setup = fixture(); setup.bridge.close();
   let checkpoints = 0;
