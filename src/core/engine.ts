@@ -4,7 +4,7 @@ import { exchangeInventory, normalizeInventory } from './inventory';
 import { itemUseDescription, itemUseKnowledge, recipeRemovals } from './crafting';
 import { knowledgeDescription, observedMaterialKnowledge } from './knowledge';
 import { isRawBlock as rawBlock } from './materials';
-import { speechProblem, speechTurn, speechWordCount, speechWordsRemaining } from './speech';
+import { observerSpeechProblem, speechProblem, speechTurn, speechWordCount, speechWordsRemaining } from './speech';
 import { clone, distance, key, type Action, type ActionResult, type BlockImpactNotice, type Body, type EncounterNotice, type Entity, type EntitySighting, type Frame, type HeardVoice, type MovementIssue, type NavigationPath, type NavigationReport, type Observation, type Stack, type TerrainNotice, type UniverseModule, type Vec3, type WorldEvent, type WorldState } from './types';
 
 const ok = (message: string): ActionResult => ({ ok: true, message });
@@ -318,6 +318,23 @@ export class Engine {
     if(seen.size)this.impactNotices.set(id,(this.impactNotices.get(id)??[]).filter(notice=>!seen.has(notice.eventId)));
   }
   private canSpeakTo(speaker:Entity,listener:Entity){return speaker.id!==listener.id&&this.active(speaker)&&this.active(listener)&&distance(this.eye(speaker),this.eye(listener))<=this.module.manifest.perception.range&&this.voxels.clearLine(this.eye(speaker),this.eye(listener));}
+  broadcastSpeech(text: unknown): ActionResult {
+    const voice = this.module.observerVoice;
+    if (!voice) return fail('This universe has no observer voice.');
+    const problem = observerSpeechProblem(text);
+    if (problem) return fail(problem);
+    const word = (text as string).trim(), eventId = this.nextEvent;
+    const recipients = this.entities.filter(entity => this.active(entity));
+    for (const listener of recipients) {
+      const inbox = this.inbox.get(listener.id) ?? [];
+      inbox.push({ eventId, from: voice.name, speakerId: voice.id, word, tick: this.tick, direction: 'above', description: voice.description });
+      this.inbox.set(listener.id, inbox.slice(-16));
+    }
+    this.event(voice.id, 'speech', `${voice.description} ${voice.name}: ${word}`, {
+      word, speakerName: voice.name, description: voice.description, broadcast: true, recipientIds: recipients.map(entity => entity.id),
+    });
+    return { ok: true, message: 'Your voice reaches the world.', feedback: { recipientIds: recipients.map(entity => entity.id), eventId } };
+  }
   canFollow(follower:Entity,target:Entity,viewAngle=0){
     return follower.id!==target.id&&this.active(follower)&&this.active(target)&&!this.followersOf(follower).length&&distance(follower.position,target.position)<=20&&this.visible({...follower,yaw:follower.yaw+viewAngle},this.eye(target),false,20);
   }
@@ -330,7 +347,7 @@ export class Engine {
       inbox.push({eventId,from:speaker.name,speakerId:speaker.id,word,tick:this.tick,direction:this.direction(listener,speaker.position),distance:Math.round(distance(this.eye(listener),this.eye(speaker))*10)/10});
       this.inbox.set(listener.id,inbox.slice(-16));
     }
-    this.event(speaker.id,'speech',`${speaker.name} says "${word}".`,{word,recipientIds:recipients.map(other=>other.id),facing:speaker.yaw});
+    this.event(speaker.id,'speech',`${speaker.name} says "${word}".`,{word,speakerName:speaker.name,recipientIds:recipients.map(other=>other.id),facing:speaker.yaw});
     if(respond)for(const listener of recipients){
       const reply=this.module.respondToSpeech?.(listener,speaker,word);
       if(!reply)continue;

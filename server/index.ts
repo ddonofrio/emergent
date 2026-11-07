@@ -91,6 +91,12 @@ const server = createServer(async (req, res) => {
       const { engine, store, clock: turnClock } = runtime;
       const metadata = () => runtime.metadata(publicInferenceConfig(runtime));
       const apiPath = `/api/${universeRoute[2]}`;
+      if (apiPath === '/api/speech' && req.method === 'POST') {
+        const data = await requestJson(req, 8192);
+        const result = runtime.speak(data.text);
+        const event = result.ok ? engine.recentEvents.find(event => event.id === result.feedback?.eventId) : undefined;
+        json(res, result.ok ? { ...result, event } : { ...result, error: result.message }, result.ok ? 200 : 400); return;
+      }
       if (apiPath === '/api/inference-config' && req.method === 'GET') { json(res, publicInferenceConfig(runtime)); return; }
       if (apiPath === '/api/models' && req.method === 'POST') {
         try {
@@ -158,6 +164,11 @@ const server = createServer(async (req, res) => {
       if (req.method !== 'GET') { json(res, { error: 'Method not allowed.' }, 405); return; }
       const requestedTick = Number(url.searchParams.get('tick') ?? engine.tick);
       if (!Number.isFinite(requestedTick) || requestedTick < 0) { json(res, { error: 'Invalid tick.' }, 400); return; }
+      if (apiPath === '/api/speech') {
+        const beforeId = Number(url.searchParams.get('before') ?? Number.MAX_SAFE_INTEGER);
+        if (!Number.isSafeInteger(beforeId) || beforeId < 1) { json(res, { error: 'Invalid speech cursor.' }, 400); return; }
+        json(res, store.speechAt(requestedTick, beforeId)); return;
+      }
       if (apiPath === '/api/meta') { json(res, metadata()); return; }
       if (apiPath === '/api/state') { const tick=Math.max(0,Math.min(Math.floor(requestedTick),store.latestTick()));json(res, { ...metadata(), state: store.stateAt(tick), events: store.eventsAt(tick), recordedMetrics: store.metricsAt(tick), recordedSecondsPerTurn: store.secondsPerTurnAt(tick) }); return; }
       if (apiPath === '/api/memory') { const actor=url.searchParams.get('actor')?.trim();if(!actor){json(res,{error:'Actor is required.'},400);return;}json(res,store.memoryAt(requestedTick,actor));return; }

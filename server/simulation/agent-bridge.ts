@@ -279,7 +279,7 @@ export class AgentBridge {
       for (const id of data.recipientIds) {
         if (!this.entities[id]) continue;
         const heard = this.engine.inbox.get(id)?.find(heard => heard.eventId === event.id);
-        if (heard) this.queue(id, { id: event.id, tick: event.tick, type: 'speech', message: `${heard.from}: ${heard.word}`, data: clone(heard) });
+        if (heard) this.queue(id, { id: event.id, tick: event.tick, type: 'speech', message: `${heard.description ? `${heard.description} ` : ''}${heard.from}: ${heard.word}`, data: clone(heard) });
       }
     } else if (this.entities[event.actor] && event.type === 'terrain-perceived') {
       this.queue(event.actor, { id: event.id, tick: event.tick, type: 'terrain', message: event.message, data: clone(event.data) });

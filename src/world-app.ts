@@ -5,10 +5,13 @@ import { key, unkey, type Frame, type UniverseManifest, type WorldEvent, type Wo
 import { knowledgeDescription } from './core/knowledge';
 import { loadUniverse } from './universes';
 import { entityDisplayStatus } from './view/entity-status';
+import { firstShoreAppearance } from './universes/first-shore/appearance';
+import './universes/first-shore/style.css';
+import { WorldChat } from './view/world-chat';
 
 interface AgentMetrics { llmCalls?:number; inputTokens?:number; outputTokens?:number; cachedInputTokens?:number; }
 interface ModelRequestStatus { state:'unknown'|'ok'|'bad'; inFlight:number; detail?:string; }
-interface Metadata { universe: UniverseManifest; mode: 'llm' | 'waiting'; model: string; inferenceConfig?:InferenceConfig; metrics?:Record<string,AgentMetrics>; providerStatus?:Record<string,ModelRequestStatus>; latestTick: number; runtime: TurnStatus; secondsPerTurn?:number; }
+interface Metadata { universe: UniverseManifest; observerVoice?:{name:string}; mode: 'llm' | 'waiting'; model: string; inferenceConfig?:InferenceConfig; metrics?:Record<string,AgentMetrics>; providerStatus?:Record<string,ModelRequestStatus>; latestTick: number; runtime: TurnStatus; secondsPerTurn?:number; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; recordedMetrics?:Record<string,AgentMetrics>; recordedSecondsPerTurn?:number; }
 interface ModelProvider { id:string; type:string; name:string; enabled?:boolean; baseUrl:string; model:string; region?:string; tokenless?:boolean; contextWindow?:number; reasoning?:string; hasApiKey?:boolean; apiKey?:string; clearApiKey?:boolean; hasVastToken?:boolean; vastToken?:string; clearVastToken?:boolean; vastContainerLabel?:string; }
 interface InferenceConfig { version:1; parallelRequests?:boolean; providers:ModelProvider[]; }
@@ -18,6 +21,7 @@ if(!universeId)throw new Error('A universe route is required.');
 const worldApi=`/api/universes/${universeId}`;
 const rosterLayout=universeId==='robots-vs-robots';
 document.body.classList.toggle('roster-layout',rosterLayout);
+document.body.dataset.universe=universeId;
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <main id="main">
@@ -69,7 +73,7 @@ if(rosterLayout){
   $('roster-view-controls').append(document.querySelector('.timeline-view-controls')!);
 }
 let view: WorldView;
-try { view = new WorldView($('world'), id => selectEntity(id)); }
+try { view = new WorldView($('world'), id => selectEntity(id), universeId==='first-shore'?firstShoreAppearance:undefined); }
 catch { $('loading').textContent = 'WebGL is unavailable. Enable hardware acceleration and reload to observe the world.'; throw new Error('WebGL unavailable.'); }
 let meta: Metadata;
 let shown: WorldState;
@@ -82,6 +86,8 @@ let shownSecondsPerTurn:number|undefined;
 let epoch = 0, seekTimer: ReturnType<typeof setTimeout>, replayFrames: Frame[] = [], fetching = false, replayClock = 0, replayRequest = 0, lastPlayback = performance.now(), lastUi = 0, nextReplayFetch = 0, seeking = false;
 let dayCount = 0,detailsSignature='',statsSignature='';
 let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[];learned?:string[]}|undefined;
+const worldChat = new WorldChat($('world'),worldApi,()=>({available:!!meta,live:isLive&&!seeking,tick:cursor,
+  entities:shown?.entities??[],voice:meta?.observerVoice,settingsOpen:!$('llm-settings').classList.contains('hidden')}));
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
 let inferenceConfig:InferenceConfig={version:1,parallelRequests:true,providers:[]};
@@ -237,7 +243,7 @@ stream.addEventListener('frame', event => {
   if (isLive) {
     const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;
     acceptTurnSpeed(frame);
-    shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);
+    shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);worldChat.add(frame.events);
     if (frame.events.length) renderJournal();
   }
   if(frame.events.some(event=>event.type==='memory'&&event.actor===selected))void loadMemory();
@@ -248,7 +254,7 @@ function goLive() {
   if (!meta || !liveDynamic) return;
   epoch++; replayRequest++; fetching = false; seeking = false; clearTimeout(seekTimer); isLive = true; playing = false; scrubTarget = null; replayFrames = [];
   shown = { ...liveDynamic, blocks: [...liveCells].map(([k,kind]) => [...unkey(k),kind]), ...(liveRemoved.size?{removedBlocks:[...liveRemoved]}:{}) };
-  cursor = latest; shownMetrics=meta.metrics;shownSecondsPerTurn=meta.secondsPerTurn;events = liveEvents; view.load(shown,meta.universe); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
+  cursor = latest; shownMetrics=meta.metrics;shownSecondsPerTurn=meta.secondsPerTurn;events = liveEvents; view.load(shown,meta.universe);worldChat.reset(); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
 }
 async function seek(tick: number) {
   const request = ++epoch; replayRequest++; fetching = false; seeking = true; isLive = false; playing = false; scrubTarget = null; replayFrames = []; view.hold();
@@ -256,7 +262,7 @@ async function seek(tick: number) {
   try {
     const response = await fetch(`${worldApi}/state?tick=${cursor}`); if (!response.ok) throw new Error('Could not load recorded history.');
     const data = await response.json() as Boot; if (request !== epoch) return;
-    shown = data.state; cursor = shown.tick; replayClock = cursor;shownMetrics=data.recordedMetrics;shownSecondsPerTurn=data.recordedSecondsPerTurn;seeking = false; events = data.events; view.load(shown,meta.universe); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
+    shown = data.state; cursor = shown.tick; replayClock = cursor;shownMetrics=data.recordedMetrics;shownSecondsPerTurn=data.recordedSecondsPerTurn;seeking = false; events = data.events; view.load(shown,meta.universe);worldChat.reset(data.events); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
   } catch (error) { if (request === epoch) toast(error instanceof Error ? error.message : 'History unavailable.'); }
   finally { if (request === epoch) seeking = false; }
 }
@@ -282,7 +288,7 @@ function playback(now: number) {
       replayClock = advancePlayback(replayClock, dt, speed, Math.min(destination,replayFrames.at(-1)!.tick));
       let changed = false,memoryChanged=false;
       while (replayFrames.length && replayFrames[0].tick <= replayClock) {
-        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] };const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;acceptTurnSpeed(frame);view.update(frame,false,speed); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
+        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] };const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;acceptTurnSpeed(frame);view.update(frame,false,speed);worldChat.add(frame.events); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
       }
       if (changed) { renderTimeline(); renderInspector(); renderJournal(); }
       if(memoryChanged)void loadMemory();
@@ -290,7 +296,7 @@ function playback(now: number) {
     }
     // Stay in replay at the recording edge. Only the Live button changes observer mode.
   }
-  requestAnimationFrame(playback);
+  worldChat.render(now);requestAnimationFrame(playback);
 }
 requestAnimationFrame(playback);
 
@@ -545,4 +551,4 @@ window.addEventListener('keydown',event=>{
   if(!direction||shown?.entities.find(entity=>entity.id===selected)?.controller!=='static')return;
   event.preventDefault();void moveSelected(direction);
 });
-window.addEventListener('beforeunload', () => { stream.close(); view.dispose(); });
+window.addEventListener('beforeunload', () => { stream.close();worldChat.dispose(); view.dispose(); });

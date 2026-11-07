@@ -1,0 +1,22 @@
+export const firstShoreAppearance = {
+  background: '#c5d8cf',
+  ambientSky: '#fff2d9',
+  ambientGround: '#889270',
+  ambientIntensity: 2.3,
+  sunlight: '#ffe2b5',
+  sunlightIntensity: 2.7,
+  exposure: 1.08,
+  water: { color: '#78aaa4', opacity: .88, roughness: .62, metalness: .03 },
+  seabed: '#537e7a',
+  blockColors: {
+    grass: '#93ab77',
+    dirt: '#a18768',
+    sand: '#e0cc9f',
+    stone: '#99a39b',
+    wood: '#987052',
+    leaves: '#6f9869',
+    plant: '#acbc80',
+    water: '#78aaa4',
+  },
+  roundedBlocks: ['leaves'],
+};

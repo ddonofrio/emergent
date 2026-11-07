@@ -30,6 +30,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, tick INTEGER NOT NULL, actor TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_tick ON events(tick);
       CREATE INDEX IF NOT EXISTS events_actor_type_id ON events(actor, type, id);
+      CREATE INDEX IF NOT EXISTS events_speech_id ON events(id) WHERE type = 'speech';
       CREATE TABLE IF NOT EXISTS agent_sessions (id TEXT PRIMARY KEY, data BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS simulation_runtime (id INTEGER PRIMARY KEY CHECK(id = 1), data BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS legacy_metrics (tick INTEGER PRIMARY KEY, data BLOB NOT NULL);
@@ -103,6 +104,14 @@ export class Store {
   eventsAt(tick: number, actor = '', limit = 100): WorldEvent[] {
     const rows = (actor ? this.db.prepare('SELECT data FROM events WHERE tick <= ? AND actor = ? ORDER BY id DESC LIMIT ?').all(tick, actor, limit) : this.db.prepare('SELECT data FROM events WHERE tick <= ? ORDER BY id DESC LIMIT ?').all(tick, limit)) as { data: string }[];
     return rows.map(r => JSON.parse(r.data)).reverse();
+  }
+  speechAt(tick: number, beforeId = Number.MAX_SAFE_INTEGER, limit = 60) {
+    const rows = this.db.prepare(`SELECT data FROM (
+      SELECT id, data, ROW_NUMBER() OVER (PARTITION BY actor, json_extract(data, '$.data.word') ORDER BY id) AS occurrence
+      FROM events WHERE type = 'speech' AND tick <= ?
+    ) WHERE occurrence = 1 AND id < ? ORDER BY id DESC LIMIT ?`)
+      .all(tick, beforeId, limit + 1) as { data: string }[];
+    return { events: rows.slice(0, limit).map(row => JSON.parse(row.data) as WorldEvent).reverse(), hasMore: rows.length > limit };
   }
   metricsAt(tick: number) {
     const row = this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = 'world' AND type = 'llm-metrics' ORDER BY id DESC LIMIT 1").get(tick) as {data:string} | undefined;

@@ -1,5 +1,7 @@
 # First Shore
 
+The observer chat opens with T; Enter speaks as GOD and Escape closes it. Closed chat lines fade after eight real seconds. Open chat keeps a scrollable, paginated conversation from the recording, including older messages and the selected replay moment. Repeated text from the same speaker appears once in both views; every utterance still reaches listeners and the recording. GOD is an island-wide voice described to listeners as powerful and echoing from the sky. Messages are delivered through the existing speech event queue, including while time is frozen; agents keep their own goals and decisions.
+
 Object capabilities and crafting recipes live in `crafting.ts`. The engine handles reach, inventory exchanges and action validation; the agent tools project the universe's definitions into local capabilities. Add recipes using the existing surface experiments or ingredient combinations there. A genuinely new physical interaction still needs a shared engine operation; a new visual shape needs rendering support.
 
 An item's first hold records `item-uses:<kind>` once in durable Learned Knowledge, including every named experiment point and required orientation. This reveals methods and prerequisites, never experiment products. A successful experiment separately records its exact learned recipe. Stored items retain their conditional capabilities, even when no compatible target is nearby. `recall` searches the agent's original permanent discoveries, including methods for objects it no longer owns, without exposing untried results.

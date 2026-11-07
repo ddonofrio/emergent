@@ -64,6 +64,66 @@ test('speech budgets renew exactly at each committed world-second boundary', () 
   assert.equal(engine.act('a', { action: 'say', word: 'More' }).ok, false);
 });
 
+test('the observer voice reaches active island listeners without spending time or ordinary speech budgets', () => {
+  const disabled = { ...creature('disabled', [-10, 1, .5]), enabled: false };
+  const engine = flatWorld([creature('a'), creature('far', [19, 1, 19]), disabled]);
+  assert.equal(engine.act('a', { action: 'walk', distance: 8 }).ok, true);
+  const motion = structuredClone(engine.entity('a').motion);
+  assert.equal(engine.act('a', { action: 'say', word: 'Hello' }).ok, true);
+  assert.equal(engine.notices('far').heard.length, 0, 'Ordinary speech still has a limited hearing range.');
+  const remaining = engine.remainingSpeechWords('a');
+  const result = engine.broadcastSpeech('Watch the clouds move over your island.');
+  assert.equal(result.ok, true);
+  assert.equal(engine.tick, 0);
+  assert.equal(engine.remainingSpeechWords('a'), remaining);
+  assert.deepEqual(engine.entity('a').motion, motion);
+  for (const id of ['a', 'far']) {
+    const heard = engine.notices(id).heard.at(-1)!;
+    assert.equal(heard.from, 'GOD'); assert.equal(heard.direction, 'above');
+    assert.match(heard.description!, /powerful.*echoing.*sky/);
+    assert.equal(heard.word, 'Watch the clouds move over your island.');
+    assert.equal(heard.distance, undefined);
+    assert.equal(engine.entity(id).intent, undefined);
+  }
+  assert.equal(engine.notices('disabled').heard.length, 0);
+});
+
+test('invalid or unsupported observer speech leaves no event or inbox entry', () => {
+  const engine = flatWorld();
+  for (const input of [undefined, {}, '', '   ', 'x'.repeat(1001)]) assert.equal(engine.broadcastSpeech(input).ok, false);
+  assert.equal(engine.nextEvent, 1); assert.equal(engine.inbox.size, 0);
+  const unsupported = new Engine({ ...engine.module, observerVoice: undefined });
+  assert.equal(unsupported.broadcastSpeech('Hello').ok, false);
+  assert.equal(unsupported.nextEvent, 1);
+});
+
+test('recorded speech pages preserve the entire chat, same-tick ordering, and replay boundaries', () => {
+  const engine = flatWorld(), store = new Store(':memory:', engine.module.manifest);
+  try {
+    store.record(engine.frame(), engine.state());
+    for (let index = 0; index < 135; index++) {
+      engine.broadcastSpeech(`Message ${index}`);
+      engine.event('world', 'check', 'An unrelated event.');
+    }
+    for (let index = 0; index < 70; index++) engine.broadcastSpeech('Message 0');
+    store.record(engine.frame());
+    engine.step(); engine.broadcastSpeech('Future message'); store.record(engine.frame());
+    let before = Number.MAX_SAFE_INTEGER;
+    const all: WorldEvent[] = [];
+    for (;;) {
+      const page = store.speechAt(0, before);
+      all.unshift(...page.events);
+      if (!page.hasMore) break;
+      assert.ok(page.events.length > 0); before = page.events[0].id;
+    }
+    assert.equal(all.length, 135);
+    assert.deepEqual(all.map(event => (event.data as { word: string }).word), Array.from({ length: 135 }, (_, index) => `Message ${index}`));
+    assert.equal(new Set(all.map(event => event.id)).size, 135);
+    assert.equal(store.eventsAt(0, '', 1000).filter(event => event.type === 'speech').length, 205);
+    assert.equal(store.speechAt(1).events.at(-1)?.message.includes('Future message'), true);
+  } finally { store.close(); }
+});
+
 test('local notices and observations preserve occlusion, range, and private entity boundaries', () => {
   const speaker = creature('a');
   speaker.intent = { goal: 'Private intention', successCondition: 'Self assessed', status: 'active' };

@@ -14,6 +14,32 @@ const until = async (predicate: () => boolean) => {
   assert.ok(predicate());
 };
 
+test('speaking to a stopped world records the voice and restores the undelivered event after restart', () => {
+  const temporaryRoot = resolve('.tmp'); mkdirSync(temporaryRoot, { recursive: true });
+  const directory = mkdtempSync(join(temporaryRoot, 'sky-voice-test-'));
+  const failures: unknown[] = [], config = { providers: [], fatal(error: unknown) { failures.push(error); } };
+  let runtime: UniverseRuntime | undefined = new UniverseRuntime(module, directory, config);
+  try {
+    const result = runtime.speak('I am speaking from the sky.');
+    assert.equal(result.ok, true); assert.equal(runtime.engine.tick, 0);
+    assert.equal(runtime.clock.status().enabled, false);
+    assert.equal(runtime.store.speechAt(0).events.length, 1);
+    const eventId = result.feedback!.eventId;
+    runtime.close(); runtime = undefined;
+    runtime = new UniverseRuntime(module, directory, config);
+    assert.equal(runtime.store.speechAt(0).events.length, 1);
+    const queued = runtime.bridge.snapshot().entities.a.events.find(event => event.id === eventId)!;
+    assert.match(queued.message, /powerful.*echoing.*sky/);
+    assert.equal((queued.data as { word: string }).word, 'I am speaking from the sky.');
+    assert.equal(runtime.engine.notices('a').heard.at(-1)?.eventId, eventId);
+    assert.equal(runtime.engine.tick, 0); assert.deepEqual(failures, []);
+  } finally {
+    runtime?.close();
+    assert.ok(resolve(directory).startsWith(temporaryRoot + sep));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('an authoritative write failure inside a tool stops the loop without fabricating a tool result', async t => {
   const temporaryRoot = resolve('.tmp'); mkdirSync(temporaryRoot, { recursive: true });
   const directory = mkdtempSync(join(temporaryRoot, 'agent-storage-test-'));

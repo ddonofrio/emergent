@@ -68,7 +68,7 @@ export interface WorldEvent { id: number; tick: number; time: number; day: numbe
 export interface EncounterNotice { eventId:number; tick:number; otherId:string; otherName:string; message:string; }
 export interface TerrainNotice { eventId:number; tick:number; target:Vec3; kind:string; message:string; }
 export interface BlockImpactNotice { eventId:number; tick:number; itemId:string; kind:string; message:string; }
-export interface HeardVoice { eventId: number; from: string; word: string; tick: number; speakerId?: string; direction?: string; distance?: number; }
+export interface HeardVoice { eventId: number; from: string; word: string; tick: number; speakerId?: string; direction?: string; distance?: number; description?: string; }
 export interface EntitySighting extends Pick<Entity,'id'|'name'|'kind'|'position'> { holding: Pick<Stack,'kind'|'contents'> | null; }
 export interface DynamicState { tick: number; time: number; entities: Entity[]; bodies: Body[]; lost: number; inbox: Record<string, HeardVoice[]>; blockDamage: Record<string, number>; discoveries: Record<string, string[]>; contacts:Record<string,string[]>; encounterNotices:Record<string,EncounterNotice[]>; terrainNotices:Record<string,TerrainNotice[]>; impactNotices?:Record<string,BlockImpactNotice[]>; }
 export interface WorldState extends DynamicState { blocks: Block[]; removedBlocks?: string[]; }
@@ -119,6 +119,7 @@ export interface WorldStateMigration {
 export interface WanderContext { tick: number; clearDistance(yaw: number, distance: number): number; }
 export interface UniverseModule {
   manifest: UniverseManifest;
+  observerVoice?: { id: string; name: string; description: string };
   generate(): { blocks: Block[]; entities: Entity[] };
   migrateState?(state: WorldState): WorldStateMigration | undefined;
   initializeAutomaton?(entity: Entity): void;

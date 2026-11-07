@@ -2,6 +2,12 @@ import { TURN_TICKS } from './time';
 import type { Entity } from './types';
 
 export const SPEECH_WORD_LIMIT = 3;
+export const OBSERVER_SPEECH_MAX_LENGTH = 1000;
+export function observerSpeechProblem(text: unknown) {
+  if (typeof text !== 'string' || !text.trim()) return 'Enter a message to speak.';
+  if (text.length > OBSERVER_SPEECH_MAX_LENGTH) return `Keep your message within ${OBSERVER_SPEECH_MAX_LENGTH} characters.`;
+  return undefined;
+}
 const words = new Intl.Segmenter('en', { granularity: 'word' });
 export const speechWordCount = (text: string) => [...words.segment(text)].filter(part => part.isWordLike).length;
 // Commands commit at the current world instant before their shared second advances.

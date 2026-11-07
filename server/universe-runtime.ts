@@ -68,6 +68,7 @@ export class UniverseRuntime {
     return { universe: this.universe.manifest, mode: this.agents.mode,
       model: this.agents.inference.label, inferenceConfig,
       running: this.clock.status().enabled, latestTick: this.engine.tick,
+      ...(this.universe.observerVoice ? { observerVoice: this.universe.observerVoice } : {}),
       clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS },
       secondsPerTurn: this.store.secondsPerTurnAt(this.engine.tick),
       ...this.observerStatus() };
@@ -77,6 +78,15 @@ export class UniverseRuntime {
     this.clock.setEnabled(running);return this.clock.status().enabled;
   }
   configureInference(providers: ProviderConfig[]) { this.agents.configure(providers); }
+  speak(text: unknown) {
+    const result = this.engine.broadcastSpeech(text);
+    if (result.ok) {
+      this.publishFrame(true);
+      this.bridge.flush();
+      this.clock.barrierChanged();
+    }
+    return result;
+  }
   broadcast(event: string, value: unknown) {
     const message = `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`;
     for (const client of this.clients) {

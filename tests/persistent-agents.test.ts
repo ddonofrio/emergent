@@ -47,6 +47,26 @@ function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state
 const resultOf = (request: CompletionRequest) => JSON.parse(request.messages.filter(message => message.role === 'tool').at(-1)!.content!);
 const contextOf = (request: CompletionRequest) => JSON.parse(request.messages.at(-1)!.content!.split('\n\n').at(-1)!);
 
+test('a sky message reaches the next model request through the durable speech tool receipt', async () => {
+  const f = fixture();
+  try {
+    f.clock.setEnabled(true); await until(() => f.requests.length === 1);
+    f.requests[0].respond('wait_for_event', { seconds: 30 });
+    await until(() => f.runtime.ready());
+    assert.equal(f.engine.broadcastSpeech('Hello from above, curious islanders.').ok, true);
+    f.bridge.flush();
+    await until(() => f.requests.length === 2);
+    const speech = resultOf(f.requests[1].request).events.find((event: { type: string }) => event.type === 'speech');
+    assert.equal(speech.data.from, 'GOD');
+    assert.equal(speech.data.word, 'Hello from above, curious islanders.');
+    assert.match(speech.data.description, /powerful.*echoing.*sky/);
+    assert.equal(speech.data.direction, 'above');
+    assert.equal(f.engine.tick, 0);
+    assert.equal(f.store.speechAt(0).events.length, 1);
+    assert.deepEqual(f.errors, []);
+  } finally { await f.close(); }
+});
+
 test('a compacted record is durable, visible at its recorded tick, and survives restart while original discoveries remain searchable', async () => {
   const f = fixture();
   let restored: ReturnType<typeof fixture> | undefined;

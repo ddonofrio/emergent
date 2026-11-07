@@ -49,6 +49,7 @@ function duckWanderAction(entity:Entity,context:WanderContext):Action|undefined{
   return bestDistance>=.45?{action:'walk',distance:bestDistance,angle}:{action:'turn',angle};
 }
 export const island: UniverseModule = {
+  observerVoice: { id: 'god', name: 'GOD', description: 'A powerful, echoing voice comes from the sky, resonating across the entire island.' },
   manifest: {
     id: 'first-shore', version: 1, name: 'First Shore', seed: 731,
     description: 'Curious creatures on a finite island, choosing their own goals.',

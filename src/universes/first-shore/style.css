@@ -1,0 +1,37 @@
+body[data-universe='first-shore'] .world {
+  border-radius: 14px;
+  background: #c5d8cf;
+  box-shadow: 0 8px 28px #08140e26, 0 0 0 1px #dce5ca20;
+}
+
+body[data-universe='first-shore'] .entity-label {
+  padding: 6px 10px;
+  border: 1px solid #eee3c85c;
+  border-radius: 8px;
+  background: #354c3ee8;
+  color: #f5edda;
+  font-family: 'DM Sans', system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  box-shadow: 0 3px 9px #233b2926;
+}
+
+body[data-universe='first-shore'] .entity-label.selected {
+  background: #f1dfb5;
+  border-color: #fff0cf;
+  color: #39452f;
+}
+
+body[data-universe='first-shore'] .entity-label.disabled {
+  background: #626b60d9;
+}
+
+body[data-universe='first-shore'] .entity-label.disabled:after {
+  background: inherit;
+}
+
+body[data-universe='first-shore'] .play-button,
+body[data-universe='first-shore'] .camera-tools button,
+body[data-universe='first-shore'] .settings-open {
+  border-radius: 8px;
+}

@@ -117,9 +117,10 @@ function perceivedEvent(event: PerceivedEvent) {
       data: { actionId: data?.actionId ?? data?.action?.id, status: data?.status ?? data?.action?.status ?? event.type.slice('action-'.length) } };
   }
   if (event.type === 'speech') {
-    const data = event.data as { from?: string; speakerId?: string; word?: string; direction?: string; distance?: number };
+    const data = event.data as { from?: string; speakerId?: string; word?: string; direction?: string; distance?: number; description?: string };
     return { id: event.id, tick: event.tick, type: event.type,
-      data: { from: data.from, speakerId: data.speakerId, word: data.word, direction: data.direction, distance: data.distance } };
+      data: { from: data.from, speakerId: data.speakerId, word: data.word, direction: data.direction, distance: data.distance,
+        ...(data.description ? { description: data.description } : {}) } };
   }
   return { id: event.id, tick: event.tick, type: event.type, message: event.message,
     ...(event.data === undefined ? {} : { data: event.data }) };

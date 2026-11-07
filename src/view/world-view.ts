@@ -6,6 +6,19 @@ import { key, unkey, type Body, type Entity, type Frame, type UniverseManifest, 
 import { entityLabelText } from './entity-label';
 
 const neighbors: Vec3[] = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+interface WorldAppearance {
+  background?: string;
+  ambientSky?: string;
+  ambientGround?: string;
+  ambientIntensity?: number;
+  sunlight?: string;
+  sunlightIntensity?: number;
+  exposure?: number;
+  water?: { color: string; opacity: number; roughness: number; metalness: number };
+  seabed?: string;
+  blockColors?: Readonly<Record<string, string>>;
+  roundedBlocks?: readonly string[];
+}
 export class WorldView {
   readonly scene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(45, 1, .1, 900);
@@ -14,7 +27,7 @@ export class WorldView {
   private cells = new Map<string, string>();
   private damage = new Map<string, number>();
   private chunks = new Map<string, Set<string>>();
-  private meshes = new Map<string, THREE.InstancedMesh>();
+  private meshes = new Map<string, THREE.InstancedMesh[]>();
   private creatures = new Map<string, THREE.Group>();
   private objects = new Map<string, THREE.Object3D>();
   private held = new Map<string, THREE.Group>();
@@ -27,6 +40,7 @@ export class WorldView {
   private removedTerrain = new Set<string>();
   private labels = new Map<string, HTMLButtonElement>();
   private cube = new THREE.BoxGeometry(1,1,1);
+  private roundedCube?: RoundedBoxGeometry;
   private blockMaterial = new THREE.MeshStandardMaterial({ roughness: .94, metalness: 0 });
   private manifest?: UniverseManifest;
   private current?: Pick<WorldState,'entities'|'bodies'|'time'>;
@@ -42,23 +56,24 @@ export class WorldView {
   private loaded = false;
   private observer: ResizeObserver;
   readonly onSelect: (id: string) => void;
-  constructor(readonly container: HTMLElement, onSelect: (id: string) => void) {
+  constructor(readonly container: HTMLElement, onSelect: (id: string) => void, private readonly appearance: WorldAppearance = {}) {
     this.onSelect = onSelect;
+    if (appearance.roundedBlocks?.length) this.roundedCube = new RoundedBoxGeometry(1,1,1,2,.08);
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true; this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    this.renderer.setClearColor('#b2ccc1'); this.renderer.toneMapping = THREE.ACESFilmicToneMapping; this.renderer.toneMappingExposure = 1.2;
+    this.renderer.setClearColor(appearance.background ?? '#b2ccc1'); this.renderer.toneMapping = THREE.ACESFilmicToneMapping; this.renderer.toneMappingExposure = appearance.exposure ?? 1.2;
     container.prepend(this.renderer.domElement);
     this.renderer.domElement.setAttribute('aria-label', 'Interactive 3D world. Drag to orbit, right-drag to pan, scroll to zoom. WASD and Q/E move the camera.');
     this.renderer.domElement.tabIndex = 0;
-    this.scene.fog = new THREE.Fog('#b2ccc1', 150, 420);
-    this.scene.add(new THREE.HemisphereLight('#e6f3e8', '#667b57', 2.1));
-    const sun = new THREE.DirectionalLight('#fff1cd', 3.3); sun.position.set(-45,80,35); sun.castShadow = true;
+    this.scene.fog = new THREE.Fog(appearance.background ?? '#b2ccc1', 150, 420);
+    this.scene.add(new THREE.HemisphereLight(appearance.ambientSky ?? '#e6f3e8', appearance.ambientGround ?? '#667b57', appearance.ambientIntensity ?? 2.1));
+    const sun = new THREE.DirectionalLight(appearance.sunlight ?? '#fff1cd', appearance.sunlightIntensity ?? 3.3); sun.position.set(-45,80,35); sun.castShadow = true;
     sun.shadow.mapSize.set(2048,2048); Object.assign(sun.shadow.camera, { left: -65, right: 65, top: 65, bottom: -65, near: .5, far: 200 }); sun.shadow.bias = -.0003; sun.shadow.normalBias = .04;
     this.scene.add(sun);
-    const sea = this.sea = new THREE.Mesh(new THREE.PlaneGeometry(800,800), new THREE.MeshStandardMaterial({ color: '#588c8a', transparent: true, opacity: .84, roughness: .38, metalness: .12 }));
+    const sea = this.sea = new THREE.Mesh(new THREE.PlaneGeometry(800,800), new THREE.MeshStandardMaterial({ ...(appearance.water ?? { color: '#588c8a', opacity: .84, roughness: .38, metalness: .12 }), transparent: true }));
     sea.rotation.x = -Math.PI / 2; sea.position.y = .015; sea.receiveShadow = true; this.scene.add(sea);
-    const seabed = this.seabed = new THREE.Mesh(new THREE.PlaneGeometry(800,800), new THREE.MeshBasicMaterial({ color: '#345f66' })); seabed.rotation.x = -Math.PI / 2; seabed.position.y = -32; this.scene.add(seabed);
+    const seabed = this.seabed = new THREE.Mesh(new THREE.PlaneGeometry(800,800), new THREE.MeshBasicMaterial({ color: appearance.seabed ?? '#345f66' })); seabed.rotation.x = -Math.PI / 2; seabed.position.y = -32; this.scene.add(seabed);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true; this.controls.dampingFactor = .08; this.controls.minDistance = 2; this.controls.maxDistance = 260; this.controls.maxPolarAngle = Math.PI * .92;
     this.overview();
@@ -77,6 +92,7 @@ export class WorldView {
   }
   private resize() { const w = this.container.clientWidth, h = this.container.clientHeight; this.camera.aspect = w/Math.max(1,h); this.camera.updateProjectionMatrix(); this.renderer.setSize(w,h); }
   private chunk(p: Vec3) { return p.map(v => Math.floor(v/16)).join(','); }
+  private materialColor(kind: string) { return this.appearance.blockColors?.[kind] ?? this.manifest?.materials[kind]?.color ?? '#ffffff'; }
   private setCell(k: string, kind: string | null) {
     const chunk = this.chunk(unkey(k));
     if (kind) { this.cells.set(k,kind); if (!this.chunks.has(chunk)) this.chunks.set(chunk,new Set()); this.chunks.get(chunk)!.add(k); }
@@ -88,10 +104,10 @@ export class WorldView {
   }
   load(state: WorldState, manifest: UniverseManifest) {
     this.manifest = manifest; this.cells.clear(); this.chunks.clear(); this.punches.clear(); this.damage=new Map(Object.entries(state.blockDamage??{}));this.removedTerrain=new Set(state.removedBlocks??[]);
-    const fog=manifest.view?.fog??{near:150,far:420};this.scene.fog=new THREE.Fog('#b2ccc1',fog.near,fog.far);this.controls.maxDistance=manifest.view?.maxDistance??260;
+    const fog=manifest.view?.fog??{near:150,far:420};this.scene.fog=new THREE.Fog(this.appearance.background??'#b2ccc1',fog.near,fog.far);this.controls.maxDistance=manifest.view?.maxDistance??260;
     this.sea.position.y = manifest.waterLevel + .015; this.seabed.position.y = manifest.bounds.min[1];
     for (const effect of this.effects) { this.scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose(); } this.effects = [];
-    for (const mesh of this.meshes.values()) { this.scene.remove(mesh); mesh.dispose(); } this.meshes.clear();
+    for (const meshes of this.meshes.values()) for (const mesh of meshes) { this.scene.remove(mesh); mesh.dispose(); } this.meshes.clear();
     for (const [x,y,z,kind] of state.blocks) this.setCell(key([x,y,z]),kind);
     for (const chunk of this.chunks.keys()) this.buildChunk(chunk);
     this.proceduralGroundOrigin='';this.buildProceduralGround();
@@ -125,21 +141,31 @@ export class WorldView {
     }
   }
   private buildChunk(chunk: string) {
-    const old = this.meshes.get(chunk); if (old) { this.scene.remove(old); old.dispose(); this.meshes.delete(chunk); }
+    const old = this.meshes.get(chunk); if (old) { for (const mesh of old) { this.scene.remove(mesh); mesh.dispose(); } this.meshes.delete(chunk); }
     const visible = [...(this.chunks.get(chunk) ?? [])].filter(k => {
       const p = unkey(k);
       return neighbors.some(d => { const kind = this.kindAt(p.map((v,i) => v+d[i]) as Vec3); return !kind || !this.manifest!.materials[kind]?.solid; });
     });
     if (!visible.length) return;
-    const mesh = new THREE.InstancedMesh(this.cube,this.blockMaterial,visible.length), dummy = new THREE.Object3D();
-    visible.forEach((k,index) => {
-      const p = unkey(k), kind = this.cells.get(k)!;
-      dummy.position.set(p[0]+.5,p[1]+.5,p[2]+.5); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1);
-      if (kind === 'plant') { dummy.scale.set(.18,.55,.18); dummy.position.y = p[1]+.27; dummy.rotation.z = Math.sin(p[0])* .2; }
-      dummy.updateMatrix(); mesh.setMatrixAt(index,dummy.matrix);
-      const color = new THREE.Color(this.manifest!.materials[kind]?.color ?? '#ffffff'); color.multiplyScalar((.94 + .1 * (Math.sin(p[0]*12.98 + p[2]*78.23 + p[1]*37.7)*.5+.5))*(1-(this.damage.get(k)??0)*.22)); mesh.setColorAt(index,color);
-    });
-    mesh.castShadow = true; mesh.receiveShadow = true; mesh.computeBoundingSphere(); this.meshes.set(chunk,mesh); this.scene.add(mesh);
+    const batches = new Map<THREE.BufferGeometry, string[]>();
+    for (const k of visible) {
+      const geometry = this.roundedCube && this.appearance.roundedBlocks?.includes(this.cells.get(k)!) ? this.roundedCube : this.cube;
+      if (!batches.has(geometry)) batches.set(geometry, []);
+      batches.get(geometry)!.push(k);
+    }
+    const meshes: THREE.InstancedMesh[] = [];
+    for (const [geometry, cells] of batches) {
+      const mesh = new THREE.InstancedMesh(geometry,this.blockMaterial,cells.length), dummy = new THREE.Object3D();
+      cells.forEach((k,index) => {
+        const p = unkey(k), kind = this.cells.get(k)!;
+        dummy.position.set(p[0]+.5,p[1]+.5,p[2]+.5); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1);
+        if (kind === 'plant') { dummy.scale.set(.18,.55,.18); dummy.position.y = p[1]+.27; dummy.rotation.z = Math.sin(p[0])* .2; }
+        dummy.updateMatrix(); mesh.setMatrixAt(index,dummy.matrix);
+        const color = new THREE.Color(this.materialColor(kind)); color.multiplyScalar((.94 + .1 * (Math.sin(p[0]*12.98 + p[2]*78.23 + p[1]*37.7)*.5+.5))*(1-(this.damage.get(k)??0)*.22)); mesh.setColorAt(index,color);
+      });
+      mesh.castShadow = true; mesh.receiveShadow = true; mesh.computeBoundingSphere(); meshes.push(mesh); this.scene.add(mesh);
+    }
+    this.meshes.set(chunk,meshes);
   }
   private buildProceduralGround() {
     const terrain=this.manifest?.terrain;
@@ -168,7 +194,7 @@ export class WorldView {
     const positions=[...visible.values()],mesh=this.proceduralGround=new THREE.InstancedMesh(this.cube,this.blockMaterial,positions.length),dummy=new THREE.Object3D();
     positions.forEach(({position,kind},index)=>{
       dummy.position.set(position[0]+.5,position[1]+.5,position[2]+.5);dummy.updateMatrix();mesh.setMatrixAt(index,dummy.matrix);
-      const color=new THREE.Color(this.manifest!.materials[kind]?.color??'#ffffff').multiplyScalar(.94+.1*(Math.sin(position[0]*12.98+position[2]*78.23+position[1]*37.7)*.5+.5));mesh.setColorAt(index,color);
+      const color=new THREE.Color(this.materialColor(kind)).multiplyScalar(.94+.1*(Math.sin(position[0]*12.98+position[2]*78.23+position[1]*37.7)*.5+.5));mesh.setColorAt(index,color);
     });
     mesh.castShadow=true;mesh.receiveShadow=true;mesh.computeBoundingSphere();this.scene.add(mesh);
   }
@@ -245,7 +271,7 @@ export class WorldView {
       this.box(visual,[inside,size,wall],[0,0,size/2-wall/2],color);
       this.box(visual,[inside,size,wall],[0,0,-size/2+wall/2],color);
       if(contents){
-        const contentColor=this.manifest?.materials[contents]?.color??'#ffffff',water=contents==='water';
+        const contentColor=this.materialColor(contents),water=contents==='water';
         const contentMaterial=new THREE.MeshStandardMaterial({color:contentColor,roughness:water?.32:.96,metalness:water?.08:0,transparent:water,opacity:water?.82:1,side:THREE.DoubleSide});
         contentMaterial.userData.activeColor=contentColor;contentMaterial.userData.activeTransparent=water;contentMaterial.userData.activeOpacity=water?.82:1;contentMaterial.userData.activeDepthWrite=!water;
         const surface=new THREE.Mesh(this.cube,contentMaterial);surface.scale.set(inside*.92,wall*.22,inside*.92);surface.position.y=size/2-wall*.72;surface.castShadow=!water;surface.receiveShadow=true;visual.add(surface);
@@ -419,7 +445,7 @@ export class WorldView {
         let held = this.held.get(e.id);
         const carried=e.inventory?.selected===null||!e.inventory?undefined:e.inventory.stacks[e.inventory.selected];
         if (carried) {
-          const color=this.manifest!.materials[carried.kind]?.color??'#ffffff';
+          const color=this.materialColor(carried.kind);
           const contents=carried.contents??(carried.water?'water':undefined);
           if (!held || held.userData.kind!==carried.kind || held.userData.contents!==contents) { if(held)this.disposeItemVisual(held);held=this.heldVisual(carried.kind,color,true,contents);const hand=carried.kind==='spear'||carried.kind==='stick'||carried.kind==='knife'||carried.kind==='shovel'?group.getObjectByName('arm-right'):undefined;(hand??group).add(held);this.held.set(e.id,held);group.userData.enabled=undefined; }
           held.visible = true;
@@ -451,7 +477,7 @@ export class WorldView {
       for (const b of this.current.bodies) {
         let object = this.objects.get(b.id);
         if (!object) {
-          const color=this.manifest!.materials[b.kind]?.color??'#ffffff';
+          const color=this.materialColor(b.kind);
           if(['stick','arrow','spear','shovel','knife','bucket','plank','door_half_up','door_half_down','door'].includes(b.kind))object=this.heldVisual(b.kind,color,false,b.contents??(b.water?'water':undefined));else{const mesh=new THREE.Mesh(this.cube,new THREE.MeshStandardMaterial({color}));mesh.scale.setScalar(.56);mesh.castShadow=true;object=mesh;}
           this.scene.add(object);this.objects.set(b.id,object);
         }
@@ -475,6 +501,6 @@ export class WorldView {
     this.buildProceduralGround();
     this.controls.update(); this.renderer.render(this.scene,this.camera);
   };
-  dispose() { cancelAnimationFrame(this.frameId); this.observer.disconnect(); this.controls.dispose();for(const label of this.labels.values())label.remove();this.labels.clear();if(this.proceduralGround){this.scene.remove(this.proceduralGround);this.proceduralGround.dispose();}this.renderer.dispose(); }
+  dispose() { cancelAnimationFrame(this.frameId); this.observer.disconnect(); this.controls.dispose();for(const label of this.labels.values())label.remove();this.labels.clear();if(this.proceduralGround){this.scene.remove(this.proceduralGround);this.proceduralGround.dispose();}this.roundedCube?.dispose();this.renderer.dispose(); }
 }
 const distanceSquared = (a: Vec3,b: Vec3) => a.reduce((sum,v,i) => sum+(v-b[i])**2,0);
