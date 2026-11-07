@@ -33,7 +33,8 @@ export interface CompletionRequest {
   system: string;
   messages: Message[];
   tools: ToolSchema[];
-  maxTokens: number;
+  /** Omit to use the provider's remaining context and native output capacity. */
+  maxTokens?: number;
   purpose: 'agent' | 'memory';
   sessionId?: string;
 }

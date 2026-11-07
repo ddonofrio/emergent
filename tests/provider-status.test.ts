@@ -22,6 +22,78 @@ function successfulResponse() {
   return new Response(`data: ${JSON.stringify(delta)}\n\ndata: ${JSON.stringify(ending)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
 }
 
+test('default output budgets shrink with the prompt and are recalculated for each fallback route', async t => {
+  const limits: number[] = [];
+  t.mock.method(globalThis, 'fetch', async (input: unknown, init?: RequestInit) => {
+    const payload = JSON.parse(String(init?.body));
+    limits.push(payload.max_tokens ?? payload.max_completion_tokens);
+    return String(input).includes('first.invalid')
+      ? Response.json({ error: { message: 'Temporarily disconnected.' } }, { status: 503 })
+      : successfulResponse();
+  });
+  const client = new InferenceClient([
+    { ...provider('first'), contextWindow: 131072 },
+    { ...provider('second'), contextWindow: 49152 },
+  ]);
+  const { maxTokens: _explicitCap, ...automatic } = request;
+  await client.complete(automatic, new AbortController().signal);
+  await client.complete({ ...automatic, messages: [{ role: 'user', content: 'Local observation. '.repeat(1000) }] }, new AbortController().signal);
+  assert.equal(limits.length, 4);
+  assert.ok(limits[0] > 120000 && limits[0] < 131072);
+  assert.ok(limits[1] > 40000 && limits[1] < 49152);
+  assert.equal(limits[0] - limits[1], 131072 - 49152, 'Fallback uses its own context capacity.');
+  assert.ok(limits[2] < limits[0] - 4000, 'Growing input leaves less output capacity.');
+  assert.equal(limits[2] - limits[3], 131072 - 49152);
+});
+
+test('default output respects a known native model limit and explicit request caps still work', async t => {
+  const limits: number[] = [];
+  t.mock.method(globalThis, 'fetch', async (_input: unknown, init?: RequestInit) => {
+    const payload = JSON.parse(String(init?.body));
+    limits.push(payload.max_tokens ?? payload.max_completion_tokens);
+    return successfulResponse();
+  });
+  const client = new InferenceClient([{
+    ...provider(), type: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4.1',
+  }]);
+  const { maxTokens: _explicitCap, ...automatic } = request;
+  await client.complete(automatic, new AbortController().signal);
+  await client.complete(request, new AbortController().signal);
+  assert.deepEqual(limits, [32768, 100]);
+});
+
+test('the agent runtime allows reasoning beyond the former fixed cap before a real tool wait', async t => {
+  let outputLimit = 0;
+  t.mock.method(globalThis, 'fetch', async (_input: unknown, init?: RequestInit) => {
+    const payload = JSON.parse(String(init?.body));
+    outputLimit = payload.max_tokens ?? payload.max_completion_tokens;
+    const ending = { id: 'reasoned', object: 'chat.completion.chunk', created: 0, model: 'technical-model-id',
+      choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'Reasoning completed before choosing to wait.',
+        tool_calls: [{ index: 0, id: 'wait', type: 'function', function: { name: 'wait_for_event', arguments: '{"seconds":30}' } }] }, finish_reason: 'tool_calls' }],
+      usage: { prompt_tokens: 2000, completion_tokens: 5000, total_tokens: 7000 } };
+    return new Response(`data: ${JSON.stringify(ending)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  });
+  const engine = new Engine({ ...island, generate: () => ({ blocks: [], entities: [
+    { id: 'a', name: 'A', kind: 'troglodyte', controller: 'agent', position: [.5, 1, .5], yaw: 0, height: 2, color: '#fff', inventory: null, status: 'idle' },
+  ] }) });
+  const store = new Store(':memory:', engine.module.manifest), bridge = new AgentBridge(engine);
+  const runtime = new AgentRuntime(bridge, store, [{ ...provider(), contextWindow: 131072 }], undefined, { changed() {}, fatal(error) { throw error; } });
+  try {
+    runtime.resume();
+    await until(() => runtime.ready());
+    assert.ok(outputLimit > 100000, `Unexpected output cap: ${outputLimit}.`);
+    assert.equal(runtime.metrics().a.llmCalls, 1);
+    assert.equal(runtime.metrics().a.outputTokens, 5000);
+    assert.equal(runtime.metrics().a.retries, 0);
+    assert.equal(engine.tick, 0, 'Inference does not spend world time.');
+    assert.equal(runtime.persistence().agents.a.session.pendingCalls[0].call.name, 'wait_for_event');
+  } finally {
+    runtime.close();
+    await until(() => !runtime.agents.get('a')?.job);
+    store.close();
+  }
+});
+
 test('provider-default reasoning is omitted while explicit levels are forwarded', async t => {
   const payloads: Record<string, unknown>[] = [];
   t.mock.method(globalThis, 'fetch', async (_input: unknown, init?: RequestInit) => {

@@ -190,7 +190,6 @@ test('model discovery uses the configured endpoint and retains advertised capaci
     const [config] = validateProviders([{ id: 'p', type: 'openai-compatible', name: 'Local', baseUrl: 'http://local.invalid/deployment/v1/', model: 'local', apiKey: '', tokenless: true, maxOutputTokens: 40960 }]);
     assert.deepEqual(await discoverModels(config), [{ id: 'local', label: 'local', contextWindow: 8192 }]);
     assert.equal(Object.hasOwn(config, 'maxOutputTokens'), false, 'Legacy output caps must not survive provider validation.');
-    assert.equal(new InferenceClient([config]).maxTokens, 4096, 'The adapter owns its output default.');
     assert.equal(endpoint, 'http://local.invalid/deployment/v1/models');
   } finally { globalThis.fetch = originalFetch; }
 });

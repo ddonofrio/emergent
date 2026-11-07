@@ -34,7 +34,6 @@ export interface ProviderRequestStatus {
   detail?: string;
 }
 export const DEFAULT_CONTEXT_WINDOW = 49152;
-export const DEFAULT_MAX_TOKENS = 4096;
 const PROVIDER_TYPES = new Set(['openai-compatible', 'openai', 'openrouter', 'vast-ai', 'amazon-bedrock']);
 const REASONING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
@@ -122,13 +121,16 @@ function modelFor(config: ProviderConfig, id = config.model): Model<Api> {
   // Mark off as unavailable only for provider-default requests so it omits the
   // reasoning parameter and lets the serving endpoint choose its own default.
   const thinkingLevelMap = providerDefaultReasoning && reasoning ? { ...base?.thinkingLevelMap, off: null } : base?.thinkingLevelMap;
+  const contextWindow = config.contextWindow ?? base?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
   return {
     id, name: base?.name ?? id, api, provider: config.id,
     baseUrl: config.baseUrl || base?.baseUrl || '',
     reasoning,
     input: ['text'], cost: base?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: config.contextWindow ?? base?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: base?.maxTokens ?? DEFAULT_MAX_TOKENS,
+    contextWindow,
+    // pi-ai fits output to the remaining context on each request. Unknown
+    // models have no separate output cap; preserve known native limits.
+    maxTokens: base?.maxTokens ?? contextWindow,
     ...(base?.compat === undefined ? {} : { compat: base.compat }),
     ...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
   };
@@ -213,11 +215,6 @@ export class InferenceClient {
     const active = this.providers.filter(provider => provider.enabled !== false && provider.model);
     return active.length ? Math.min(...active.map(provider => modelFor(provider).contextWindow)) : DEFAULT_CONTEXT_WINDOW;
   }
-  get maxTokens(): number {
-    const active = this.providers.filter(provider => provider.enabled !== false && provider.model);
-    return active.length ? Math.min(...active.map(provider => modelFor(provider).maxTokens)) : DEFAULT_MAX_TOKENS;
-  }
-
   /** One attempt per configured route. The session owns indefinite cancellable retries. */
   complete(request: CompletionRequest, signal: AbortSignal): Promise<Completion> {
     // Auxiliary memory work must not occupy the serial foreground decision queue.

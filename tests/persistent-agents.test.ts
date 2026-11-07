@@ -77,6 +77,7 @@ test('a compacted record is durable, visible at its recorded tick, and survives 
       intent: { goal: 'Explore the shore.', successCondition: 'Find water.', status: 'active' } });
     f.clock.setEnabled(true);
     await until(() => f.requests.length === 2);
+    assert.ok(f.requests.every(({ request }) => request.maxTokens === undefined), 'Acting and memory requests leave output capacity to the provider core.');
     f.requests.find(item => item.request.purpose === 'agent')!.respond('walk_to', { x: .5, z: 8.5 });
     await until(() => f.runtime.ready());
     for (let i = 0; i < 10; i++) f.pump();

@@ -143,7 +143,7 @@ export class PersistentSession {
           this.data.messages = context.history;
           const request: CompletionRequest = {
             system: options.system, messages: context.messages, tools: toolkit.schemas,
-            maxTokens: options.maxTokens ?? 4096, purpose: 'agent', sessionId: this.id,
+            ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }), purpose: 'agent', sessionId: this.id,
           };
           this.data.metrics.llmCalls++;
           await this.save(options);

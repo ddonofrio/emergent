@@ -194,7 +194,6 @@ Scans and hand interactions need a free stationary body. Check bodyActivity and 
         : resumeAgentTool(agent.port, agent, call.id, signal),
       complete: (request, signal) => this.complete(agent, request, signal),
       contextWindow: this.inference.contextWindow,
-      maxTokens: this.inference.maxTokens,
       persist: () => this.persist(agent),
       onCompaction: details => agent.sourcePort.recordContextCompaction(details),
       onState: (state, detail) => {
