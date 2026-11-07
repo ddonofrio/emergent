@@ -2,7 +2,7 @@
 import { resolve } from 'node:path';
 import { Engine } from '../src/core/engine';
 import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
-import type { Frame, UniverseModule } from '../src/core/types';
+import { sanitizeAgentIntent, type Frame, type UniverseModule } from '../src/core/types';
 import { AgentRuntime, type RuntimeSnapshot } from './agents/runtime';
 import type { ProviderConfig } from './inference/providers';
 import type { RequestQueue } from './inference/request-queue';
@@ -32,6 +32,7 @@ export class UniverseRuntime {
     const storedState = this.store.hasWorld() ? this.store.stateAt(this.store.latestTick()) : undefined;
     const migration = storedState ? universe.migrateState?.(storedState) : undefined;
     this.engine = new Engine(universe, migration?.state ?? storedState);
+    for (const entity of this.engine.entities) if (entity.intent) entity.intent = sanitizeAgentIntent(entity.intent);
     this.engine.nextEvent = this.store.maxEventId() + 1;
     this.lastRecordedTurnTick = Math.floor(this.engine.tick / TURN_TICKS) * TURN_TICKS;
     this.lastTurnSampleAt = performance.now();

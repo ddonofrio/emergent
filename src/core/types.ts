@@ -31,7 +31,6 @@ export interface Stack { kind: string; count: number; contents?: string; water?:
 export interface Inventory { stacks: Stack[]; selected: number | null; capacity: number; }
 export interface MovementIssue { kind: 'boundary' | 'rise' | 'wall' | 'overhang' | 'gap' | 'water' | 'entity' | 'obstructed'; message: string; target?: Vec3; material?: string; height?: number; entity?: string; entityId?: string; itemId?: string; }
 export interface AgentIntent {
-  identity?: string;
   goal: string;
   successCondition: string;
   assessment?: string;
@@ -40,6 +39,15 @@ export interface AgentIntent {
   reconsiderWhen?: string;
   status: 'active' | 'completed' | 'abandoned' | 'blocked';
 }
+export const sanitizeAgentIntent = (intent: AgentIntent | undefined): AgentIntent | undefined => intent ? ({
+  goal: intent.goal,
+  successCondition: intent.successCondition,
+  ...(intent.assessment ? { assessment: intent.assessment } : {}),
+  ...(intent.nextStep ? { nextStep: intent.nextStep } : {}),
+  ...(intent.expectedObservation ? { expectedObservation: intent.expectedObservation } : {}),
+  ...(intent.reconsiderWhen ? { reconsiderWhen: intent.reconsiderWhen } : {}),
+  status: intent.status,
+}) : undefined;
 export interface AgentMemoryRecord { intent?: AgentIntent; notes: string[]; learned: string[]; }
 export interface Entity {
   id: string; name: string; kind: string; controller: 'agent' | 'wander' | 'static' | 'automaton'; position: Vec3; yaw: number;

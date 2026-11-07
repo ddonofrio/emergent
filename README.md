@@ -15,7 +15,7 @@ No `.env` is required. Active worlds default to `data/`; an explicit `DATA_DIR` 
 
 Settings includes `Parallel requests`. Enabled allows simultaneous model requests; disabled sends one at a time across all agents and universes. The choice is saved as `parallelRequests` in the inference configuration. Changing only this setting preserves conversations, prepared decisions and active requests. Simulation actions still execute concurrently once every agent is ready.
 
-Each model-controlled entity owns one persistent conversation. It receives one initial local observation, then assistant tool calls and structured tool results. Events never start another conversation or rebuild its situation prompt. Agents author their own identity, goals, success conditions and at most ten private notes. Success remains an agent assessment, separate from physical validation.
+Each model-controlled entity owns one persistent conversation. It receives one initial local observation, then assistant tool calls and structured tool results. Events never start another conversation or rebuild its situation prompt. Agents author their own goals, success conditions and at most ten private notes. Success remains an agent assessment, separate from physical validation.
 
 Agents can record their own next step, expected observation and reconsideration condition. First holding an item durably records its uses and experiment inputs; successful experiments add their recipes separately. Conditional capabilities remain visible for owned objects without advertising invalid targets. See [First Shore crafting](src/universes/first-shore/README.md).
 

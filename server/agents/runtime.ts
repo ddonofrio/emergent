@@ -1,5 +1,5 @@
 import type { DecisionStatus } from '../../src/core/time';
-import { PersistentSession, conversationRequest, type CompletionRequest, type SessionSnapshot, type SessionState } from '../../vendor/littlewhale';
+import { PersistentSession, conversationRequest, type CompletionRequest, type Message, type SessionSnapshot, type SessionState } from '../../vendor/littlewhale';
 import { InferenceClient, type ProviderConfig } from '../inference/providers';
 import { RequestQueue } from '../inference/request-queue';
 import type { Store } from '../store';
@@ -8,7 +8,7 @@ import type { AgentBridge, BridgeSnapshot } from '../simulation/agent-bridge';
 import type { WorldConnection } from '../simulation/connection';
 import { agentTools, observeAgent, resumeAgentTool, type AgentToolMemory, type FailedCallCounter, type LookState, type RepeatedToolFailures } from './tools';
 import { AgentMemory, type MemorySnapshot } from './memory-record';
-import type { AgentMemoryRecord } from '../../src/core/types';
+import { sanitizeAgentIntent, type AgentMemoryRecord } from '../../src/core/types';
 
 export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; toolFailures?: RepeatedToolFailures; failedCalls?: FailedCallCounter; }
 export interface RuntimeSnapshot { version: 1; agents: Record<string, AgentSnapshot>; simulation: BridgeSnapshot; }
@@ -24,6 +24,33 @@ interface Agent extends AgentToolMemory {
   job?: Promise<void>;
 }
 
+const withoutRetiredIdentity = (value: unknown): unknown => Array.isArray(value)
+  ? value.map(withoutRetiredIdentity)
+  : value && typeof value === 'object'
+    ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'identity').map(([key, entry]) => [key, withoutRetiredIdentity(entry)]))
+    : value;
+const cleanMessage = (message: Message): Message => {
+  const cleaned = structuredClone(message);
+  if (cleaned.content) {
+    try { cleaned.content = JSON.stringify(withoutRetiredIdentity(JSON.parse(cleaned.content))); }
+    catch { /* Non-JSON conversation text is unchanged. */ }
+  }
+  if (cleaned.toolCalls) cleaned.toolCalls = cleaned.toolCalls.map(call => call.name === 'set_intent'
+    ? { ...call, arguments: withoutRetiredIdentity(call.arguments) as Record<string, unknown> } : call);
+  if (cleaned.providerState && JSON.stringify(cleaned.providerState).includes('"identity"')) delete cleaned.providerState;
+  return cleaned;
+};
+const cleanSession = (snapshot: SessionSnapshot | undefined): SessionSnapshot | undefined => snapshot ? {
+  ...structuredClone(snapshot),
+  messages: snapshot.messages.map(cleanMessage),
+  pendingCalls: snapshot.pendingCalls.map(pending => ({
+    call: pending.call.name === 'set_intent'
+      ? { ...structuredClone(pending.call), arguments: withoutRetiredIdentity(pending.call.arguments) as Record<string, unknown> }
+      : structuredClone(pending.call),
+    ...(pending.result ? { result: cleanMessage(pending.result) } : {}),
+  })),
+} : undefined;
+
 /** One persistent LittleWhale conversation per entity, using entity-scoped ports. */
 export class AgentRuntime implements WorldConnection {
   readonly agents = new Map<string, Agent>();
@@ -36,8 +63,8 @@ export class AgentRuntime implements WorldConnection {
     this.inference = new InferenceClient(providers, () => this.hooks.inferenceChanged?.(), this.requestQueue);
     for (const port of bridge.ports()) {
       const saved = snapshot?.agents[port.id];
-      const session = new PersistentSession(port.id, saved?.session);
-      const memory = new AgentMemory({ intent: port.observe().self.intent, notes: saved?.notes ?? [], learned: port.knowledge() }, port.knowledge(), saved?.memory, {
+      const session = new PersistentSession(port.id, cleanSession(saved?.session));
+      const memory = new AgentMemory({ intent: sanitizeAgentIntent(port.observe().self.intent), notes: saved?.notes ?? [], learned: port.knowledge() }, port.knowledge(), saved?.memory, {
         sessionId: port.id,
         context: () => this.agentContext(agent),
         complete: (request, signal) => session.completeAuxiliary((req, sig) => this.complete(agent, req, sig), request, signal),
@@ -104,7 +131,9 @@ export class AgentRuntime implements WorldConnection {
     return Object.fromEntries([...this.agents].map(([id, agent]) => [id, { state: !agent.port.active() ? 'disabled' : agent.state === 'tool' && agent.port.waiting() ? 'ready' : agent.state === 'retrying' || !this.inference.enabled ? 'waiting' : 'thinking', ...(agent.detail ? { message: agent.detail } : {}) }]));
   }
   private syncMemory(agent: Agent) {
-    const intent = agent.sourcePort.observe().self.intent;
+    const observedIntent = agent.sourcePort.observe().self.intent;
+    const intent = sanitizeAgentIntent(observedIntent);
+    if (observedIntent && JSON.stringify(observedIntent) !== JSON.stringify(intent)) agent.sourcePort.setIntent(intent!);
     if (JSON.stringify(intent) !== JSON.stringify(agent.memory.record.intent)) agent.memory.write({ intent });
     agent.memory.discover(agent.sourcePort.knowledge());
   }
@@ -129,7 +158,7 @@ export class AgentRuntime implements WorldConnection {
     const controller = new AbortController(); agent.controller = controller;
     const tools = agentTools(agent.port, agent);
     const system = `${agent.port.instructions.replaceAll('{name}', agent.port.name)}
-You retain a fresh observation and your current memory record. Conversation history grows until context pressure requires compaction; compaction keeps recent complete action exchanges without old reasoning. Choose your own identity, goals and observable success conditions. Keep a small next step, expected observation and reason to reconsider in set_intent when useful; update your own plan after discoveries, repeated blockage or completion. Each success condition must cover the goal you selected. An experiment establishes only the tested inputs, not every option. Keep at most ten private notes with remember; permanent learned knowledge can be searched with recall even after an object is gone. Your memory record may be shortened in the background; preserve important conclusions explicitly.
+You retain a fresh observation and your current memory record. Conversation history grows until context pressure requires compaction; compaction keeps recent complete action exchanges without old reasoning. Choose your own goals and observable success conditions. Keep a small next step, expected observation and reason to reconsider in set_intent when useful; update your own plan after discoveries, repeated blockage or completion. Each success condition must cover the goal you selected. An experiment establishes only the tested inputs, not every option. Keep at most ten private notes with remember; permanent learned knowledge can be searched with recall even after an object is gone. Your memory record may be shortened in the background; preserve important conclusions explicitly.
 Events arrive through tool results. An event alone does not stop movement or require a reply. Only arrival, blockage, explicit cancellation or replacement ends movement. Use wait_for_event to continue an ongoing action, choosing eventTypes if only certain interruptions matter. For an uncertain reply, choose a timeout; silence need not stop your own plans.
 Calls in one response run concurrently, not sequentially. Submit at most one body or locomotion action per response. Scans, turning and hand interactions require a free stationary body; bodyActivity remains busy until its action completes even if you look stationary. Speech and private planning may run alongside an action. Wait for a dependent step's result before issuing the next step. Actions have persistent IDs and are validated at the shared commit boundary.
 World time freezes during every agent's inference or retry. Tool waits let the shared clock advance. Self and creature positions name x, yHeight and z; voxel targets use [x,y,z], where y is height; walk_to uses horizontal x,z.

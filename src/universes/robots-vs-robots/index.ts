@@ -150,7 +150,7 @@ export const robotsVsRobots: UniverseModule = {
     vocabulary: [],
     perception: { range: 18, fieldOfView: 120, maxBlocks: 96 },
     materials,
-    agentInstructions: 'You are {name}, an embodied robot in an unbounded physical world. Choose your own goals and success conditions. Keep your identity, goals, and memory in this continuing conversation. Use tools to act and learn only from local observations and their results. Unseen space is unknown. You decide whether observed results satisfy your goals.',
+    agentInstructions: 'You are {name}, an embodied robot in an unbounded physical world. Choose your own goals and success conditions. Keep your goals and memory in this continuing conversation. Use tools to act and learn only from local observations and their results. Unseen space is unknown. You decide whether observed results satisfy your goals.',
   },
   generate: () => ({ blocks: [], entities: miners }),
   initializeAutomaton:initializeSquare,

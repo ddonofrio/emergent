@@ -147,6 +147,56 @@ test('say is unavailable after the turn speech budget is spent and returns next 
   } finally { f.bridge.close(); }
 });
 
+test('temporarily unavailable tools and unchanged intent force stalled loops to pass the turn', async () => {
+  const f = fixture();
+  try {
+    const memory: AgentToolMemory = { notes: [] };
+    for (let index = 0; index < 3; index++) {
+      const tools = agentTools(f.port, memory);
+      const pending = tools.executors.look({}, { id: `look-${index}`, name: 'look', arguments: {} }, f.signal) as Promise<unknown>;
+      f.bridge.commit(); f.advance(1); await pending;
+    }
+    assert.equal(f.engine.act('maker', { action: 'say', word: 'one two three' }).ok, true);
+
+    const unavailable = agentTools(f.port, memory);
+    assert.equal(unavailable.schemas.some(tool => tool.name === 'look' || tool.name === 'say'), false);
+    const look = await unavailable.executors.look({}, { id: 'stale-look', name: 'look', arguments: {} }, f.signal) as any;
+    assert.equal(look.toolControl.failedCallsThisTurn, 1);
+    assert.match(look.error, /next world turn/);
+
+    const intent = structuredClone(f.engine.entity('maker').intent!);
+    const intentArguments = intent as unknown as Record<string, unknown>;
+    const unchanged = await agentTools(f.port, memory).executors.set_intent(intentArguments,
+      { id: 'same-intent', name: 'set_intent', arguments: intentArguments }, f.signal) as any;
+    assert.equal(unchanged.toolControl.failedCallsThisTurn, 2);
+    assert.match(unchanged.error, /unchanged/);
+
+    const passing = agentTools(f.port, memory).executors.say({ word: 'again' },
+      { id: 'stale-say', name: 'say', arguments: { word: 'again' } }, f.signal) as Promise<any>;
+    f.advance(17);
+    const result = await passing;
+    assert.equal(result.toolControl.passTurn, true);
+    assert.equal(result.forcedTurn.tick, 20);
+    assert.deepEqual(f.engine.entity('maker').intent, intent);
+  } finally { f.bridge.close(); }
+});
+
+test('set_intent does not accept or expose a self-authored identity', async () => {
+  const f = fixture();
+  try {
+    (f.engine.entity('maker').intent as unknown as { identity: string }).identity = 'Legacy explorer identity';
+    const tools = agentTools(f.port, { notes: [] });
+    const schema = tools.schemas.find(tool => tool.name === 'set_intent')!;
+    const properties = schema.parameters.properties as Record<string, unknown>;
+    assert.equal('identity' in properties, false);
+    assert.equal('identity' in localView(f.port.observe()).self.intent!, false);
+    const current = structuredClone(f.engine.entity('maker').intent!);
+    const result = await tools.executors.set_intent(current as unknown as Record<string, unknown>,
+      { id: 'legacy-identity', name: 'set_intent', arguments: current as unknown as Record<string, unknown> }, f.signal) as any;
+    assert.match(result.error, /identity|additional/i);
+  } finally { f.bridge.close(); }
+});
+
 test('repeated well-formed hit and walk failures lock after three attempts and any other tool unlocks them', async () => {
   const f = fixture();
   try {

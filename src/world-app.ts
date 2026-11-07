@@ -430,7 +430,7 @@ function renderDetails() {
     const section=document.createElement('section');section.className='agent-intent';section.setAttribute('aria-label','Agent-authored intent');
     const label=document.createElement('h4');label.textContent='Intent in this record';section.append(label);
     if(e.intent){
-      const rows=[...(e.intent.identity?[`Identity: ${e.intent.identity}`]:[]),`Goal: ${e.intent.goal}`,`Success condition: ${e.intent.successCondition}`,`Status: ${e.intent.status} (agent assessment)`,...(e.intent.nextStep?[`Next step: ${e.intent.nextStep}`]:[]),...(e.intent.expectedObservation?[`Expected observation: ${e.intent.expectedObservation}`]:[]),...(e.intent.reconsiderWhen?[`Reconsider when: ${e.intent.reconsiderWhen}`]:[]),...(e.intent.assessment?[`Assessment: ${e.intent.assessment}`]:[])];
+      const rows=[`Goal: ${e.intent.goal}`,`Success condition: ${e.intent.successCondition}`,`Status: ${e.intent.status} (agent assessment)`,...(e.intent.nextStep?[`Next step: ${e.intent.nextStep}`]:[]),...(e.intent.expectedObservation?[`Expected observation: ${e.intent.expectedObservation}`]:[]),...(e.intent.reconsiderWhen?[`Reconsider when: ${e.intent.reconsiderWhen}`]:[]),...(e.intent.assessment?[`Assessment: ${e.intent.assessment}`]:[])];
       for(const text of rows){const paragraph=document.createElement('p');paragraph.textContent=text;section.append(paragraph);}
     }else{const paragraph=document.createElement('p');paragraph.className='muted';paragraph.textContent='No intent recorded yet.';section.append(paragraph);}
     panel.append(section);

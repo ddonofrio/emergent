@@ -95,3 +95,11 @@ test('a write below the threshold cancels obsolete work without launching unnece
   assert.deepEqual(f.memory.record.notes, ['A fresh short note.']);
   f.memory.close();
 });
+
+test('restoring a legacy memory snapshot removes its self-authored identity', () => {
+  const record = large() as AgentMemoryRecord & { intent: NonNullable<AgentMemoryRecord['intent']> & { identity: string } };
+  record.intent.identity = 'Legacy explorer identity';
+  const f = fixture({ record, knownFacts: ['Confirmed fact.'], revision: 1 });
+  assert.equal('identity' in f.memory.record.intent!, false);
+  f.memory.close();
+});

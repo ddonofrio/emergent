@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { ItemCapability } from '../../src/core/crafting';
 import { isRawBlock } from '../../src/core/materials';
 import { TURN_TICKS } from '../../src/core/time';
-import type { Action, AgentIntent, Observation, Vec3 } from '../../src/core/types';
+import { sanitizeAgentIntent, type Action, type AgentIntent, type Observation, type Vec3 } from '../../src/core/types';
 import { wakeEventTypes, type ActionProgress, type AgentPort, type BodyActivity, type PerceivedEvent, type ToolOutcome, type WaitOptions } from '../simulation/agent-port';
 import { validateArguments, type ToolExecutor, type ToolSchema } from '../../vendor/littlewhale';
 
@@ -59,7 +60,7 @@ function selfView(view: Observation) {
   const inventory = view.self.inventory, holding = inventory?.selected == null ? undefined : inventory.stacks[inventory.selected];
   return { position: coordinates(view.self.position), facingDegrees: view.self.yaw, inventory: view.self.inventory,
     holding: holding ?? null, ...(holding ? { handConstraint: 'World-block hit and pickup require empty hands. Use store to free them without losing inventory; moving closer does not free your hands.' } : {}),
-    intent: view.self.intent, motion: view.self.motion ? { kind: view.self.motion.kind, destination: view.self.motion.destination, scanType: view.self.motion.scanType } : undefined, following: view.following };
+    intent: sanitizeAgentIntent(view.self.intent), motion: view.self.motion ? { kind: view.self.motion.kind, destination: view.self.motion.destination, scanType: view.self.motion.scanType } : undefined, following: view.following };
 }
 
 const visibleEntities = (view: Observation) => view.entities.map(entity => ({ ...entity, position: coordinates(entity.position) }));
@@ -274,6 +275,10 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
         if (outcome.reason === 'rejected') return outcome;
         return completedLook(port, memory, angle ?? 0, turn, outcome, startTick);
       });
+  } else {
+    tool('look', 'Refresh one local view without turning your body.',
+      object({ angle: { ...number, minimum: -180, maximum: 180 } }),
+      async () => ({ error: 'look is unavailable until the next world turn. Use wait_for_event to advance time.' }), false);
   }
   if (!view.self.following && !bodyActivity) {
     tool('walk_to', 'Walk in a straight line to horizontal x,z (at most 32m); terrain sets y height. This does not route around obstacles. Returns at arrival, blockage or a perceived event. Events preserve movement; a new locomotion action replaces it.',
@@ -297,6 +302,9 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
   const remainingSpeechWords = port.remainingSpeechWords();
   if (remainingSpeechWords > 0) submit('say', `Speak at most ${remainingSpeechWords} ${remainingSpeechWords === 1 ? 'word' : 'words'} in clear hearing range; three total per world turn. The tool is unavailable after the budget is spent until world time enters the next turn. Speaking and hearing preserve concurrent movement.`,
     object({ word: { type: 'string', minLength: 1, maxLength: 100 } }, ['word']));
+  else tool('say', 'Speak in clear hearing range.',
+    object({ word: { type: 'string', minLength: 1, maxLength: 100 } }, ['word']),
+    async () => ({ error: 'say is unavailable because the speech budget is exhausted until the next world turn. Use wait_for_event to advance time.' }), false);
   tool('wait_for_event', 'Wait while other actions continue. actionId must name an ongoing action and returns when it ends. To advance time after an action already finished, omit actionId and supply seconds. Optional eventTypes selects early interruptions; [] waits only for the ongoing action or timeout. Omit eventTypes for any event. All queued events are delivered on return, including deferred types.',
     object({ actionId: text, seconds: { ...number, exclusiveMinimum: 0, maximum: 3600 }, eventTypes: { type: 'array', items: { type: 'string', enum: [...wakeEventTypes] }, maxItems: wakeEventTypes.length, uniqueItems: true } }),
     (args, call, signal) => {
@@ -372,11 +380,15 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
   }
 
   tool('set_intent', 'Record your own goal and a success condition covering it. Optional nextStep, expectedObservation and reconsiderWhen describe your chosen experiment or plan. Reassess after discoveries, blockage or completion. This replaces the previous intent; preserve fields you still want. No world time.',
-    object({ identity: text, goal: text, successCondition: text, assessment: text, nextStep: text, expectedObservation: text, reconsiderWhen: text, status: { type: 'string', enum: ['active', 'completed', 'abandoned', 'blocked'] } }, ['goal', 'successCondition', 'status']),
+    object({ goal: text, successCondition: text, assessment: text, nextStep: text, expectedObservation: text, reconsiderWhen: text, status: { type: 'string', enum: ['active', 'completed', 'abandoned', 'blocked'] } }, ['goal', 'successCondition', 'status']),
     async args => {
-      if (memory.writeMemory) memory.writeMemory({ intent: args as unknown as AgentIntent });
-      else port.setIntent(args as unknown as AgentIntent);
-      return { intent: args, assessmentBy: 'agent' };
+      const intent = args as unknown as AgentIntent;
+      if (isDeepStrictEqual(sanitizeAgentIntent(port.observe().self.intent), intent)) {
+        return { error: 'Intent is unchanged. Choose another listed tool or wait for an event.' };
+      }
+      if (memory.writeMemory) memory.writeMemory({ intent });
+      else port.setIntent(intent);
+      return { intent, assessmentBy: 'agent' };
     });
   tool('recall', 'Search your permanent Learned Knowledge by item or topic, including objects you no longer own. Returns up to twenty matching facts you have already discovered; refine the query if total is larger. No world time.',
     object({ query: text }, ['query']), async args => port.recall(args.query as string));
