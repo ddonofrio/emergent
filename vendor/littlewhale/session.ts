@@ -1,19 +1,19 @@
 /**
- * Headless adaptation of LittleWhale's event-sourced Session and agent-loop
+ * Headless adaptation of LittleWhale's Session and agent-loop
  * step/tool dispatch cycle. MIT, Copyright (c) DeepSeek. See README.md.
  */
 import { setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
 import { conversationRequest } from './context-window';
 import { estimateTokens } from './tool-pairing';
-import type { Complete, Completion, CompletionRequest, Message, SessionEvent, SessionMetrics, SessionRunOptions, SessionSnapshot } from './types';
+import type { Complete, Completion, CompletionRequest, Message, SessionMetrics, SessionRunOptions, SessionSnapshot } from './types';
 
 const initialMetrics = (): SessionMetrics => ({ llmCalls: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, estimatedInputTokens: 0, latencyMs: 0, retries: 0, compactionCalls: 0 });
 const preparedTools = (options: SessionRunOptions) => options.prepareTools?.() ?? { tools: options.tools, schemas: options.schemas };
 
 class SessionPersistenceError extends Error {}
 
-/** A session owns durable history; a host owns time and the physical tool bodies. */
+/** A session retains continuation state; a host owns durable world history and time. */
 export class PersistentSession {
   private data: SessionSnapshot;
   private running = false;
@@ -21,8 +21,14 @@ export class PersistentSession {
 
   constructor(readonly id: string, snapshot?: SessionSnapshot) {
     if (snapshot && (snapshot.version !== 1 || snapshot.id !== id)) throw new Error('Unsupported agent session snapshot.');
-    this.data = snapshot ? structuredClone(snapshot) : {
-      version: 1, id, messages: [], events: [], pendingCalls: [], metrics: initialMetrics(), compactions: 0,
+    // Pick current fields before cloning so legacy append-only logs are released
+    // without copying their entire lifetime of messages and reasoning again.
+    this.data = snapshot ? structuredClone({
+      version: snapshot.version, id: snapshot.id, messages: snapshot.messages,
+      pendingCalls: snapshot.pendingCalls, metrics: snapshot.metrics, compactions: snapshot.compactions,
+      ...(snapshot.contextPressure ? { contextPressure: snapshot.contextPressure } : {}),
+    }) : {
+      version: 1, id, messages: [], pendingCalls: [], metrics: initialMetrics(), compactions: 0,
     };
   }
 
@@ -47,24 +53,17 @@ export class PersistentSession {
 
   appendUser(content: string): void {
     if (this.running) throw new Error('External messages cannot interrupt a running agent session.');
-    this.appendMessage('user/message', { role: 'user', content });
+    this.appendMessage({ role: 'user', content });
   }
 
-  private event(type: SessionEvent['type'], data: unknown): void {
-    this.data.events.push({ seq: this.data.events.length, type, data: structuredClone(data) });
-  }
-
-  private appendMessage(type: 'user/message' | 'assistant/message' | 'tool/result', message: Message): void {
-    const captured = structuredClone(message);
-    this.data.messages.push(captured);
-    this.event(type, captured);
+  private appendMessage(message: Message): void {
+    this.data.messages.push(structuredClone(message));
   }
 
   private async save(options: SessionRunOptions): Promise<void> {
     if (!options.persist) return;
-    const snapshot = this.snapshot();
     this.saving = this.saving.catch(() => {}).then(async () => {
-      try { await options.persist!(snapshot); }
+      try { await options.persist!(); }
       catch (error) { throw new SessionPersistenceError('Could not persist the agent session.', { cause: error }); }
     });
     await this.saving;
@@ -92,8 +91,6 @@ export class PersistentSession {
     const { signal } = options;
     let attempts = 0;
     try {
-      const lastCompaction = this.data.events.findLast(event => event.type === 'compaction/start' || event.type === 'compaction/end');
-      if (lastCompaction?.type === 'compaction/start') this.event('compaction/end', { success: false, interrupted: true });
       await this.save(options);
       while (true) {
         signal.throwIfAborted();
@@ -129,7 +126,7 @@ export class PersistentSession {
           signal.throwIfAborted();
           const failed = settled.find(result => result.status === 'rejected');
           if (failed?.status === 'rejected') throw failed.reason;
-          for (const pending of this.data.pendingCalls) this.appendMessage('tool/result', pending.result!);
+          for (const pending of this.data.pendingCalls) this.appendMessage(pending.result!);
           this.data.pendingCalls = [];
           await this.save(options);
         }
@@ -139,12 +136,9 @@ export class PersistentSession {
           const toolkit = preparedTools(options);
           const context = conversationRequest({ ...options, schemas: toolkit.schemas }, this.data.messages, this.data.contextPressure);
           if (context.compaction) {
-            this.event('compaction/start', context.compaction);
             this.data.messages = context.history;
             this.data.compactions++;
-            this.event('compaction/end', { ...context.compaction, success: true, reasoningCleared: true });
             options.onCompaction?.(context.compaction);
-            await this.save(options);
           }
           this.data.messages = context.history;
           const request: CompletionRequest = {
@@ -165,14 +159,14 @@ export class PersistentSession {
           // repeats its own wire IDs in a later step. Replay projects these IDs
           // into the adapter's signed response envelope in model order.
           const calls = completion.calls.map(call => ({ ...call, id: `call_${randomUUID().replaceAll('-', '')}` }));
-          this.appendMessage('assistant/message', {
+          this.appendMessage({
             role: 'assistant', content: completion.content,
             ...(calls.length ? { toolCalls: calls } : {}),
             ...(completion.providerState === undefined ? {} : { providerState: completion.providerState }),
           });
           this.data.pendingCalls = calls.map(call => ({ call: structuredClone(call) }));
           if (completion.calls.length === 0) {
-            this.appendMessage('user/message', { role: 'user', content: 'Choose a tool to act, observe, or wait. Your text alone does not change the world.' });
+            this.appendMessage({ role: 'user', content: 'Choose a tool to act, observe, or wait. Your text alone does not change the world.' });
           }
           attempts = 0;
           await this.save(options);
@@ -182,7 +176,6 @@ export class PersistentSession {
           attempts++;
           this.data.metrics.retries++;
           const message = error instanceof Error ? error.message : 'Inference unavailable.';
-          this.event('llm/retry', { attempts, message });
           await this.save(options);
           options.onState?.('retrying', message);
           await delay(Math.min(10000, (options.retryDelayMs ?? 1000) * 2 ** Math.min(attempts - 1, 4)), undefined, { signal });

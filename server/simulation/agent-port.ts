@@ -72,6 +72,8 @@ export interface AgentPort {
   capabilities(view: Observation): ItemCapability[];
   bodyActivity(): BodyActivity | undefined;
   resume(callId: string, signal: AbortSignal): Promise<ToolOutcome> | undefined;
+  /** Release receipts only after the host has durably saved their tool results. */
+  retainCalls(callIds: readonly string[]): void;
   inspectJump(angle: number, distance: number): unknown;
   submit(callId: string, action: Action, signal: AbortSignal): Promise<ToolOutcome>;
   cancel(callId: string, actionId: string, signal: AbortSignal): Promise<ToolOutcome>;

@@ -84,7 +84,7 @@ export class AgentMemory {
     this.data.knownFacts.push(...added);
     this.write({ learned: [...this.data.record.learned, ...added] });
   }
-  resume() { this.enabled = true; this.schedule(); }
+  resume() { if (this.enabled) return; this.enabled = true; this.schedule(); }
   pause() { this.enabled = false; this.controller?.abort(new Error('Memory compaction paused.')); this.controller = undefined; }
   close() { this.closed = true; this.pause(); }
 

@@ -55,17 +55,18 @@ test('conversation history grows to ninety percent of the context window regardl
   assert.match(atThreshold.messages.at(-1)!.content!, /Fresh record/);
 });
 
-test('pressure compaction refreshes current context, records session events, and preserves original audit events', async () => {
+test('pressure compaction keeps current context and drops the retired duplicate session log', async () => {
   const seed = new PersistentSession('window');
   const snapshot = seed.snapshot();
   snapshot.messages = history();
-  snapshot.events = snapshot.messages.map((message, seq) => ({ seq, type: message.role === 'assistant' ? 'assistant/message' : message.role === 'tool' ? 'tool/result' : 'user/message', data: message }));
+  const legacySnapshot = { ...snapshot, events: snapshot.messages.map((message, seq) => ({ seq, data: message })) };
   const currentContext = () => JSON.stringify({ record: { notes: ['Fresh note.'] }, observation: { tick: 42 } });
   const options = { system: 'Entity.', schemas: [], currentContext, contextWindow: 10000, maxTokens: 1000 };
   const baseline = conversationRequest({ ...options, contextWindow: 100000 }, snapshot.messages);
   snapshot.contextPressure = { inputTokens: 9000,
     estimatedTokens: estimateTokens({ system: options.system, tools: options.schemas, messages: baseline.messages }) };
-  const session = new PersistentSession('window', snapshot), abort = new AbortController();
+  legacySnapshot.contextPressure = snapshot.contextPressure;
+  const session = new PersistentSession('window', legacySnapshot), abort = new AbortController();
   let calls = 0, compacted: ContextCompaction | undefined;
   await assert.rejects(session.run({ ...options, tools: {}, signal: abort.signal, onCompaction: details => { compacted = details; },
     complete: async request => {
@@ -82,8 +83,8 @@ test('pressure compaction refreshes current context, records session events, and
   assert.equal(session.metrics.compactionCalls, 0);
   assert.equal(compacted?.thresholdTokens, 9000);
   assert.equal(session.snapshot().compactions, 1);
-  assert.deepEqual(session.snapshot().events.slice(0, snapshot.events.length), snapshot.events);
-  assert.deepEqual(session.snapshot().events.slice(-2).map(event => event.type), ['compaction/start', 'compaction/end']);
+  assert.equal(Object.hasOwn(session.snapshot(), 'events'), false);
+  assert.equal(JSON.stringify(session.snapshot()).includes('Hidden reasoning'), false);
   const restored = new PersistentSession('window', session.snapshot());
   const next = conversationRequest({ system: 'Entity.', schemas: [], currentContext: () => 'Updated record.' }, restored.snapshot().messages);
   assert.match(next.messages.at(-1)!.content!, /Updated record/);

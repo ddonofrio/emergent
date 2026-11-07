@@ -71,7 +71,7 @@ test('resume rebinds pending tools by their persisted call IDs without another m
   let firstId = '';
   const entered = deferred();
   const running = session.run({
-    system: 'Entity.', schemas: [], signal: paused.signal, persist: snapshot => { saved = snapshot; },
+    system: 'Entity.', schemas: [], signal: paused.signal, persist: () => { saved = session.snapshot(); },
     complete: async () => response([{ id: 'wire', name: 'walk_to', arguments: {} }]),
     tools: { walk_to: async (_args, call, signal) => { firstId = call.id; entered.resolve(); return wait(signal); } },
   });
@@ -126,6 +126,23 @@ test('unavailable inference retries the same retained conversation without inven
   assert.equal(session.metrics.llmCalls, 3);
   abort.abort(new Error('Done'));
   await assert.rejects(run, /Done/);
+});
+
+test('long sessions retain only the bounded conversation and pending continuation, not a lifetime log', async () => {
+  const session = new PersistentSession('long-run'), controller = new AbortController();
+  let calls = 0, largest = 0;
+  await assert.rejects(session.run({
+    system: 'Entity.', schemas: [], contextWindow: 2000, currentContext: () => 'Current local observation.',
+    signal: controller.signal, persist: () => { largest = Math.max(largest, JSON.stringify(session.snapshot()).length); },
+    complete: async () => {
+      if (++calls === 400) { controller.abort(new Error('Finished')); throw controller.signal.reason; }
+      return response([{ id: 'wire', name: 'act', arguments: {} }]);
+    },
+    tools: { act: async () => ({ result: 'Observed local fact. '.repeat(25) }) },
+  }), /Finished/);
+  assert.ok(session.snapshot().compactions > 20);
+  assert.equal(Object.hasOwn(session.snapshot(), 'events'), false);
+  assert.ok(largest < 16000, `Session grew to ${largest} bytes.`);
 });
 
 test('LittleWhale schema validation refuses malformed action arguments without coercion', () => {

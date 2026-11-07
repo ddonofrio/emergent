@@ -34,7 +34,10 @@ async function scenario(interrupted: boolean) {
   const engine = new Engine(universe, initial);
   const store = new Store(':memory:', engine.module.manifest);
   let runtime: AgentRuntime;
-  const persist = () => store.record(engine.frame(), engine.tick === 0 ? engine.state() : undefined, runtime?.persistence());
+  const persist = () => {
+    store.record(engine.frame(), engine.tick === 0 ? engine.state() : undefined, runtime?.checkpoint());
+    runtime?.acceptCheckpoint();
+  };
   const bridge = new AgentBridge(engine, undefined, persist);
   const errors: unknown[] = [];
   runtime = new AgentRuntime(bridge, store, [{ id: 'mock', type: 'openai-compatible', name: 'Mock', baseUrl: 'http://unused.invalid', apiKey: 'test', model: 'mock' }], undefined, { changed() {}, fatal(error) { errors.push(error); } });
@@ -83,6 +86,7 @@ async function scenario(interrupted: boolean) {
       if (!runtime.ready()) continue;
       if (engine.entity('walker').speech && replyCommittedTick === undefined) replyCommittedTick = engine.tick;
       engine.step(); runtime.afterStep();
+      if (engine.tick % 2 === 0) persist();
     }
     await until(() => nextDecisionAfterArrival && runtime.ready() || errors.length > 0, 'Arrival did not return to the persistent conversation.');
     if (errors.length) throw errors[0];

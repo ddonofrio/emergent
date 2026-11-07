@@ -10,7 +10,7 @@ import { agentTools, observeAgent, resumeAgentTool, type AgentToolMemory, type F
 import { AgentMemory, type MemorySnapshot } from './memory-record';
 import { sanitizeAgentIntent, type AgentMemoryRecord } from '../../src/core/types';
 
-export interface AgentSnapshot { session: SessionSnapshot; notes: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; toolFailures?: RepeatedToolFailures; failedCalls?: FailedCallCounter; }
+export interface AgentSnapshot { session: SessionSnapshot; notes?: string[]; memory?: MemorySnapshot; viewAngle?: number; look?: LookState; toolFailures?: RepeatedToolFailures; failedCalls?: FailedCallCounter; }
 export interface RuntimeSnapshot { version: 1; agents: Record<string, AgentSnapshot>; simulation: BridgeSnapshot; }
 interface Agent extends AgentToolMemory {
   port: AgentPort;
@@ -41,7 +41,8 @@ const cleanMessage = (message: Message): Message => {
   return cleaned;
 };
 const cleanSession = (snapshot: SessionSnapshot | undefined): SessionSnapshot | undefined => snapshot ? {
-  ...structuredClone(snapshot),
+  version: snapshot.version, id: snapshot.id, metrics: snapshot.metrics, compactions: snapshot.compactions,
+  ...(snapshot.contextPressure ? { contextPressure: snapshot.contextPressure } : {}),
   messages: snapshot.messages.map(cleanMessage),
   pendingCalls: snapshot.pendingCalls.map(pending => ({
     call: pending.call.name === 'set_intent'
@@ -58,6 +59,7 @@ export class AgentRuntime implements WorldConnection {
   private enabled = false;
   private closed = false;
   private failed = false;
+  private dirtyAgents = new Set<string>();
   constructor(readonly bridge: AgentBridge, readonly store: Store, providers: ProviderConfig[], snapshot: RuntimeSnapshot | undefined,
     private hooks: { changed(): void; inferenceChanged?(): void; fatal(error: unknown): void }, private requestQueue = new RequestQueue()) {
     this.inference = new InferenceClient(providers, () => this.hooks.inferenceChanged?.(), this.requestQueue);
@@ -68,10 +70,10 @@ export class AgentRuntime implements WorldConnection {
         sessionId: port.id,
         context: () => this.agentContext(agent),
         complete: (request, signal) => session.completeAuxiliary((req, sig) => this.complete(agent, req, sig), request, signal),
-        save: () => this.persist(),
+        save: () => this.persist(agent),
         publish: (record, source) => this.publishMemory(agent, record, source),
         event: event => {
-          try { port.recordMemoryCompaction({ ...event }); this.persist(); this.hooks.inferenceChanged?.(); }
+          try { this.dirtyAgents.add(port.id); port.recordMemoryCompaction({ ...event }); this.persist(agent); this.hooks.inferenceChanged?.(); }
           catch (error) { this.fail(error); throw error; }
         },
         fatal: error => this.fail(error),
@@ -83,6 +85,8 @@ export class AgentRuntime implements WorldConnection {
         ...(saved?.look ? { look: { ...saved.look } } : {}), ...(saved?.toolFailures ? { toolFailures: structuredClone(saved.toolFailures) } : {}), state: 'stopped' };
       if (saved?.failedCalls) agent.failedCalls = { ...saved.failedCalls };
       this.agents.set(port.id, agent);
+      this.dirtyAgents.add(port.id);
+      port.retainCalls(session.snapshot().pendingCalls.filter(pending => !pending.result).map(pending => pending.call.id));
     }
   }
   get mode(): 'llm' | 'waiting' { return this.inference.enabled ? 'llm' : 'waiting'; }
@@ -92,16 +96,28 @@ export class AgentRuntime implements WorldConnection {
     this.hooks.changed();
   }
   persistence(): RuntimeSnapshot {
-    return { version: 1, simulation: this.bridge.snapshot(), agents: Object.fromEntries([...this.agents].map(([id, agent]) => [id, {
-      session: agent.session.snapshot(), notes: [...agent.notes], memory: agent.memory.snapshot(), ...(agent.viewAngle ? { viewAngle: agent.viewAngle } : {}),
+    return { version: 1, simulation: this.bridge.snapshot(), agents: Object.fromEntries([...this.agents].map(([id, agent]) => [id, this.agentSnapshot(agent)])) };
+  }
+  /** A physics checkpoint includes only agent state changed outside the acting loop. */
+  checkpoint(): RuntimeSnapshot {
+    return { version: 1, simulation: this.bridge.snapshot(), agents: Object.fromEntries([...this.dirtyAgents].map(id => [id, this.agentSnapshot(this.agents.get(id)!)])) };
+  }
+  acceptCheckpoint() { this.dirtyAgents.clear(); }
+  private agentSnapshot(agent: Agent): AgentSnapshot {
+    return {
+      session: agent.session.snapshot(), memory: agent.memory.snapshot(), ...(agent.viewAngle ? { viewAngle: agent.viewAngle } : {}),
       ...(agent.look ? { look: { ...agent.look } } : {}),
       ...(agent.toolFailures ? { toolFailures: structuredClone(agent.toolFailures) } : {}),
       ...(agent.failedCalls ? { failedCalls: { ...agent.failedCalls } } : {}),
-    }])) };
+    };
   }
   metrics() { return Object.fromEntries([...this.agents].map(([id, agent]) => [id, agent.session.metrics])); }
-  private persist() {
-    try { this.store.saveAgentState(this.persistence()); }
+  private persist(agent: Agent) {
+    try {
+      const snapshot = this.agentSnapshot(agent);
+      this.store.saveAgentSession(agent.port.id, snapshot);
+      agent.port.retainCalls(snapshot.session.pendingCalls.filter(pending => !pending.result).map(pending => pending.call.id));
+    }
     catch (error) { this.fail(error); throw error; }
   }
   resume() {
@@ -109,8 +125,7 @@ export class AgentRuntime implements WorldConnection {
     this.enabled = true;
     for (const agent of this.agents.values()) {
       if (!agent.port.active()) { agent.memory.pause(); agent.controller?.abort(new Error('Entity disabled.')); continue; }
-      this.syncMemory(agent);
-      if (!agent.job) this.launch(agent);
+      if (!agent.job) { this.syncMemory(agent); this.launch(agent); }
       if (this.inference.enabled) agent.memory.resume();
     }
   }
@@ -149,9 +164,10 @@ export class AgentRuntime implements WorldConnection {
   }
   private publishMemory(agent: Agent, record: AgentMemoryRecord, source: 'write' | 'compaction') {
     try {
+      this.dirtyAgents.add(agent.port.id);
       if (record.intent && JSON.stringify(agent.sourcePort.observe().self.intent) !== JSON.stringify(record.intent)) agent.sourcePort.setIntent(record.intent);
       agent.sourcePort.recordMemory(record, source);
-      this.persist(); this.hooks.inferenceChanged?.();
+      this.persist(agent); this.hooks.inferenceChanged?.();
     } catch (error) { this.fail(error); throw error; }
   }
   private launch(agent: Agent) {
@@ -172,7 +188,7 @@ Current tool results override old positions, inventory and fallible notes. Learn
       complete: (request, signal) => this.complete(agent, request, signal),
       contextWindow: this.inference.contextWindow,
       maxTokens: this.inference.maxTokens,
-      persist: () => this.persist(),
+      persist: () => this.persist(agent),
       onCompaction: details => agent.sourcePort.recordContextCompaction(details),
       onState: (state, detail) => {
         agent.state = state; agent.detail = detail;
@@ -184,7 +200,7 @@ Current tool results override old positions, inventory and fallible notes. Learn
       agent.job = undefined; agent.controller = undefined;
       if (this.closed || this.failed) return;
       try {
-        this.persist(); this.hooks.changed();
+        this.persist(agent); this.hooks.changed();
         if (this.enabled && agent.port.active()) this.launch(agent);
       } catch (error) { this.fail(error); }
     });
@@ -195,7 +211,7 @@ Current tool results override old positions, inventory and fallible notes. Learn
       try { return operation(); }
       catch (error) { this.fail(error); throw error; }
     };
-    const audit = durable(() => this.store.beginInference(this.bridge.tick, agent.port.id, request.purpose, 'recent-context-v1', request));
+    const audit = durable(() => this.store.beginInference(this.bridge.tick, agent.port.id, request.purpose, 'compact-v1', request));
     try {
       const answer = await this.inference.complete(request, signal);
       signal.throwIfAborted();
@@ -206,5 +222,11 @@ Current tool results override old positions, inventory and fallible notes. Learn
       throw error;
     }
   }
-  close() { this.closed = true; for (const agent of this.agents.values()) agent.memory.close(); this.suspend(); this.persist(); this.bridge.close(); }
+  close() {
+    this.closed = true;
+    for (const agent of this.agents.values()) agent.memory.close();
+    this.suspend();
+    for (const agent of this.agents.values()) this.persist(agent);
+    this.bridge.close();
+  }
 }

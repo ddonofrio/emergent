@@ -30,6 +30,7 @@ const failureYieldCallId = (callId: string) => `${callId}:failure-yield`;
 export class AgentBridge {
   private entities: Record<string, EntityTasks>;
   private waiters = new Map<string, Map<string, Waiter>>();
+  private retainedCalls = new Map<string, ReadonlySet<string>>();
   private unsubscribe: () => void;
   private dirty = false;
   private flushScheduled = false;
@@ -87,6 +88,10 @@ export class AgentBridge {
           const action = state.actions.find(action => action.callId === callId);
           const request = state.requests.find(request => request.callId === callId);
           return request || action ? this.bind(id, request ?? { callId, actionId: action!.id }, signal) : undefined;
+        },
+        retainCalls: callIds => {
+          const pending = new Set(callIds.flatMap(callId => [callId, failureYieldCallId(callId)]));
+          this.retainedCalls.set(id, pending); this.trim(this.state(id), pending);
         },
         submit: (callId, command, signal) => this.submit(id, callId, command, signal),
         cancel: (callId, actionId, signal) => this.submit(id, callId, { action: 'cancel', actionId }, signal),
@@ -261,7 +266,8 @@ export class AgentBridge {
       this.engine.acknowledgeEncounters(id, notices.encounters);
       this.engine.acknowledgeTerrainChanges(id, notices.terrainChanges);
       this.engine.acknowledgeBlockImpacts(id, notices.impacts);
-      this.dirty = true;
+      // Position/progress is saved with regular physics frames. Only new tasks,
+      // events and receipts need an immediate durable checkpoint.
     }
     this.flush();
   }
@@ -325,7 +331,7 @@ export class AgentBridge {
     action.finishedEventId = event.id;
     this.dirty = true;
   }
-  private trim(state: EntityTasks) {
+  private trim(state: EntityTasks, pendingCalls?: ReadonlySet<string>) {
     const referenced = new Set(state.requests.flatMap(request => request.actionId ? [request.actionId] : []));
     for (const event of state.events) {
       const data = event.data as { actionId?: string; action?: { id?: string } } | undefined;
@@ -333,11 +339,13 @@ export class AgentBridge {
       if (id) referenced.add(id);
     }
     const settled = state.actions.filter(action => !ongoing(action) && !referenced.has(action.id));
-    const keep = new Set(settled.slice(-ACTION_HISTORY_LIMIT).map(action => action.id));
+    // The world journal already holds completed actions. A saved tool result
+    // acknowledges its receipt; only unresolved calls can need it on restart.
+    const keep = new Set((pendingCalls ? settled.filter(action => pendingCalls.has(action.callId)) : settled.slice(-ACTION_HISTORY_LIMIT)).map(action => action.id));
     state.actions = state.actions.filter(action => ongoing(action) || referenced.has(action.id) || keep.has(action.id));
     const receiptIds = Object.keys(state.receipts);
-    const protectedCalls = new Set([...state.requests.map(request => request.callId), ...state.actions.filter(ongoing).map(action => action.callId)]);
-    for (const callId of receiptIds.slice(0, -RECEIPT_HISTORY_LIMIT)) if (!protectedCalls.has(callId)) delete state.receipts[callId];
+    const protectedCalls = new Set([...(pendingCalls ?? []), ...state.requests.map(request => request.callId), ...state.actions.filter(ongoing).map(action => action.callId)]);
+    for (const callId of pendingCalls ? receiptIds : receiptIds.slice(0, -RECEIPT_HISTORY_LIMIT)) if (!protectedCalls.has(callId)) delete state.receipts[callId];
     const queuedEvents = new Set(state.events.map(event => event.id));
     state.seen = state.seen.filter((id, index) => index >= state.seen.length - SEEN_EVENT_LIMIT || queuedEvents.has(id));
   }
@@ -366,7 +374,7 @@ export class AgentBridge {
     }
     if (this.dirty) {
       try {
-        for (const state of Object.values(this.entities)) this.trim(state);
+        for (const [id, state] of Object.entries(this.entities)) this.trim(state, this.retainedCalls.get(id));
         this.checkpoint(); this.dirty = false;
       } catch (error) {
         this.closed = true; this.unsubscribe();

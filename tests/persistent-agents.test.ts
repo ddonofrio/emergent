@@ -23,7 +23,11 @@ function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state
   const store = new Store(':memory:', engine.module.manifest);
   let runtime: AgentRuntime;
   let clock: TurnClock;
-  const bridge = new AgentBridge(engine, restored?.runtime.simulation, () => store.record(engine.frame(), undefined, runtime.persistence()));
+  const record = (checkpoint = false) => {
+    store.record(engine.frame(), checkpoint ? engine.state() : undefined, runtime.checkpoint());
+    runtime.acceptCheckpoint();
+  };
+  const bridge = new AgentBridge(engine, restored?.runtime.simulation, () => record());
   const errors: unknown[] = [];
   runtime = new AgentRuntime(bridge, store, [{ id: 'mock', type: 'openai-compatible', name: 'Mock', baseUrl: 'http://unused.invalid', model: 'mock', apiKey: '', ...capacity }], restored?.runtime, { changed() { clock?.barrierChanged(); }, fatal(error) { errors.push(error); } });
   const requests: { request: CompletionRequest; respond(name: string, args?: Record<string, unknown>): void; summarize(record: AgentMemoryRecord): void; fail(): void }[] = [];
@@ -33,9 +37,9 @@ function fixture(twoAgents = false, restored?: { state: ReturnType<Engine['state
       summarize(record) { signal.removeEventListener('abort', abort); resolve({ content: JSON.stringify(record), calls: [], provider: 'mock', model: 'mock', latencyMs: 1, finishReason: 'stop' }); },
       fail() { signal.removeEventListener('abort', abort); reject(new Error('Disconnected')); } });
   });
-  store.record(engine.frame(), engine.state(), runtime.persistence());
+  record(true);
   let wall = 0;
-  clock = new TurnClock(engine, runtime, { frame() { store.record(engine.frame(), undefined, runtime.persistence()); }, status() {}, fatal(error) { errors.push(error); } }, () => wall);
+  clock = new TurnClock(engine, runtime, { frame() { record(); }, status() {}, fatal(error) { errors.push(error); } }, () => wall);
   const pump = (ms = 50) => { wall += ms; clock.pump(); };
   return { engine, store, bridge, runtime, requests, clock, errors, pump,
     async close() { clock.close(); await new Promise(resolve => setTimeout(resolve, 1)); store.close(); } };
@@ -125,6 +129,29 @@ test('silent walking holds one tool without inference across world seconds and r
     const result = resultOf(f.requests[1].request);
     assert.equal(result.action.status, 'completed'); assert.equal(result.action.distanceTravelled.toFixed(1), '8.0');
     f.pump(60000); assert.equal(f.engine.tick, 80); assert.deepEqual(f.errors, []);
+  } finally { await f.close(); }
+});
+
+test('physics records at frame cadence without saving or reading the conversation on each pump', async t => {
+  const f = fixture();
+  try {
+    f.clock.setEnabled(true); await until(() => f.requests.length === 1);
+    f.requests[0].respond('wait_for_event', { seconds: 10, eventTypes: [] });
+    await until(() => f.runtime.ready());
+    await new Promise(resolve => setImmediate(resolve));
+    f.pump(0);
+    const saves = t.mock.method(f.store, 'saveAgentSession');
+    const snapshots = t.mock.method(f.runtime.agents.get('walker')!.session, 'snapshot');
+    const observations = t.mock.method(f.engine, 'observeAt');
+    for (let turn = 0; turn < 5; turn++) f.pump(1000);
+    assert.equal(f.engine.tick, 100);
+    assert.equal(saves.mock.callCount(), 0);
+    assert.equal(snapshots.mock.callCount(), 0);
+    assert.equal(observations.mock.callCount(), 0);
+    const rows = f.store.db.prepare('SELECT tick FROM frames WHERE tick > 0 ORDER BY tick').all() as { tick: number }[];
+    assert.deepEqual(rows.map(row => row.tick), Array.from({ length: 50 }, (_, index) => (index + 1) * 2));
+    assert.equal(f.requests.length, 1);
+    assert.deepEqual(f.errors, []);
   } finally { await f.close(); }
 });
 

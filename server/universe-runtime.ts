@@ -21,6 +21,7 @@ export class UniverseRuntime {
   private recordedMetricsSignature = '';
   private lastRecordedTurnTick = 0;
   private lastTurnSampleAt = performance.now();
+  private lastPublishedTick = -1;
 
   constructor(readonly universe: UniverseModule, dataDirectory: string, private readonly config: {
     providers: ProviderConfig[];
@@ -49,13 +50,14 @@ export class UniverseRuntime {
       fatal: config.fatal,
     }, config.requestQueue);
     this.clock = new TurnClock(this.engine, this.agents, {
-      frame: () => this.publishFrame(this.engine.tick % 600 === 0),
+      frame: () => { if (this.lastPublishedTick !== this.engine.tick) this.publishFrame(); },
       status: () => this.broadcast('status', this.observerStatus()),
       fatal: config.fatal,
     });
     this.engine.event('world', 'session', `World ${storedState ? 'resumed' : 'created'} with persistent agent sessions.`);
     const frame=this.engine.frame();this.appendTurnSpeed(frame);this.appendMetricsSnapshot(frame);
-    this.store.record(frame, this.engine.state(), this.agents.persistence());
+    this.store.record(frame, this.engine.state(), this.agents.checkpoint());
+    this.agents.acceptCheckpoint(); this.lastPublishedTick = frame.tick;
     this.acceptFrameStats(frame);
   }
   get hasAgents() { return this.agents.agents.size > 0; }
@@ -82,14 +84,15 @@ export class UniverseRuntime {
       else client.write(message);
     }
   }
-  publishFrame(checkpoint = false) {
+  publishFrame(checkpoint = this.engine.tick % 600 === 0) {
     const frame = this.failedFrame ?? this.engine.frame();
     this.appendTurnSpeed(frame);this.appendMetricsSnapshot(frame);
-    try { this.store.record(frame, checkpoint ? this.engine.state() : undefined, this.agents.persistence()); }
+    try { this.store.record(frame, checkpoint ? this.engine.state() : undefined, this.agents.checkpoint()); }
     catch (error) {
       this.failedFrame = frame; this.agents.fail(error); throw error;
     }
     this.acceptFrameStats(frame);
+    this.agents.acceptCheckpoint(); this.lastPublishedTick = frame.tick;
     this.failedFrame = undefined;
     this.broadcast('frame', { frame, runtime: this.clock.status() });
   }
@@ -127,7 +130,7 @@ export class UniverseRuntime {
   close() {
     this.clock.close();
     const frame=this.failedFrame??this.engine.frame();this.appendTurnSpeed(frame);this.appendMetricsSnapshot(frame);
-    this.store.record(frame, this.engine.state(), this.agents.persistence());this.acceptFrameStats(frame);
+    this.store.record(frame, this.engine.state(), this.agents.checkpoint());this.acceptFrameStats(frame);this.agents.acceptCheckpoint();
     for (const client of this.clients) client.end();
     this.clients.clear(); this.store.close();
   }

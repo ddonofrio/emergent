@@ -440,3 +440,21 @@ test('a failed receipt checkpoint rejects released waits and revokes the bridge'
   await assert.rejects(port.submit('after-failure', { action: 'walk', distance: 2 }, setup.signal), /connection is closed/);
   bridge.close();
 });
+
+test('acknowledged receipts are discarded while unresolved results remain resumable', async () => {
+  const setup = fixture();
+  try {
+    const first = setup.port.submit('first', { action: 'look' }, setup.signal);
+    setup.bridge.commit(); setup.advance(1); await first;
+    const second = setup.port.wait('second', { seconds: .05, eventTypes: [] }, setup.signal);
+    setup.advance(1); const outcome = await second;
+    setup.port.retainCalls(['second']);
+    const state = setup.bridge.snapshot().entities.a;
+    assert.equal(state.receipts.first, undefined);
+    assert.equal(state.actions.some(action => action.callId === 'first'), false);
+    assert.deepEqual(state.receipts.second, outcome);
+    assert.deepEqual(await setup.port.resume('second', setup.signal), outcome);
+    setup.port.retainCalls([]);
+    assert.deepEqual(setup.bridge.snapshot().entities.a.receipts, {});
+  } finally { setup.bridge.close(); }
+});

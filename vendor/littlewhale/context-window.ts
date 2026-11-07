@@ -4,6 +4,8 @@ import type { ContextCompaction, Message, SessionRunOptions, SessionSnapshot } f
 export const RECENT_STEPS = 10;
 export const COMPACTION_PRESSURE = 0.9;
 const RETAINED_PRESSURE = 0.25;
+// Bound retained JSON even if a provider reports incomplete or incorrect usage.
+const MAX_CONTEXT_BYTES = 1024 * 1024;
 export const HISTORY_NOTICE = 'You are continuing an existing conversation. Your current intent, private notes, learned knowledge, and complete action results are retained below; some earlier transient context may be absent. Use remember to preserve important information for future steps, set_intent to keep your goals and next step current, and recall to search learned knowledge. Do not assume missing details.';
 const CURRENT_CONTEXT_NOTICE = 'Current memory record and local observation. This supersedes older snapshots in the conversation.';
 
@@ -52,11 +54,12 @@ export function conversationRequest(
   // compaction threshold.
   const inputCapacity = contextWindow;
   const thresholdTokens = Math.floor(inputCapacity * COMPACTION_PRESSURE);
-  if (projectedBefore < thresholdTokens) return { history, messages: fullMessages };
+  const storageLimitTokens = Math.min(contextWindow * 2, Math.floor(MAX_CONTEXT_BYTES / 3));
+  if (projectedBefore < thresholdTokens && estimatedBefore < storageLimitTokens) return { history, messages: fullMessages };
 
   // Compact infrequently, then leave enough room for the conversation to grow
   // back toward the pressure threshold instead of trimming on every request.
-  const recent = recentConversation(history, Math.max(0, Math.floor(inputCapacity * RETAINED_PRESSURE)));
+  const recent = recentConversation(history, Math.max(0, Math.floor(Math.min(inputCapacity, storageLimitTokens) * RETAINED_PRESSURE)));
   const compactedMessages = [...requestHistory(recent), ...current];
   const estimatedAfter = estimateTokens({ system: options.system, tools: options.schemas, messages: compactedMessages });
   const changed = recent.length !== history.length || history.some(message => message.providerState !== undefined);
@@ -65,6 +68,7 @@ export function conversationRequest(
     history: recent,
     messages: compactedMessages,
     compaction: {
+      trigger: projectedBefore >= thresholdTokens ? 'context-pressure' : 'storage-limit',
       pressure: COMPACTION_PRESSURE,
       contextWindow,
       inputCapacity,

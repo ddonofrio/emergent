@@ -31,9 +31,11 @@ The world engine owns all time. A shared barrier freezes physics whenever any ac
 - `server/turn-clock.ts`: generic clock participant contract from `server/simulation/connection.ts`; runnable without agents.
 - `server/simulation`: persistent action tasks, concurrency, per-entity capability ports and observable event queues.
 - `server/agents`: one conversation per entity and simulation tool contracts; receives scoped ports instead of the engine.
-- `vendor/littlewhale`: headless source adaptations of LittleWhale's session, execution loop, tool dispatch and basic compaction. Conversation history grows to 90% of the configured context window before the compactor preserves a bounded tail of complete assistant/tool pairs; the original conversation remains durable. See its [source comparison and license notices](vendor/littlewhale/README.md).
+- `vendor/littlewhale`: headless source adaptations of LittleWhale's session, execution loop, tool dispatch and basic compaction. Conversation history grows to 90% of the configured context window before the compactor preserves a bounded tail of complete assistant/tool pairs. An independent JSON size guard bounds underreported context. Discarded conversation history is not retained in a duplicate log. See its [source comparison and license notices](vendor/littlewhale/README.md).
 - `server/inference`: LittleWhale's pinned pi-ai provider core, native replay, configuration and discovery; no chat UI or Cordis application stack.
-- `server/store.ts`: SQLite WAL, authoritative events, world frames, conversation snapshots, action receipts and server-only inference audits. Replay reads recorded state without models or physics execution.
+- `server/store.ts`: SQLite WAL, authoritative events, world frames, separate conversation snapshots and pending action receipts. Physics saves never rewrite unchanged conversations. Server-only diagnostics keep the latest 256 finished inferences with timing, usage and errors, not full prompts. Replay reads recorded state without models or physics execution.
+
+Existing persistent-tool recordings migrate on the next server startup: redundant session logs and old diagnostic payloads are removed, pending actions and world history are preserved, and freed disk pages are reclaimed once. A read-only serialization benchmark for a recording is available with `node --import tsx scripts/benchmark-persistence.ts data/first-shore.sqlite`.
 
 The former agent system, prompts, compaction modules, tests and snapshots of mixed files were moved to `.tmp/agent-system-before-persistent-tools/`. New code does not import that archive. The old paired planner/executor, movement interruption sessions, configuration and recording contracts are retired with no compatibility layer.
 

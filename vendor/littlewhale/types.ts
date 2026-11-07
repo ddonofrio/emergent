@@ -67,6 +67,7 @@ export interface SessionMetrics {
 }
 
 export interface ContextCompaction {
+  trigger?: 'context-pressure' | 'storage-limit';
   pressure: number;
   contextWindow: number;
   inputCapacity: number;
@@ -84,18 +85,11 @@ export interface PendingCall {
   result?: Message;
 }
 
-export interface SessionEvent {
-  seq: number;
-  type: 'user/message' | 'assistant/message' | 'tool/result' | 'compaction/start' | 'compaction/end' | 'llm/retry';
-  data: unknown;
-}
-
 export interface SessionSnapshot {
   version: 1;
   id: string;
-  /** Compactable model surface. Original messages, including removed reasoning, remain in events. */
+  /** The current conversation only; discarded history is not duplicated in a session log. */
   messages: Message[];
-  events: SessionEvent[];
   pendingCalls: PendingCall[];
   metrics: SessionMetrics;
   compactions: number;
@@ -115,7 +109,8 @@ export interface SessionRunOptions {
   resumeTool?: (call: ToolCall, signal: AbortSignal) => Promise<unknown> | undefined;
   system: string;
   signal: AbortSignal;
-  persist?: (snapshot: SessionSnapshot) => void | Promise<void>;
+  /** The host captures state when called; no redundant snapshot is constructed by the loop. */
+  persist?: () => void | Promise<void>;
   onState?: (state: SessionState, detail?: string) => void;
   onCompletion?: (completion: Completion, purpose: CompletionRequest['purpose']) => void;
   onCompaction?: (details: ContextCompaction) => void;

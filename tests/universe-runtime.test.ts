@@ -42,3 +42,29 @@ test('an authoritative write failure inside a tool stops the loop without fabric
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('one committed second writes ten physics frames and never rewrites the agent conversation', async t => {
+  const temporaryRoot = resolve('.tmp'); mkdirSync(temporaryRoot, { recursive: true });
+  const directory = mkdtempSync(join(temporaryRoot, 'frame-cadence-test-'));
+  let wall = 0;
+  t.mock.method(performance, 'now', () => wall);
+  const failures: unknown[] = [];
+  const runtime = new UniverseRuntime(module, directory, { providers: [{ id: 'mock', type: 'openai-compatible', name: 'Mock', baseUrl: 'http://unused.invalid', model: 'mock', apiKey: '' }], fatal(error) { failures.push(error); } });
+  runtime.agents.inference.complete = async () => ({ content: null, calls: [{ id: 'wait', name: 'wait_for_event', arguments: { seconds: 1, eventTypes: [] } }], provider: 'mock', model: 'mock', latencyMs: 0 });
+  try {
+    runtime.setRunning(true); await until(() => runtime.agents.ready());
+    runtime.pump();
+    const frames = t.mock.method(runtime.store, 'record');
+    const sessions = t.mock.method(runtime.store, 'saveAgentSession');
+    wall = 1000; runtime.pump();
+    assert.equal(runtime.engine.tick, 20);
+    assert.deepEqual(frames.mock.calls.map(call => call.arguments[0].tick), [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
+    assert.equal(sessions.mock.callCount(), 0);
+    assert.deepEqual(failures, []);
+  } finally {
+    runtime.close();
+    await until(() => [...runtime.agents.agents.values()].every(agent => !agent.job));
+    assert.ok(resolve(directory).startsWith(temporaryRoot + sep));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
