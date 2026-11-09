@@ -15,16 +15,44 @@ const interfaceRoute=parseInterfaceRoute(routePath());
 const interfaceMode=interfaceRoute.mode;
 const scopedPath=(path:string)=>appPath(interfaceRoutePath(interfaceMode,path));
 const route=/^\/universes\/([a-z0-9-]+)\/?$/.exec(interfaceRoute.contentPath);
+const adminKeyStorageKey='emergent.adminAccessKey';
 
 void start();
 
 async function start(){
-  if(interfaceMode==='admin'&&!await hasAdminSession()){renderAdminLogin();return;}
+  if(interfaceMode==='admin'&&!await restoreAdminSession()){renderAdminLogin();return;}
   if(route)await openRoutedUniverse(route[1]);else renderLauncher();
 }
 
 async function hasAdminSession(){
   try{return (await fetch(appPath('/api/admin/session'))).ok;}catch{return false;}
+}
+
+function savedAdminKey(){
+  try{return window.localStorage.getItem(adminKeyStorageKey);}catch{return null;}
+}
+
+function saveAdminKey(key:string){
+  try{window.localStorage.setItem(adminKeyStorageKey,key);}catch{}
+}
+
+function removeSavedAdminKey(){
+  try{window.localStorage.removeItem(adminKeyStorageKey);}catch{}
+}
+
+async function loginAdmin(key:string):Promise<'authenticated'|'rejected'|'unavailable'>{
+  try{
+    const response=await fetch(appPath('/api/admin/login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key})});
+    return response.ok?'authenticated':response.status===401?'rejected':'unavailable';
+  }catch{return 'unavailable';}
+}
+
+async function restoreAdminSession(){
+  if(await hasAdminSession())return true;
+  const key=savedAdminKey();if(!key)return false;
+  const result=await loginAdmin(key);
+  if(result==='rejected')removeSavedAdminKey();
+  return result==='authenticated';
 }
 
 function renderAdminLogin(){
@@ -43,12 +71,10 @@ function renderAdminLogin(){
     event.preventDefault();
     const input=document.getElementById('admin-key') as HTMLInputElement,status=document.getElementById('admin-login-status')!,button=form.querySelector<HTMLButtonElement>('button')!;
     button.disabled=true;status.textContent='Checking access key...';
-    try{
-      const response=await fetch(appPath('/api/admin/login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:input.value})});
-      if(!response.ok){status.textContent='The access key is incorrect.';input.select();return;}
-      app.replaceChildren();if(route)await openRoutedUniverse(route[1]);else renderLauncher();
-    }catch{status.textContent='Administrator access is unavailable.';}
-    finally{button.disabled=false;}
+    const result=await loginAdmin(input.value);
+    if(result==='rejected'){removeSavedAdminKey();status.textContent='The access key is incorrect.';input.select();button.disabled=false;return;}
+    if(result==='unavailable'){status.textContent='Administrator access is unavailable.';button.disabled=false;return;}
+    saveAdminKey(input.value);app.replaceChildren();if(route)await openRoutedUniverse(route[1]);else renderLauncher();
   };
 }
 

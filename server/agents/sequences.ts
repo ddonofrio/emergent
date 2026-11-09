@@ -7,7 +7,7 @@ const MAX_SEQUENCE_BYTES = 8192;
 export const sequenceActions = new Set(['look', 'walk_to', 'walk', 'run', 'reverse', 'jump', 'say', 'turn',
   'find_material', 'find_entity', 'hit', 'pickup', 'place', 'throw', 'store', 'strike_held', 'dig', 'fill', 'empty', 'hold', 'join', 'open', 'close']);
 // Advertise event names once, on wait_for_event, instead of in every action schema.
-export const eventTypesSchema = { type: 'array', items: { type: 'string' }, maxItems: wakeEventTypes.length, uniqueItems: true };
+export const eventTypesSchema = { type: 'array', items: { type: 'string' }, maxItems: wakeEventTypes.length };
 export const namedEventTypesSchema = { ...eventTypesSchema, items: { type: 'string', enum: [...wakeEventTypes] } };
 export function validateEventTypes(eventTypes: unknown) {
   if (eventTypes !== undefined) validateArguments({ name: 'eventTypes', description: '', parameters: namedEventTypesSchema }, eventTypes);
@@ -188,7 +188,7 @@ export function sequenceTools(port: AgentPort, memory: SequenceMemory, prepare: 
     });
 
   add('save_sequence', 'Save or replace your own procedure (at most eight). Steps use existing physical tool names. Parameter values use exact JSON references {"$param":"name"}. Describe when it is useful; saving does not establish that it works.',
-    object({ name, description: { type: 'string', minLength: 1, maxLength: 240 }, parameters: { type: 'array', items: name, maxItems: 8, uniqueItems: true }, steps: stepsSchema }, ['name', 'description', 'steps']), async args => {
+    object({ name, description: { type: 'string', minLength: 1, maxLength: 240 }, parameters: { type: 'array', items: name, maxItems: 8 }, steps: stepsSchema }, ['name', 'description', 'steps']), async args => {
       const routine: SavedSequence = { name: args.name as string, description: args.description as string,
         parameters: [...args.parameters as string[] | undefined ?? []], steps: structuredClone(args.steps as SequenceStep[]) };
       checkSteps(routine.steps); bind(routine.steps, routine.parameters);
