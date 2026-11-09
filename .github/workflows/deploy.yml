@@ -41,7 +41,7 @@ jobs:
         run: npm run build
 
       - name: Package release
-        run: tar -czf emergent-release.tgz dist server src vendor package.json package-lock.json tsconfig.json
+        run: tar -czf emergent-release.tgz dist server src vendor scripts/dump-world.ts package.json package-lock.json tsconfig.json
 
       - name: Install SSH key
         uses: webfactory/ssh-agent@v0.10.0

@@ -76,6 +76,16 @@ systemctl status emergent.service
 sudo journalctl -u emergent.service -n 100 --no-pager
 ```
 
+Dump the active production world over SSH without modifying it:
+
+```powershell
+.\scripts\remote-dump.ps1 -Scope Summary
+.\scripts\remote-dump.ps1 -Scope Agent -Agent Flint -Limit 50 -OutputPath .tmp\flint.ndjson
+.\scripts\remote-dump.ps1 -Scope Full -OutputPath .tmp\first-shore-full.ndjson
+```
+
+`Summary` reports entity, pending simulation, event, and inference state. `Agent` includes the selected agent session and related events and inference audits. `Full` streams every SQLite table as NDJSON and can be large. Select another saved world with `-World <uuid>`. The wrapper uses the deployment SSH endpoint and requires the deployment key through an SSH agent or `-IdentityFile`.
+
 Validate Nginx before any reload:
 
 ```sh

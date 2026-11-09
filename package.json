@@ -12,6 +12,7 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "check:startup": "tsx scripts/check-startup.ts",
+    "dump:world": "tsx scripts/dump-world.ts",
     "test": "tsx --test tests/*.test.ts",
     "benchmark:agents": "tsx scripts/benchmark-agents.ts"
   },
