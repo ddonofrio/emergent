@@ -1,0 +1,27 @@
+[Unit]
+Description=Emergent universe observatory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=guile
+Group=guile
+WorkingDirectory=/var/www/emergent/current
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=DATA_DIR=/var/lib/emergent
+Environment=PUBLIC_ORIGINS=http://74.208.72.196
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/etc/emergent/emergent.env
+ExecStart=/usr/local/bin/npm start
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/emergent
+
+[Install]
+WantedBy=multi-user.target

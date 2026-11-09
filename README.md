@@ -11,6 +11,10 @@ Open http://127.0.0.1:3000. The universe launcher and observers remain responsiv
 
 No `.env` is required. Active worlds default to `data/`; an explicit `DATA_DIR` overrides it. Configure models in Settings or copy `.env.example`. Server-only `<DATA_DIR>/inference-config.json` uses `{ "version": 1, "providers": [...] }`. Models are tried in order. Each entry has one reasoning level, context capacity and optional credentials. Output uses the remaining context, estimated by pi-ai with its 4096-token safety reserve and any known native model output limit; there is no fixed application output cap. Supported routes are OpenAI-compatible endpoints, OpenAI, OpenRouter, Vast gateways, and Amazon Bedrock. Model `auto` discovers an available model. Omitted credentials preserve that entry's saved credentials; explicit removal clears them. Keys and headers never enter browser configuration, world recordings or agent conversations.
 
+## Deployment
+
+The `Deploy` GitHub Actions workflow verifies every push to `main`, builds the browser bundle for `/emergent/`, and atomically deploys the application to the production server. The system service keeps persistent world data outside versioned releases, and Nginx proxies the public subpath to the loopback-only Node server. See [Production deployment](deploy/README.md) for the security boundary, required secrets, server layout, deployment lifecycle, rollback, and operating commands.
+
 ## Execution contract
 
 Settings includes `Parallel requests`. Enabled allows simultaneous model requests; disabled sends one at a time across all agents and universes. The choice is saved as `parallelRequests` in the inference configuration. Changing only this setting preserves conversations, prepared decisions and active requests. Simulation actions still execute concurrently once every agent is ready.

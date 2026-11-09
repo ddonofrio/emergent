@@ -11,6 +11,14 @@ import { RequestQueue } from './inference/request-queue';
 
 const port = Number(process.env.PORT ?? 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port.');
+const localOrigins = [`http://localhost:${port}`, `http://127.0.0.1:${port}`];
+const configuredOrigins = (process.env.PUBLIC_ORIGINS ?? '').split(',').map(value => value.trim()).filter(Boolean).map(value => {
+  const parsed = new URL(value);
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('PUBLIC_ORIGINS must contain HTTP or HTTPS origins.');
+  return parsed.origin;
+});
+const allowedOrigins = new Set([...localOrigins, ...configuredOrigins]);
+const allowedHosts = new Set([...allowedOrigins].map(origin => new URL(origin).host));
 const dataDirectory = resolveDataDirectory(process.env.DATA_DIR);
 const inferenceConfigPath = resolve(dataDirectory, 'inference-config.json');
 let providers = providersFromEnv();
@@ -73,9 +81,8 @@ function withSavedCredentials(value: unknown): Record<string, unknown> {
 
 const server = createServer(async (req, res) => {
   try {
-    const allowedHosts = [`localhost:${port}`, `127.0.0.1:${port}`];
-    if (!allowedHosts.includes(req.headers.host ?? '')) { json(res, { error: 'Invalid host.' }, 403); return; }
-    if (req.headers.origin && !allowedHosts.map(h => `http://${h}`).includes(req.headers.origin)) { json(res, { error: 'Cross-origin access is disabled.' }, 403); return; }
+    if (!allowedHosts.has(req.headers.host ?? '')) { json(res, { error: 'Invalid host.' }, 403); return; }
+    if (req.headers.origin && !allowedOrigins.has(req.headers.origin)) { json(res, { error: 'Cross-origin access is disabled.' }, 403); return; }
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname === '/api/universes' && req.method === 'GET') {

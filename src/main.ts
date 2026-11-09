@@ -1,4 +1,5 @@
 import './style.css';
+import { appPath, routePath } from './base-path';
 
 interface UniverseSummary {
   id: string;
@@ -9,7 +10,7 @@ interface UniverseSummary {
 }
 
 const app=document.querySelector<HTMLDivElement>('#app')!;
-const route=/^\/universes\/([a-z0-9-]+)\/?$/.exec(window.location.pathname);
+const route=/^\/universes\/([a-z0-9-]+)\/?$/.exec(routePath());
 
 if(route){
   void openRoutedUniverse(route[1]);
@@ -19,17 +20,17 @@ if(route){
 
 async function openRoutedUniverse(id:string){
   try{
-    const response=await fetch('/api/universes');
+    const response=await fetch(appPath('/api/universes'));
     const universes=response.ok?await response.json() as UniverseSummary[]:[];
     if(universes.some(universe=>universe.id===id&&universe.available)){await import('./world-app');return;}
   }catch{}
-  history.replaceState(null,'','/');renderLauncher();
+  history.replaceState(null,'',appPath('/'));renderLauncher();
 }
 
 function renderLauncher(){
   app.innerHTML=`
     <main class="launcher">
-      <header class="launcher-header"><a class="brand" href="/" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent</a></header>
+      <header class="launcher-header"><a class="brand" href="${appPath('/')}" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent</a></header>
       <section id="world-cards" class="world-cards" aria-label="Universes"></section>
       <p id="launcher-status" class="sr-only" aria-live="polite"></p>
     </main>`;
@@ -48,7 +49,7 @@ function renderLauncher(){
       const card=document.createElement('article');card.className=`world-card${universe.running?' running':''}${universe.available?'':' unavailable'}`;
       const enter=document.createElement('button');enter.type='button';enter.className='world-card-enter';enter.disabled=!universe.available;enter.setAttribute('aria-label',`Enter ${universe.name}`);
       const title=document.createElement('h1');title.textContent=universe.name;enter.append(title);
-      enter.onclick=()=>{window.clearInterval(refreshTimer);window.location.assign(`/universes/${universe.id}`);};
+      enter.onclick=()=>{window.clearInterval(refreshTimer);window.location.assign(appPath(`/universes/${universe.id}`));};
       const power=document.createElement('button');power.type='button';power.className='world-power';power.disabled=!universe.available||busy.has(universe.id);power.classList.toggle('stop',universe.running);power.setAttribute('aria-label',`${universe.running?'Stop':'Start'} ${universe.name}`);power.setAttribute('aria-pressed',String(universe.running));
       power.append(document.createElement('span'));
       power.onclick=()=>void setRunning(universe,!universe.running);
@@ -60,7 +61,7 @@ function renderLauncher(){
     worldRevision++;
     busy.add(universe.id);draw();
     try{
-      const response=await fetch(`/api/universes/${universe.id}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({running})});
+      const response=await fetch(appPath(`/api/universes/${universe.id}/control`),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({running})});
       const result=await response.json() as {running?:boolean;error?:string};
       if(!response.ok)throw new Error(result.error??`Could not ${running?'start':'stop'} ${universe.name}.`);
       const nextRunning=result.running===true;
@@ -73,7 +74,7 @@ function renderLauncher(){
   const refresh=async()=>{
     const revision=worldRevision;
     try{
-      const response=await fetch('/api/universes');if(!response.ok)throw new Error();
+      const response=await fetch(appPath('/api/universes'));if(!response.ok)throw new Error();
       const next=await response.json() as UniverseSummary[];
       if(revision===worldRevision&&JSON.stringify(next)!==JSON.stringify(universes)){universes=next;draw();}
     }catch{document.getElementById('launcher-status')!.textContent='World status is unavailable.';}
