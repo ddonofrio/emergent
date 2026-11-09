@@ -27,7 +27,7 @@ export async function runStartupCheck(): Promise<StartupCheckReport> {
   try {
     // Prevent this check from opening any server port even if startup regresses.
     const guardPath = join(directory, 'no-listen.mjs');
-    writeFileSync(guardPath, "import { Server } from 'node:net';\nServer.prototype.listen = function () { throw new Error('Startup check attempted to open a server port.'); };\n");
+    writeFileSync(guardPath, "import { Server } from 'node:net';\nif (!process.geteuid) process.geteuid = () => 1000;\nServer.prototype.listen = function () { throw new Error('Startup check attempted to open a server port.'); };\n");
     const require = createRequire(import.meta.url);
     const environment: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
       !/^(DATA_DIR|NODE_OPTIONS|EMERGENT_LLM_.*|OPENAI_.*|OPENROUTER_.*|LOCAL_LLM_.*|LLM_.*)$/i.test(key)));

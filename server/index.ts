@@ -8,6 +8,7 @@ import { discoverModels, providersFromEnv, publicProviders, validateProviders } 
 import { UniverseRuntime } from './universe-runtime';
 import { resolveDataDirectory } from './config';
 import { RequestQueue } from './inference/request-queue';
+import { AdminAccess } from './admin-access';
 
 const port = Number(process.env.PORT ?? 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port.');
@@ -19,6 +20,7 @@ const configuredOrigins = (process.env.PUBLIC_ORIGINS ?? '').split(',').map(valu
 });
 const allowedOrigins = new Set([...localOrigins, ...configuredOrigins]);
 const allowedHosts = new Set([...allowedOrigins].map(origin => new URL(origin).host));
+const adminAccess = new AdminAccess();
 const dataDirectory = resolveDataDirectory(process.env.DATA_DIR);
 const inferenceConfigPath = resolve(dataDirectory, 'inference-config.json');
 let providers = providersFromEnv();
@@ -84,7 +86,22 @@ const server = createServer(async (req, res) => {
     if (!allowedHosts.has(req.headers.host ?? '')) { json(res, { error: 'Invalid host.' }, 403); return; }
     if (req.headers.origin && !allowedOrigins.has(req.headers.origin)) { json(res, { error: 'Cross-origin access is disabled.' }, 403); return; }
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
+    if(url.pathname==='/emergent')url.pathname='/';
+    else if(url.pathname.startsWith('/emergent/'))url.pathname=url.pathname.slice('/emergent'.length);
     if (url.pathname.startsWith('/api/')) {
+      if(url.pathname==='/api/admin/session'&&req.method==='GET'){
+        json(res,{authenticated:true},adminAccess.isAuthorized(req.headers.cookie)?200:401);return;
+      }
+      if(url.pathname==='/api/admin/login'&&req.method==='POST'){
+        const data=await requestJson(req,2048),token=adminAccess.login(data.key);
+        if(!token){json(res,{error:'Invalid access key.'},401);return;}
+        const forwardedProtocol=Array.isArray(req.headers['x-forwarded-proto'])?req.headers['x-forwarded-proto'][0]:req.headers['x-forwarded-proto'];
+        res.setHeader('Set-Cookie',adminAccess.sessionCookie(token,forwardedProtocol==='https'));
+        json(res,{authenticated:true});return;
+      }
+      if(req.method!=='GET'&&!adminAccess.isAuthorized(req.headers.cookie)){
+        json(res,{error:'Administrator access is required.'},401);return;
+      }
       if (url.pathname === '/api/universes' && req.method === 'GET') {
         json(res, universeCatalog.map(universe => ({ ...universe, running: runtimes.get(universe.id)?.clock.status().enabled ?? false }))); return;
       }

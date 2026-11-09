@@ -9,6 +9,7 @@ import { firstShoreAppearance } from './universes/first-shore/appearance';
 import './universes/first-shore/style.css';
 import { WorldChat } from './view/world-chat';
 import { appPath, routePath } from './base-path';
+import { interfaceRoutePath, parseInterfaceRoute } from './interface-routing';
 
 interface AgentMetrics { llmCalls?:number; inputTokens?:number; outputTokens?:number; cachedInputTokens?:number; }
 interface ModelRequestStatus { state:'unknown'|'ok'|'bad'; inFlight:number; detail?:string; }
@@ -17,17 +18,21 @@ interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; recor
 interface ModelProvider { id:string; type:string; name:string; enabled?:boolean; baseUrl:string; model:string; region?:string; tokenless?:boolean; contextWindow?:number; reasoning?:string; hasApiKey?:boolean; apiKey?:string; clearApiKey?:boolean; hasVastToken?:boolean; vastToken?:string; clearVastToken?:boolean; vastContainerLabel?:string; }
 interface InferenceConfig { version:1; parallelRequests?:boolean; providers:ModelProvider[]; }
 interface ProviderModelOption { id:string; label:string; contextWindow?:number; }
-const universeId=/^\/universes\/([a-z0-9-]+)\/?$/.exec(routePath())?.[1];
+const interfaceRoute=parseInterfaceRoute(routePath());
+const isAdmin=interfaceRoute.mode==='admin';
+const universeId=/^\/universes\/([a-z0-9-]+)\/?$/.exec(interfaceRoute.contentPath)?.[1];
 if(!universeId)throw new Error('A universe route is required.');
 const worldApi=appPath(`/api/universes/${universeId}`);
+const homePath=appPath(interfaceRoutePath(interfaceRoute.mode,'/'));
 const rosterLayout=universeId==='robots-vs-robots';
 document.body.classList.toggle('roster-layout',rosterLayout);
+document.body.classList.toggle('observer-interface',!isAdmin);
 document.body.dataset.universe=universeId;
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <main id="main">
     <section class="observation-area" aria-label="World observation">
-      <div class="world-toolbar"><div class="world-brand"><a class="brand" href="${appPath('/')}" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent</a><span class="world-brand-divider" aria-hidden="true">|</span><h1 id="module-name">First Shore</h1></div><button id="settings-open" class="settings-open" title="Settings" aria-label="Open settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.25a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z"/><path d="m19.4 13.5 1.1.85-1.1 1.9-1.35-.45a7.8 7.8 0 0 1-1.55.9l-.25 1.4h-2.2l-.25-1.4a7.8 7.8 0 0 1-1.55-.9l-1.35.45-1.1-1.9 1.1-.85a7 7 0 0 1 0-1.8l-1.1-.85 1.1-1.9 1.35.45a7.8 7.8 0 0 1 1.55-.9l.25-1.4h2.2l.25 1.4a7.8 7.8 0 0 1 1.55.9l1.35-.45 1.1 1.9-1.1.85a7 7 0 0 1 0 1.8Z" transform="translate(-1.4 -1.5)"/></svg></button></div>
+      <div class="world-toolbar"><div class="world-brand"><a class="brand" href="${homePath}" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent</a><span class="world-brand-divider" aria-hidden="true">|</span><h1 id="module-name">First Shore</h1></div>${isAdmin?'<button id="settings-open" class="settings-open" title="Settings" aria-label="Open settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.25a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z"/><path d="m19.4 13.5 1.1.85-1.1 1.9-1.35-.45a7.8 7.8 0 0 1-1.55.9l-.25 1.4h-2.2l-.25-1.4a7.8 7.8 0 0 1-1.55-.9l-1.35.45-1.1-1.9 1.1-.85a7 7 0 0 1 0-1.8l-1.1-.85 1.1-1.9 1.35.45a7.8 7.8 0 0 1 1.55-.9l.25-1.4h2.2l.25 1.4a7.8 7.8 0 0 1 1.55.9l1.35-.45 1.1 1.9-1.1.85a7 7 0 0 1 0 1.8Z" transform="translate(-1.4 -1.5)"/></svg></button>':'<span class="observer-badge">Read only</span>'}</div>
       <div id="world" class="world"><div class="loading" id="loading"><span class="loader"></span>Opening the observatory…</div></div>
       <section class="timeline" aria-label="Recorded world timeline">
         <div class="timeline-top">
@@ -49,14 +54,14 @@ app.innerHTML = `
     </aside>
     <aside id="inspector" class="inspector" aria-label="Properties">
       <header class="panel-heading"><h2>Properties</h2><button id="focus-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-label="Collapse Properties panel" title="Collapse Properties panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span>Properties</span></button></header>
-      <section class="roster-world-controls" aria-label="World control"><div class="section-heading"><h2>World control</h2><span id="roster-world-state">Stopped</span></div><div class="roster-control-actions"><button id="roster-play" type="button">Play</button><button id="roster-stop" type="button">Stop</button><button id="roster-reset" class="danger" type="button">Restart from zero</button></div><p id="roster-control-message" role="status"></p></section>
+      ${isAdmin?'<section class="roster-world-controls" aria-label="World control"><div class="section-heading"><h2>World control</h2><span id="roster-world-state">Stopped</span></div><div class="roster-control-actions"><button id="roster-play" type="button">Play</button><button id="roster-stop" type="button">Stop</button><button id="roster-reset" class="danger" type="button">Restart from zero</button></div><p id="roster-control-message" role="status"></p></section>':''}
       <section id="roster-view-controls" class="roster-view-controls" aria-label="World view controls"><div class="section-heading"><h2>View</h2></div></section>
       <section class="inhabitants"><div class="section-heading"><h2>Inhabitants</h2><span id="entity-count">09</span></div><div id="entity-list"></div><p id="roster-move-message" class="roster-move-message" role="status"></p></section>
       <section id="record-knowledge" class="record-knowledge" aria-label="Private notes and learned knowledge"></section>
       <section class="focus-section"><div id="details" class="details"></div></section>
     </aside>
   </main>
-  <section id="llm-settings" class="settings-screen hidden" aria-labelledby="settings-title" aria-hidden="true">
+  ${isAdmin?`<section id="llm-settings" class="settings-screen hidden" aria-labelledby="settings-title" aria-hidden="true">
     <header class="settings-header"><button id="settings-back" class="settings-back">Back</button><div><span class="eyebrow">EMERGENT / SETTINGS</span><h1 id="settings-title">Settings</h1></div></header>
     <div class="settings-content">
       <form id="llm-settings-form">
@@ -65,7 +70,7 @@ app.innerHTML = `
         <div class="settings-actions"><span id="settings-status" role="status"></span><button class="save-button" type="submit">Save configuration</button></div>
       </form>
     </div>
-  </section>
+  </section>`:''}
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -88,7 +93,7 @@ let epoch = 0, seekTimer: ReturnType<typeof setTimeout>, replayFrames: Frame[] =
 let dayCount = 0,detailsSignature='',statsSignature='';
 let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[];learned?:string[]}|undefined;
 const worldChat = new WorldChat($('world'),worldApi,()=>({available:!!meta,live:isLive&&!seeking,tick:cursor,
-  entities:shown?.entities??[],voice:meta?.observerVoice,settingsOpen:!$('llm-settings').classList.contains('hidden')}));
+  entities:shown?.entities??[],voice:isAdmin?meta?.observerVoice:undefined,settingsOpen:isAdmin&&!$('llm-settings').classList.contains('hidden')}));
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
 let inferenceConfig:InferenceConfig={version:1,parallelRequests:true,providers:[]};
@@ -244,7 +249,7 @@ stream.addEventListener('frame', event => {
   if (isLive) {
     const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;
     acceptTurnSpeed(frame);
-    shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);worldChat.add(frame.events);
+    shown = { ...frame,blocks: [] }; cursor = frame.tick; events = liveEvents; view.update(frame);worldChat?.add(frame.events);
     if (frame.events.length) renderJournal();
   }
   if(frame.events.some(event=>event.type==='memory'&&event.actor===selected))void loadMemory();
@@ -255,7 +260,7 @@ function goLive() {
   if (!meta || !liveDynamic) return;
   epoch++; replayRequest++; fetching = false; seeking = false; clearTimeout(seekTimer); isLive = true; playing = false; scrubTarget = null; replayFrames = [];
   shown = { ...liveDynamic, blocks: [...liveCells].map(([k,kind]) => [...unkey(k),kind]), ...(liveRemoved.size?{removedBlocks:[...liveRemoved]}:{}) };
-  cursor = latest; shownMetrics=meta.metrics;shownSecondsPerTurn=meta.secondsPerTurn;events = liveEvents; view.load(shown,meta.universe);worldChat.reset(); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
+  cursor = latest; shownMetrics=meta.metrics;shownSecondsPerTurn=meta.secondsPerTurn;events = liveEvents; view.load(shown,meta.universe);worldChat?.reset(); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
 }
 async function seek(tick: number) {
   const request = ++epoch; replayRequest++; fetching = false; seeking = true; isLive = false; playing = false; scrubTarget = null; replayFrames = []; view.hold();
@@ -263,7 +268,7 @@ async function seek(tick: number) {
   try {
     const response = await fetch(`${worldApi}/state?tick=${cursor}`); if (!response.ok) throw new Error('Could not load recorded history.');
     const data = await response.json() as Boot; if (request !== epoch) return;
-    shown = data.state; cursor = shown.tick; replayClock = cursor;shownMetrics=data.recordedMetrics;shownSecondsPerTurn=data.recordedSecondsPerTurn;seeking = false; events = data.events; view.load(shown,meta.universe);worldChat.reset(data.events); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
+    shown = data.state; cursor = shown.tick; replayClock = cursor;shownMetrics=data.recordedMetrics;shownSecondsPerTurn=data.recordedSecondsPerTurn;seeking = false; events = data.events; view.load(shown,meta.universe);worldChat?.reset(data.events); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
   } catch (error) { if (request === epoch) toast(error instanceof Error ? error.message : 'History unavailable.'); }
   finally { if (request === epoch) seeking = false; }
 }
@@ -289,7 +294,7 @@ function playback(now: number) {
       replayClock = advancePlayback(replayClock, dt, speed, Math.min(destination,replayFrames.at(-1)!.tick));
       let changed = false,memoryChanged=false;
       while (replayFrames.length && replayFrames[0].tick <= replayClock) {
-        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] };const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;acceptTurnSpeed(frame);view.update(frame,false,speed);worldChat.add(frame.events); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
+        const frame = replayFrames.shift()!; cursor = frame.tick; shown = { ...frame,blocks: [] };const metricsEvent=frame.events.findLast(event=>event.type==='llm-metrics');if(metricsEvent)shownMetrics=metricsEvent.data as Record<string,AgentMetrics>;acceptTurnSpeed(frame);view.update(frame,false,speed);worldChat?.add(frame.events); events = [...events,...frame.events].slice(-200); changed = true;memoryChanged ||= frame.events.some(event=>event.type==='memory'&&event.actor===selected);
       }
       if (changed) { renderTimeline(); renderInspector(); renderJournal(); }
       if(memoryChanged)void loadMemory();
@@ -297,7 +302,7 @@ function playback(now: number) {
     }
     // Stay in replay at the recording edge. Only the Live button changes observer mode.
   }
-  worldChat.render(now);requestAnimationFrame(playback);
+  worldChat?.render(now);requestAnimationFrame(playback);
 }
 requestAnimationFrame(playback);
 
@@ -329,7 +334,6 @@ function renderInspector() {
     if(existing){
       existing.classList.toggle('selected',e.id===selected);existing.classList.toggle('disabled',!enabled);
       const select=existing.querySelector<HTMLButtonElement>('.inhabitant-select')!;select.setAttribute('aria-pressed',String(e.id===selected));
-      const toggle=existing.querySelector<HTMLInputElement>('.entity-toggle')!;toggle.checked=enabled;toggle.disabled=!isLive;
       const mode=existing.querySelector<HTMLSelectElement>('.entity-control-mode');if(mode){mode.value=e.controller==='automaton'?'automaton':'manual';mode.disabled=!isLive;}
       const status=existing.querySelector<HTMLElement>('.entity-status')!;status.textContent=displayStatus;status.title=activity.title??'';status.classList.toggle('thinking',activity.thinking);status.classList.toggle('error',displayStatus==='error');continue;
     }
@@ -344,14 +348,13 @@ function renderInspector() {
     const kind=document.createElement('small');kind.textContent=e.kind==='troglodyte'?'Troglodyte':e.kind==='miner-robot'?`${robotMaterial(e).replace(/^./,letter=>letter.toUpperCase())} Miner Robot${robotPowerModuleLabel(e)}`:'Duck · NPC';text.append(name,kind);
     const status=document.createElement('span');status.className=`entity-status ${activity.thinking?'thinking':''} ${displayStatus==='error'?'error':''}`;status.textContent=displayStatus;status.title=activity.title??'';
     const mode=document.createElement('select');mode.className='entity-control-mode';mode.setAttribute('aria-label',`${e.name} control mode`);mode.append(new Option('Manual','manual'),new Option('Automaton','automaton'));mode.value=e.controller==='automaton'?'automaton':'manual';mode.disabled=!isLive;mode.onchange=()=>void setEntityControlMode(e.id,mode.value as 'manual'|'automaton',mode);
-    const toggle=document.createElement('input');toggle.type='checkbox';toggle.className='entity-toggle';toggle.checked=enabled;toggle.disabled=!isLive;toggle.title=`Enable ${e.name}`;toggle.setAttribute('aria-label',`Enable ${e.name}`);toggle.onchange=()=>void setEntityEnabled(e.id,toggle.checked,toggle);
-    button.append(avatar,text,status);button.onclick=()=>selectEntity(e.id);button.ondblclick=()=>view.focus(e.id);row.append(button,...(e.kind==='miner-robot'?[mode]:[]),toggle);list.append(row);
+    button.append(avatar,text,status);button.onclick=()=>selectEntity(e.id);button.ondblclick=()=>view.focus(e.id);row.append(button,...(isAdmin&&e.kind==='miner-robot'?[mode]:[]));list.append(row);
   }
   renderDetails();
   renderStats();
 }
 function renderWorldControls(){
-  if(!rosterLayout||!meta)return;
+  if(!isAdmin||!rosterLayout||!meta)return;
   const running=meta.runtime.enabled,state=$('roster-world-state'),play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop');
   state.textContent=running?'Running':'Stopped';state.classList.toggle('running',running);play.disabled=running;stop.disabled=!running;
 }
@@ -506,8 +509,10 @@ function journalEventMessage(event:WorldEvent) {
   }
   return event.message;
 }
-$('settings-open').onclick=()=>showSettings(true);
-$('settings-back').onclick=()=>showSettings(false);
+if(isAdmin){
+  $('settings-open').onclick=()=>showSettings(true);
+  $('settings-back').onclick=()=>showSettings(false);
+}
 $('debug-toggle').onclick=()=>{
   const panel=$('debug-panel'),open=panel.classList.contains('collapsed');panel.classList.toggle('collapsed',!open);
   $('main').classList.toggle('debug-open',open);$('debug-toggle').setAttribute('aria-expanded',String(open));$('debug-toggle').setAttribute('aria-label',`${open?'Collapse':'Expand'} debug panel`);$('debug-toggle').title=`${open?'Collapse':'Expand'} debug panel`;
@@ -516,19 +521,21 @@ $('focus-toggle').onclick=()=>{
   const panel=$('inspector'),open=panel.classList.contains('collapsed');panel.classList.toggle('collapsed',!open);
   $('main').classList.toggle('focus-collapsed',!open);$('focus-toggle').setAttribute('aria-expanded',String(open));$('focus-toggle').setAttribute('aria-label',`${open?'Collapse':'Expand'} Properties panel`);$('focus-toggle').title=`${open?'Collapse':'Expand'} Properties panel`;
 };
-$('add-model').onclick=()=>{
-  const rows=readModelRows(),number=rows.length+1;renderModelRows([...rows,{id:`model-${Date.now()}-${number}`,type:'openai-compatible',name:`Model ${number}`,enabled:false,baseUrl:'',model:'',contextWindow:49152}]);
-};
-$<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
-  event.preventDefault();const status=$('settings-status');status.textContent='Saving configuration...';
-  try{
-    const response=await fetch(`${worldApi}/inference-config`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:1,parallelRequests:$<HTMLInputElement>('parallel-requests').checked,providers:readModelRows()})});
-    const data=await response.json() as Metadata&{inferenceConfig?:InferenceConfig;error?:string};if(!response.ok)throw new Error(data.error??'Could not save configuration.');
-    if(meta){meta.mode=data.mode;meta.model=data.model;}
-    if(data.inferenceConfig){inferenceConfig=data.inferenceConfig;if(meta)meta.inferenceConfig=inferenceConfig;}
-    $<HTMLInputElement>('parallel-requests').checked=inferenceConfig.parallelRequests!==false;renderModelRows(inferenceConfig.providers);renderProviderStatus(inferenceConfig);status.textContent='Configuration saved.';
-  }catch(error){status.textContent=error instanceof Error?error.message:'Could not save configuration.';}
-};
+if(isAdmin){
+  $('add-model').onclick=()=>{
+    const rows=readModelRows(),number=rows.length+1;renderModelRows([...rows,{id:`model-${Date.now()}-${number}`,type:'openai-compatible',name:`Model ${number}`,enabled:false,baseUrl:'',model:'',contextWindow:49152}]);
+  };
+  $<HTMLFormElement>('llm-settings-form').onsubmit=async event=>{
+    event.preventDefault();const status=$('settings-status');status.textContent='Saving configuration...';
+    try{
+      const response=await fetch(`${worldApi}/inference-config`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:1,parallelRequests:$<HTMLInputElement>('parallel-requests').checked,providers:readModelRows()})});
+      const data=await response.json() as Metadata&{inferenceConfig?:InferenceConfig;error?:string};if(!response.ok)throw new Error(data.error??'Could not save configuration.');
+      if(meta){meta.mode=data.mode;meta.model=data.model;}
+      if(data.inferenceConfig){inferenceConfig=data.inferenceConfig;if(meta)meta.inferenceConfig=inferenceConfig;}
+      $<HTMLInputElement>('parallel-requests').checked=inferenceConfig.parallelRequests!==false;renderModelRows(inferenceConfig.providers);renderProviderStatus(inferenceConfig);status.textContent='Configuration saved.';
+    }catch(error){status.textContent=error instanceof Error?error.message:'Could not save configuration.';}
+  };
+}
 $('live').onclick = goLive;
 $('play').onclick = () => {
   if (!meta || seeking) return;
@@ -544,12 +551,12 @@ $<HTMLInputElement>('seek').oninput = event => {
 };
 $<HTMLSelectElement>('day').onchange = event => void seek((Number((event.target as HTMLSelectElement).value)-1)*WORLD_DAY_SECONDS*20);
 $('overview').onclick = () => view.overview(); $('top-down').onclick = () => view.topDown(); $('follow').onclick = () => view.focus(selected);
-$('roster-play').onclick=()=>void playWorld();$('roster-stop').onclick=()=>void stopWorld();$('roster-reset').onclick=()=>void resetWorld();
+if(isAdmin){$('roster-play').onclick=()=>void playWorld();$('roster-stop').onclick=()=>void stopWorld();$('roster-reset').onclick=()=>void resetWorld();}
 window.addEventListener('keydown',event=>{
-  if(!rosterLayout||!isLive||event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;
+  if(!isAdmin||!rosterLayout||!isLive||event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;
   if((event.target as HTMLElement|null)?.closest('input,select,textarea,button,[contenteditable="true"]'))return;
   const directions:Record<string,'up'|'down'|'left'|'right'>={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right'},direction=directions[event.key];
   if(!direction||shown?.entities.find(entity=>entity.id===selected)?.controller!=='static')return;
   event.preventDefault();void moveSelected(direction);
 });
-window.addEventListener('beforeunload', () => { stream.close();worldChat.dispose(); view.dispose(); });
+window.addEventListener('beforeunload', () => { stream.close();worldChat?.dispose(); view.dispose(); });

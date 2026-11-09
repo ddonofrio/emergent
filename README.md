@@ -7,13 +7,15 @@ npm install
 npm run dev
 ```
 
-Open http://127.0.0.1:3000. The universe launcher and observers remain responsive while models think. Each universe starts stopped. Play resumes its active world; Stop cancels inference and freezes time. The application server is managed by the user.
+Open http://127.0.0.1:3000/emergent/. This public observer is read-only: it can navigate worlds, inspect characters, read world chat, use the timeline and camera, and open debug information without changing simulation state. The administrator interface is at http://127.0.0.1:3000/emergent/admin/ and requests its hardcoded access key before exposing world controls, observer speech, manual robot control, or model settings. Administrator sessions expire after twelve hours or when the application process restarts. The application server is managed by the user.
+
+Both interfaces intentionally omit the character enabled/disabled checkboxes. Entity enablement remains part of the engine and API with its existing enabled values so the control can be placed elsewhere later.
 
 No `.env` is required. Active worlds default to `data/`; an explicit `DATA_DIR` overrides it. Configure models in Settings or copy `.env.example`. Server-only `<DATA_DIR>/inference-config.json` uses `{ "version": 1, "providers": [...] }`. Models are tried in order. Each entry has one reasoning level, context capacity and optional credentials. Output uses the remaining context, estimated by pi-ai with its 4096-token safety reserve and any known native model output limit; there is no fixed application output cap. Supported routes are OpenAI-compatible endpoints, OpenAI, OpenRouter, Vast gateways, and Amazon Bedrock. Model `auto` discovers an available model. Omitted credentials preserve that entry's saved credentials; explicit removal clears them. Keys and headers never enter browser configuration, world recordings or agent conversations.
 
 ## Deployment
 
-The `Deploy` GitHub Actions workflow verifies every push to `main`, builds the browser bundle for `/emergent/`, and atomically deploys the application to the production server. The system service keeps persistent world data outside versioned releases, and Nginx proxies the public subpath to the loopback-only Node server. See [Production deployment](deploy/README.md) for the security boundary, required secrets, server layout, deployment lifecycle, rollback, and operating commands.
+The `Deploy` GitHub Actions workflow verifies every push to `main`, builds both interfaces under `/emergent/`, and atomically deploys the application to the production server. The observer remains at `/emergent/` and the administrator interface is routed under `/emergent/admin/`. The system service keeps persistent world data outside versioned releases, and Nginx proxies the public subpath to the loopback-only Node server. See [Production deployment](deploy/README.md) for the security boundary, required secrets, server layout, deployment lifecycle, rollback, and operating commands.
 
 ## Execution contract
 

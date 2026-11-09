@@ -1,16 +1,18 @@
 # Production deployment
 
-Emergent is deployed to `http://74.208.72.196/emergent/` by the GitHub Actions workflow in [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). Every push to `main` verifies, packages, and deploys the committed revision.
+Emergent is deployed to `http://74.208.72.196/emergent/` by the GitHub Actions workflow in [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). The public URL is a read-only observer; the protected administrator interface is at `http://74.208.72.196/emergent/admin/`. Every push to `main` verifies, packages, and deploys the committed revision.
 
 ## Security boundary
 
-No password, private SSH key, provider token, or API key belongs in the repository.
+No infrastructure password, private SSH key, provider token, or API key belongs in the repository. The administrator interface uses the intentionally hardcoded application access key requested for this deployment; it is not a replacement for transport security or infrastructure credentials.
 
 - `SSH_PRIVATE_KEY` exists only as an encrypted GitHub Actions secret in `ddonofrio/emergent`.
 - The server stores only the matching public key in `/home/guile/.ssh/authorized_keys`.
 - Model credentials saved through the application live in `/var/lib/emergent/inference-config.json` on the server.
 - Optional environment credentials belong in `/etc/emergent/emergent.env` on the server. That file is not part of a release.
 - `.env`, `data/`, and private key files remain excluded from version control.
+
+The server creates a random administrator session after a successful key check and stores it in an `HttpOnly`, `SameSite=Strict` cookie. All API requests that mutate a world, send observer speech, discover models, or save inference configuration require that session. Public observer requests are limited to read operations. Sessions expire after twelve hours and are cleared by a service restart.
 
 The server address, SSH port, remote user, public URL, service name, and filesystem paths are infrastructure identifiers rather than authentication credentials. They may appear in deployment configuration.
 
@@ -19,6 +21,7 @@ The server address, SSH port, remote user, public URL, service name, and filesys
 | Component | Location or value |
 | --- | --- |
 | Public application | `http://74.208.72.196/emergent/` |
+| Administrator interface | `http://74.208.72.196/emergent/admin/` |
 | Node listener | `127.0.0.1:3000` |
 | Releases | `/var/www/emergent/releases/<commit-sha>` |
 | Active release | `/var/www/emergent/current` symlink |
