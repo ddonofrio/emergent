@@ -12,7 +12,11 @@ const pack = (data: unknown) => deflateSync(JSON.stringify(data));
 const unpack = <T>(data: Uint8Array): T => JSON.parse(inflateSync(data).toString());
 export class Store {
   db: DatabaseSync;
-  constructor(path: string, readonly manifest: UniverseManifest) {
+  constructor(path: string, readonly manifest: UniverseManifest, options: { readOnly?: boolean } = {}) {
+    if (options.readOnly) {
+      this.db = new DatabaseSync(path, { readOnly: true });
+      return;
+    }
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     const tables = new Set((this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {name: string}[]).map(row => row.name));
@@ -116,6 +120,8 @@ export class Store {
   metricsAt(tick: number) {
     const row = this.db.prepare("SELECT data FROM events WHERE tick <= ? AND actor = 'world' AND type = 'llm-metrics' ORDER BY id DESC LIMIT 1").get(tick) as {data:string} | undefined;
     if(row)return (JSON.parse(row.data) as WorldEvent).data;
+    const hasLegacyMetrics = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'legacy_metrics'").get();
+    if (!hasLegacyMetrics) return undefined;
     const legacy = this.db.prepare('SELECT data FROM legacy_metrics WHERE tick <= ? ORDER BY tick DESC LIMIT 1').get(tick) as { data: Uint8Array } | undefined;
     return legacy ? unpack(legacy.data) : undefined;
   }

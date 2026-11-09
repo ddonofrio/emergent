@@ -4,11 +4,15 @@ import { resolve, extname, sep } from 'node:path';
 import { once } from 'node:events';
 import { inflateSync } from 'node:zlib';
 import { loadUniverse, universeCatalog } from '../src/universes';
+import { CLOCK_VERSION, TICKS_PER_SECOND, TURN_TICKS } from '../src/core/time';
+import type { UniverseModule } from '../src/core/types';
 import { discoverModels, providersFromEnv, publicProviders, validateProviders } from './inference/providers';
 import { UniverseRuntime } from './universe-runtime';
 import { resolveDataDirectory } from './config';
 import { RequestQueue } from './inference/request-queue';
 import { AdminAccess } from './admin-access';
+import { WorldManager, type WorldDefinition } from './world-manager';
+import { Store } from './store';
 
 const port = Number(process.env.PORT ?? 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port.');
@@ -35,13 +39,25 @@ try {
   if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
 }
 const requestQueue = new RequestQueue(parallelRequests);
-const createUniverseRuntime = (entry: (typeof universeCatalog)[number]) => new UniverseRuntime(loadUniverse(entry.id), dataDirectory, {
-  providers, requestQueue,
-  fatal(error) { console.error(`${entry.name} storage or runtime failure:`, error); void shutdown(1); },
+const worldManager = await WorldManager.open(dataDirectory, universeCatalog.map(entry => {
+  const universe = loadUniverse(entry.id); return { id: entry.id, name: entry.name, seed: universe.manifest.seed };
+}));
+const activeWorlds = new Map(universeCatalog.filter(universe => universe.available).map(entry => [entry.id, worldManager.activeWorld(entry.id)] as const));
+const worldUniverse = (entry: (typeof universeCatalog)[number], world: WorldDefinition): UniverseModule => {
+  const universe = loadUniverse(entry.id);
+  return universe.manifest.seed === world.seed ? universe : { ...universe, manifest: { ...universe.manifest, seed: world.seed } };
+};
+const publicWorld = (world: WorldDefinition, active: boolean) => ({ id: world.id, universeId: world.universeId, name: world.name, seed: world.seed,
+  createdAt: world.createdAt, updatedAt: world.updatedAt, active });
+const createUniverseRuntime = (entry: (typeof universeCatalog)[number], world = worldManager.activeWorld(entry.id), fatal?: (error: unknown) => void) => new UniverseRuntime(worldUniverse(entry, world), dataDirectory, {
+  providers, requestQueue, recordingPath: worldManager.recordingPath(world),
+  fatal: fatal ?? (error => { console.error(`${entry.name} storage or runtime failure:`, error); void shutdown(1); }),
 });
-const runtimes = new Map(universeCatalog.filter(universe => universe.available).map(entry => [entry.id, createUniverseRuntime(entry)] as const));
+const runtimes = new Map(universeCatalog.filter(universe => universe.available).map(entry => [entry.id, createUniverseRuntime(entry, activeWorlds.get(entry.id)!)] as const));
 if (process.argv.includes('--check-startup')) {
-  const result = { dataDirectory, universes: [...runtimes].map(([id, runtime]) => ({ id, tick: runtime.engine.tick, running: runtime.clock.status().enabled })) };
+  const result = { dataDirectory, universes: [...runtimes].map(([id, runtime]) => {
+    const world = activeWorlds.get(id)!; return { id, worldId: world.id, recording: worldManager.recordingPath(world), tick: runtime.engine.tick, running: runtime.clock.status().enabled };
+  }) };
   for (const runtime of runtimes.values()) runtime.close();
   console.log(`Startup check passed: ${JSON.stringify(result)}`);
   process.exit(0);
@@ -50,9 +66,25 @@ async function restartUniverse(entry: (typeof universeCatalog)[number]) {
   const current = runtimes.get(entry.id);
   if (!current) throw new Error('This universe runtime is unavailable.');
   runtimes.delete(entry.id); current.close();
-  const recording = resolve(dataDirectory, `${entry.id}.sqlite`);
+  const world = activeWorlds.get(entry.id)!;
+  const recording = worldManager.recordingPath(world);
   await Promise.all([recording, `${recording}-shm`, `${recording}-wal`].map(path => rm(path, { force: true })));
-  const replacement = createUniverseRuntime(entry); runtimes.set(entry.id, replacement); replacement.setRunning(true); return replacement;
+  const replacement = createUniverseRuntime(entry, world); runtimes.set(entry.id, replacement); replacement.setRunning(true); return replacement;
+}
+async function activateUniverseWorld(entry: (typeof universeCatalog)[number], target: WorldDefinition) {
+  const previous = activeWorlds.get(entry.id)!;
+  const current = runtimes.get(entry.id);
+  if (!current) throw new Error('This universe runtime is unavailable.');
+  if (previous.id === target.id) return current;
+  const wasRunning = current.clock.status().enabled;
+  runtimes.delete(entry.id); current.close();
+  await worldManager.activate(entry.id, target.id); activeWorlds.set(entry.id, target);
+  try {
+    const replacement = createUniverseRuntime(entry, target); runtimes.set(entry.id, replacement); replacement.setRunning(wasRunning); return replacement;
+  } catch (error) {
+    await worldManager.activate(entry.id, previous.id); activeWorlds.set(entry.id, previous);
+    const restored = createUniverseRuntime(entry, previous); runtimes.set(entry.id, restored); restored.setRunning(wasRunning); throw error;
+  }
 }
 const production = process.argv.includes('--production');
 const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
@@ -66,6 +98,53 @@ async function requestJson(req: IncomingMessage, limit: number): Promise<Record<
   try { value = JSON.parse(body); } catch { throw new Error('Request body must contain valid JSON.'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected a JSON object.');
   return value as Record<string, unknown>;
+}
+function archiveMetadata(entry: (typeof universeCatalog)[number], world: WorldDefinition, store: Store) {
+  const universe = worldUniverse(entry, world), latestTick = store.latestTick();
+  return { universe: universe.manifest, mode: 'waiting' as const, model: 'Recorded world', inferenceConfig: { version: 1, parallelRequests, providers: [] },
+    running: false, latestTick, world: publicWorld(world, false),
+    runtime: { phase: 'paused' as const, enabled: false, turn: Math.floor(latestTick / TURN_TICKS) + 1, tick: latestTick, agents: {} },
+    metrics: store.metricsAt(latestTick), providerStatus: {}, clock: { version: CLOCK_VERSION, ticksPerSecond: TICKS_PER_SECOND, turnTicks: TURN_TICKS },
+    secondsPerTurn: store.secondsPerTurnAt(latestTick), ...(universe.observerVoice ? { observerVoice: universe.observerVoice } : {}) };
+}
+async function serveArchive(req: IncomingMessage, res: ServerResponse, url: URL, entry: (typeof universeCatalog)[number], world: WorldDefinition, apiPath: string) {
+  let store: Store;
+  try { store = new Store(worldManager.recordingPath(world), worldUniverse(entry, world).manifest, { readOnly: true }); }
+  catch { json(res, { error: 'This world has no recording yet.' }, 404); return; }
+  let retained = false;
+  try {
+    const metadata = () => archiveMetadata(entry, world, store);
+    const requestedTick = Number(url.searchParams.get('tick') ?? store.latestTick());
+    if (!Number.isFinite(requestedTick) || requestedTick < 0) { json(res, { error: 'Invalid tick.' }, 400); return; }
+    if (apiPath === '/api/speech') {
+      const beforeId = Number(url.searchParams.get('before') ?? Number.MAX_SAFE_INTEGER);
+      if (!Number.isSafeInteger(beforeId) || beforeId < 1) { json(res, { error: 'Invalid speech cursor.' }, 400); return; }
+      json(res, store.speechAt(requestedTick, beforeId)); return;
+    }
+    if (apiPath === '/api/meta') { json(res, metadata()); return; }
+    if (apiPath === '/api/state') { const tick = Math.max(0, Math.min(Math.floor(requestedTick), store.latestTick())); json(res, { ...metadata(), state: store.stateAt(tick), events: store.eventsAt(tick), recordedMetrics: store.metricsAt(tick), recordedSecondsPerTurn: store.secondsPerTurnAt(tick) }); return; }
+    if (apiPath === '/api/memory') { const actor = url.searchParams.get('actor')?.trim(); if (!actor) { json(res, { error: 'Actor is required.' }, 400); return; } json(res, store.memoryAt(requestedTick, actor)); return; }
+    if (apiPath === '/api/memory-record') { const actor = url.searchParams.get('actor')?.trim(); if (!actor) { json(res, { error: 'Actor is required.' }, 400); return; } json(res, store.memoryRecordAt(requestedTick, actor)); return; }
+    if (apiPath === '/api/events') { json(res, store.eventsAt(requestedTick, url.searchParams.get('actor') ?? '', 120)); return; }
+    if (apiPath === '/api/frames') { json(res, store.framesAfter(requestedTick)); return; }
+    if (apiPath === '/api/stream') {
+      const latest = store.latestTick(); retained = true;
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+      res.write(`event: boot\ndata: ${JSON.stringify({ ...metadata(), state: store.stateAt(latest), events: store.eventsAt(latest) })}\n\n`);
+      req.on('close', () => store.close()); return;
+    }
+    if (apiPath === '/api/export') {
+      const endTick = store.latestTick();
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Content-Disposition': `attachment; filename="${world.id}.ndjson"` });
+      res.write(JSON.stringify({ type: 'world', clock: metadata().clock, universe: metadata().universe, state: store.stateAt(0) }) + '\n');
+      for (const row of store.db.prepare('SELECT data FROM frames WHERE tick <= ? ORDER BY tick').iterate(endTick) as Iterable<{ data: Uint8Array }>) {
+        if (res.destroyed) break;
+        if (!res.write(JSON.stringify({ type: 'frame', frame: JSON.parse(inflateSync(row.data).toString()) }) + '\n')) await once(res, 'drain');
+      }
+      res.end(); return;
+    }
+    json(res, { error: 'Unknown endpoint.' }, 404);
+  } finally { if (!retained) store.close(); }
 }
 function withSavedCredentials(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Each provider needs valid settings.');
@@ -105,16 +184,59 @@ const server = createServer(async (req, res) => {
       if (url.pathname === '/api/universes' && req.method === 'GET') {
         json(res, universeCatalog.map(universe => ({ ...universe, running: runtimes.get(universe.id)?.clock.status().enabled ?? false }))); return;
       }
-      const universeRoute = /^\/api\/universes\/([a-z0-9-]+)\/([a-z-]+)$/.exec(url.pathname);
+      const universeRoute = /^\/api\/universes\/([a-z0-9-]+)(\/.*)$/.exec(url.pathname);
       if (!universeRoute) { json(res, { error: 'Use a universe-scoped API endpoint.' }, 404); return; }
       const universe = universeCatalog.find(candidate => candidate.id === universeRoute[1]);
       if (!universe) { json(res, { error: 'Unknown universe.' }, 404); return; }
       if (!universe.available) { json(res, { error: `${universe.name} is not available yet.` }, 409); return; }
+      const universePath = universeRoute[2];
+      if (universePath === '/worlds') {
+        if (req.method === 'GET') { json(res, { worlds: await worldManager.list(universe.id), activeWorldId: activeWorlds.get(universe.id)!.id }); return; }
+        if (req.method === 'POST') {
+          try {
+            const data = await requestJson(req, 4096), world = await worldManager.create(universe.id, data.name, data.seed);
+            const initialized = createUniverseRuntime(universe, world, error => { throw error; }); initialized.close();
+            json(res, { world: (await worldManager.list(universe.id)).find(candidate => candidate.id === world.id) }, 201);
+          } catch (error) { json(res, { error: error instanceof Error ? error.message : 'World could not be created.' }, 400); }
+          return;
+        }
+        json(res, { error: 'Method not allowed.' }, 405); return;
+      }
+      const worldRoute = /^\/worlds\/([0-9a-f-]+)(\/activate)?$/.exec(universePath);
+      if (worldRoute) {
+        try {
+          const world = worldManager.world(universe.id, worldRoute[1]);
+          if (!worldRoute[2] && req.method === 'PATCH') {
+            const data = await requestJson(req, 2048); await worldManager.rename(universe.id, world.id, data.name);
+            json(res, { world: (await worldManager.list(universe.id)).find(candidate => candidate.id === world.id) }); return;
+          }
+          if (!worldRoute[2] && req.method === 'DELETE') {
+            await worldManager.delete(universe.id, world.id); json(res, { deleted: true }); return;
+          }
+          if (worldRoute[2] === '/activate' && req.method === 'POST') {
+            const summary = (await worldManager.list(universe.id)).find(candidate => candidate.id === world.id);
+            if (!summary?.hasRecording) throw new Error('This world has no recording to load.');
+            const prepared = summary.resumable ? world : await worldManager.makeResumable(universe.id, world.id, worldUniverse(universe, world).manifest);
+            const replacement = await activateUniverseWorld(universe, prepared), active = activeWorlds.get(universe.id)!;
+            json(res, { ...replacement.metadata(publicInferenceConfig(replacement)), world: publicWorld(active, true) }); return;
+          }
+          json(res, { error: 'Method not allowed.' }, 405);
+        } catch (error) { json(res, { error: error instanceof Error ? error.message : 'World operation failed.' }, 400); }
+        return;
+      }
+      if (!/^\/[a-z-]+$/.test(universePath)) { json(res, { error: 'Unknown universe endpoint.' }, 404); return; }
       const runtime = runtimes.get(universe.id);
       if (!runtime) { json(res, { error: 'This universe runtime is unavailable.' }, 503); return; }
       const { engine, store, clock: turnClock } = runtime;
-      const metadata = () => runtime.metadata(publicInferenceConfig(runtime));
-      const apiPath = `/api/${universeRoute[2]}`;
+      const activeWorld = activeWorlds.get(universe.id)!;
+      const metadata = () => ({ ...runtime.metadata(publicInferenceConfig(runtime)), world: publicWorld(activeWorld, true) });
+      const apiPath = `/api${universePath}`;
+      const requestedWorldId = url.searchParams.get('world');
+      if (req.method === 'GET' && requestedWorldId && requestedWorldId !== activeWorld.id) {
+        try { await serveArchive(req, res, url, universe, worldManager.world(universe.id, requestedWorldId), apiPath); }
+        catch (error) { json(res, { error: error instanceof Error ? error.message : 'World recording is unavailable.' }, 404); }
+        return;
+      }
       if (apiPath === '/api/speech' && req.method === 'POST') {
         const data = await requestJson(req, 8192);
         const result = runtime.speak(data.text);

@@ -11,7 +11,7 @@ import { DEFAULT_DATA_DIRECTORY } from '../server/config';
 import { CLOCK_VERSION } from '../src/core/time';
 import { universeCatalog } from '../src/universes';
 
-interface StartupUniverse { id: string; tick: number; running: boolean; }
+interface StartupUniverse { id: string; worldId: string; recording: string; tick: number; running: boolean; }
 export interface StartupCheckReport {
   universes: StartupUniverse[];
   serverStarted: false;
@@ -46,7 +46,10 @@ export async function runStartupCheck(): Promise<StartupCheckReport> {
     assert.deepEqual(output.universes.map(universe => universe.id).sort(), [...ids].sort());
     assert.ok(output.universes.every(universe => universe.tick === 0 && universe.running === false));
     for (const id of ids) {
-      const db = new DatabaseSync(join(output.dataDirectory, `${id}.sqlite`), { readOnly: true });
+      const recording = output.universes.find(universe => universe.id === id)!.recording;
+      assert.ok(resolve(recording).startsWith(resolve(output.dataDirectory, 'worlds') + sep));
+      assert.match(output.universes.find(universe => universe.id === id)!.worldId, /^[0-9a-f-]{36}$/);
+      const db = new DatabaseSync(recording, { readOnly: true });
       try {
         assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'clock'").get()?.value, CLOCK_VERSION);
         const row = db.prepare('SELECT tick, data FROM frames ORDER BY tick DESC LIMIT 1').get()!;

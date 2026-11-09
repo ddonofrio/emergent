@@ -12,6 +12,7 @@ interface ChatContext {
   voice?: { name: string };
   settingsOpen: boolean;
 }
+type WorldApi = (path: string, params?: Record<string, string | number | undefined>) => string;
 
 export class WorldChat {
   private root = document.createElement('div');
@@ -30,7 +31,7 @@ export class WorldChat {
   private input: HTMLInputElement;
   private status: HTMLElement;
 
-  constructor(private container: HTMLElement, private api: string, private context: () => ChatContext) {
+  constructor(private container: HTMLElement, private api: WorldApi, private context: () => ChatContext) {
     this.root.className = 'world-chat-ui';
     this.root.innerHTML = `
       <div class="speech-chat" role="log" aria-live="polite" aria-relevant="additions" aria-label="World chat"></div>
@@ -142,7 +143,7 @@ export class WorldChat {
     const epoch = this.historyEpoch, before = this.history.size ? [...this.history.values()].reduce((min, event) => Math.min(min, event.id), Number.MAX_SAFE_INTEGER) : undefined;
     this.historyLoading = true; this.historyStatus.textContent = 'Loading messages...';
     try {
-      const response = await fetch(`${this.api}/speech?tick=${this.context().tick}${before === undefined ? '' : `&before=${before}`}`);
+      const response = await fetch(this.api('speech', { tick: this.context().tick, before }));
       if (!response.ok) throw new Error('Chat history could not be loaded.');
       const page = await response.json() as { events: WorldEvent[]; hasMore: boolean };
       if (epoch !== this.historyEpoch) return;
@@ -163,7 +164,7 @@ export class WorldChat {
     if (problem) { this.status.textContent = problem; return; }
     this.pending = true; this.status.textContent = 'Sending...'; this.renderControls();
     try {
-      const response = await fetch(`${this.api}/speech`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+      const response = await fetch(this.api('speech'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
       const data = await response.json() as { error?: string; event?: WorldEvent };
       if (!response.ok) throw new Error(data.error ?? 'Your message could not be sent.');
       if (data.event && this.context().live) this.add([data.event]);

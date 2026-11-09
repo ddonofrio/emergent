@@ -26,9 +26,10 @@ export class UniverseRuntime {
   constructor(readonly universe: UniverseModule, dataDirectory: string, private readonly config: {
     providers: ProviderConfig[];
     requestQueue?: RequestQueue;
+    recordingPath?: string;
     fatal(error: unknown): void;
   }) {
-    this.store = new Store(resolve(dataDirectory, `${universe.manifest.id}.sqlite`), universe.manifest);
+    this.store = new Store(config.recordingPath ?? resolve(dataDirectory, `${universe.manifest.id}.sqlite`), universe.manifest);
     this.store.cancelInterruptedInferences();
     const storedState = this.store.hasWorld() ? this.store.stateAt(this.store.latestTick()) : undefined;
     const migration = storedState ? universe.migrateState?.(storedState) : undefined;

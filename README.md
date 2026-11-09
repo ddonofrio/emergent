@@ -11,7 +11,11 @@ Open http://127.0.0.1:3000/emergent/. This public observer is read-only: it can 
 
 Both interfaces intentionally omit the character enabled/disabled checkboxes. Entity enablement remains part of the engine and API with its existing enabled values so the control can be placed elsewhere later.
 
-No `.env` is required. Active worlds default to `data/`; an explicit `DATA_DIR` overrides it. Configure models in Settings or copy `.env.example`. Server-only `<DATA_DIR>/inference-config.json` uses `{ "version": 1, "providers": [...] }`. Models are tried in order. Each entry has one reasoning level, context capacity and optional credentials. Output uses the remaining context, estimated by pi-ai with its 4096-token safety reserve and any known native model output limit; there is no fixed application output cap. Supported routes are OpenAI-compatible endpoints, OpenAI, OpenRouter, Vast gateways, and Amazon Bedrock. Model `auto` discovers an available model. Omitted credentials preserve that entry's saved credentials; explicit removal clears them. Keys and headers never enter browser configuration, world recordings or agent conversations.
+No `.env` is required. Persistent data defaults to `data/`; an explicit `DATA_DIR` overrides it. Each world is self-contained under `<DATA_DIR>/worlds/<uuid>/`, with metadata in `world.json` and its SQLite recording beside it. `<DATA_DIR>/worlds/active.json` only identifies the current world for each universe. Existing flat recordings and legacy named world directories are moved into this layout on the next server startup without deleting their recordings.
+
+The administrator Settings screen contains Agent and World Manager sections. World Manager creates named worlds with a fixed seed, renames them, shows their seed and recording duration, loads a saved world as the current world, and deletes non-current worlds after confirmation. The public observer remains read-only and can select and replay any recorded world beside the day selector. Loading a recording made with the retired `lockstep-v1` contract upgrades its storage metadata and runtime tables while preserving its recorded state and history.
+
+Configure models in Agent settings or copy `.env.example`. Server-only `<DATA_DIR>/inference-config.json` uses `{ "version": 1, "providers": [...] }`. Models are tried in order. Each entry has one reasoning level, context capacity and optional credentials. Output uses the remaining context, estimated by pi-ai with its 4096-token safety reserve and any known native model output limit; there is no fixed application output cap. Supported routes are OpenAI-compatible endpoints, OpenAI, OpenRouter, Vast gateways, and Amazon Bedrock. Model `auto` discovers an available model. Omitted credentials preserve that entry's saved credentials; explicit removal clears them. Keys and headers never enter browser configuration, world recordings or agent conversations.
 
 ## Deployment
 
@@ -45,7 +49,7 @@ The world engine owns all time. A shared barrier freezes physics whenever any ac
 - `server/inference`: LittleWhale's pinned pi-ai provider core, native replay, configuration and discovery; no chat UI or Cordis application stack.
 - `server/store.ts`: SQLite WAL, authoritative events, world frames, separate conversation snapshots and pending action receipts. Physics saves never rewrite unchanged conversations. Server-only diagnostics keep the latest 256 finished inferences with timing, usage and errors, not full prompts. Replay reads recorded state without models or physics execution.
 
-Existing persistent-tool recordings migrate on the next server startup: redundant session logs and old diagnostic payloads are removed, pending actions and world history are preserved, and freed disk pages are reclaimed once. A read-only serialization benchmark for a recording is available with `node --import tsx scripts/benchmark-persistence.ts data/first-shore.sqlite`.
+Existing persistent-tool recordings migrate on the next server startup: redundant session logs and old diagnostic payloads are removed, pending actions and world history are preserved, and freed disk pages are reclaimed once. A read-only serialization benchmark for a recording is available with `node --import tsx scripts/benchmark-persistence.ts <DATA_DIR>/worlds/<uuid>/<universe-id>.sqlite`.
 
 The former agent system, prompts, compaction modules, tests and snapshots of mixed files were moved to `.tmp/agent-system-before-persistent-tools/`. New code does not import that archive. The old paired planner/executor, movement interruption sessions, configuration and recording contracts are retired with no compatibility layer.
 
@@ -55,7 +59,7 @@ The old agent recording and configuration contracts are retired without migratio
 .\scripts\worlds\reset.ps1 -UniverseId first-shore
 ```
 
-Saved worlds under `data/worlds/` are never removed automatically. This refactor did not delete recordings or change the running server.
+World directories under `<DATA_DIR>/worlds/` are never removed automatically. A non-current world is removed only through the explicit, confirmed Delete action. Resetting affects only the current world's SQLite recording and preserves its metadata and every other world.
 
 ## Verification and measurement
 

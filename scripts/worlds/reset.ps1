@@ -41,16 +41,27 @@ $resolvedDataDir = if ([System.IO.Path]::IsPathRooted($DataDir)) {
 } else {
     [System.IO.Path]::GetFullPath((Join-Path $projectRoot $DataDir))
 }
-$worldPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedDataDir "$UniverseId.sqlite"))
-$projectPrefix = $projectRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-$savedWorlds = [System.IO.Path]::GetFullPath((Join-Path $projectRoot 'data\worlds'))
-$savedWorldsPrefix = $savedWorlds.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-
-if (-not $worldPath.StartsWith($projectPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Refusing to delete a world outside the project: $worldPath"
+$worldsRoot = [System.IO.Path]::GetFullPath((Join-Path $resolvedDataDir 'worlds'))
+$activePath = Join-Path $worldsRoot 'active.json'
+$worldId = $null
+if (Test-Path -LiteralPath $activePath -PathType Leaf) {
+    $activeConfig = Get-Content -LiteralPath $activePath -Raw | ConvertFrom-Json
+    $activeProperty = $activeConfig.active.PSObject.Properties[$UniverseId]
+    if ($null -eq $activeProperty -or $activeProperty.Value -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
+        throw "The active world for $UniverseId is missing or invalid in $activePath"
+    }
+    $worldId = [string]$activeProperty.Value
 }
-if ($worldPath.StartsWith($savedWorldsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Refusing to delete a saved world: $worldPath"
+
+$worldPath = if ($null -ne $worldId) {
+    [System.IO.Path]::GetFullPath((Join-Path (Join-Path $worldsRoot $worldId) "$UniverseId.sqlite"))
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $resolvedDataDir "$UniverseId.sqlite"))
+}
+$dataPrefix = $resolvedDataDir.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+
+if (-not $worldPath.StartsWith($dataPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to delete a recording outside the configured data directory: $worldPath"
 }
 
 $targets = @($worldPath, "$worldPath-wal", "$worldPath-shm", "$worldPath-journal")
@@ -69,5 +80,5 @@ try {
 }
 
 Write-Host "Deleted the active $UniverseId world recording."
-Write-Host 'Saved worlds in data\worlds were preserved.'
-Write-Host 'The next server start will generate a clean world from the universe seed.'
+Write-Host 'The world metadata and every other world were preserved.'
+Write-Host 'The next server start will regenerate this world from its saved seed.'

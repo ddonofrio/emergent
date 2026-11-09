@@ -13,7 +13,8 @@ import { interfaceRoutePath, parseInterfaceRoute } from './interface-routing';
 
 interface AgentMetrics { llmCalls?:number; inputTokens?:number; outputTokens?:number; cachedInputTokens?:number; }
 interface ModelRequestStatus { state:'unknown'|'ok'|'bad'; inFlight:number; detail?:string; }
-interface Metadata { universe: UniverseManifest; observerVoice?:{name:string}; mode: 'llm' | 'waiting'; model: string; inferenceConfig?:InferenceConfig; metrics?:Record<string,AgentMetrics>; providerStatus?:Record<string,ModelRequestStatus>; latestTick: number; runtime: TurnStatus; secondsPerTurn?:number; }
+interface WorldSummary { id:string; universeId:string; name:string; seed:number; createdAt:string; updatedAt:string; active:boolean; hasRecording:boolean; resumable:boolean; latestTick:number; }
+interface Metadata { universe: UniverseManifest; world:Omit<WorldSummary,'hasRecording'|'resumable'|'latestTick'>; observerVoice?:{name:string}; mode: 'llm' | 'waiting'; model: string; inferenceConfig?:InferenceConfig; metrics?:Record<string,AgentMetrics>; providerStatus?:Record<string,ModelRequestStatus>; latestTick: number; runtime: TurnStatus; secondsPerTurn?:number; }
 interface Boot extends Metadata { state: WorldState; events: WorldEvent[]; recordedMetrics?:Record<string,AgentMetrics>; recordedSecondsPerTurn?:number; }
 interface ModelProvider { id:string; type:string; name:string; enabled?:boolean; baseUrl:string; model:string; region?:string; tokenless?:boolean; contextWindow?:number; reasoning?:string; hasApiKey?:boolean; apiKey?:string; clearApiKey?:boolean; hasVastToken?:boolean; vastToken?:string; clearVastToken?:boolean; vastContainerLabel?:string; }
 interface InferenceConfig { version:1; parallelRequests?:boolean; providers:ModelProvider[]; }
@@ -23,6 +24,13 @@ const isAdmin=interfaceRoute.mode==='admin';
 const universeId=/^\/universes\/([a-z0-9-]+)\/?$/.exec(interfaceRoute.contentPath)?.[1];
 if(!universeId)throw new Error('A universe route is required.');
 const worldApi=appPath(`/api/universes/${universeId}`);
+const selectedWorldId=isAdmin?'':new URLSearchParams(window.location.search).get('world')?.trim()??'';
+const recordingApi=(path:string,params:Record<string,string|number|undefined>={})=>{
+  const url=new URL(`${worldApi}/${path}`,window.location.origin);
+  if(selectedWorldId)url.searchParams.set('world',selectedWorldId);
+  for(const [name,value] of Object.entries(params))if(value!==undefined)url.searchParams.set(name,String(value));
+  return `${url.pathname}${url.search}`;
+};
 const homePath=appPath(interfaceRoutePath(interfaceRoute.mode,'/'));
 const rosterLayout=universeId==='robots-vs-robots';
 document.body.classList.toggle('roster-layout',rosterLayout);
@@ -36,9 +44,9 @@ app.innerHTML = `
       <div id="world" class="world"><div class="loading" id="loading"><span class="loader"></span>Opening the observatory…</div></div>
       <section class="timeline" aria-label="Recorded world timeline">
         <div class="timeline-top">
-          <div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span> Live</button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00:00.0</span><span id="time-to-live">LIVE</span></div>
+          <div class="playback-controls"><button id="play" class="play-button" title="Pause observation" aria-label="Pause observation">Ⅱ</button><button id="live" class="live-button active"><span></span><b id="live-label">Live</b></button><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select><span class="timeline-divider"></span><span id="playback-time">00:00:00.0</span><span id="time-to-live">LIVE</span></div>
           <div class="timeline-view-controls"><div class="camera-tools"><button id="overview" title="Overview" aria-label="Overview">◈</button><button id="top-down" title="Top view" aria-label="Top view">⊞</button><button id="follow" title="Follow selected inhabitant" aria-label="Follow selected inhabitant">◎</button></div></div>
-          <div class="timeline-right"><select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div>
+          <div class="timeline-right">${isAdmin?'':'<select id="world-recording" aria-label="Recorded world"><option>Loading worlds…</option></select>'}<select id="day" aria-label="Recorded day"><option value="1">Day 001</option></select></div>
         </div>
         <div class="scrubber"><div id="event-marks"></div><input id="seek" type="range" min="0" max="1" value="0" step="2" aria-label="Seek world history"></div>
         <div class="timeline-labels"><span id="range-start">00:00:00</span><span id="range-end">00:00:00</span></div>
@@ -63,12 +71,27 @@ app.innerHTML = `
   </main>
   ${isAdmin?`<section id="llm-settings" class="settings-screen hidden" aria-labelledby="settings-title" aria-hidden="true">
     <header class="settings-header"><button id="settings-back" class="settings-back">Back</button><div><span class="eyebrow">EMERGENT / SETTINGS</span><h1 id="settings-title">Settings</h1></div></header>
-    <div class="settings-content">
-      <form id="llm-settings-form">
-        <section class="settings-section"><h2>Request settings</h2><label class="request-setting"><input id="parallel-requests" type="checkbox" checked>Parallel requests</label><p class="settings-note">Allow multiple model requests at once. Uncheck to send one request at a time.</p></section>
-        <section class="settings-section"><div class="settings-section-heading"><div><h2>Models</h2><p>Each inhabitant keeps one ongoing conversation. Active models are tried in this order when inference is unavailable. World time stays frozen while an agent is thinking or retrying.</p></div><button id="add-model" class="secondary-button" type="button">Add model</button></div><div id="model-list" class="model-list"></div><p class="settings-note">Credentials stay on the server. Context limits control LittleWhale conversation compaction. Provider changes apply to the next request in each existing conversation.</p></section>
-        <div class="settings-actions"><span id="settings-status" role="status"></span><button class="save-button" type="submit">Save configuration</button></div>
-      </form>
+    <div class="settings-layout">
+      <nav class="settings-nav" aria-label="Settings sections"><button type="button" class="active" data-settings-panel="agent-settings-panel">Agent</button><button type="button" data-settings-panel="world-manager-panel">World Manager</button></nav>
+      <div class="settings-content">
+        <section id="agent-settings-panel" class="settings-panel">
+          <form id="llm-settings-form">
+            <section class="settings-section"><h2>Request settings</h2><label class="request-setting"><input id="parallel-requests" type="checkbox" checked>Parallel requests</label><p class="settings-note">Allow multiple model requests at once. Uncheck to send one request at a time.</p></section>
+            <section class="settings-section"><div class="settings-section-heading"><h2>Models</h2><button id="add-model" class="secondary-button" type="button">Add model</button></div><div id="model-list" class="model-list"></div><p class="settings-note">Credentials stay on the server. Context limits control LittleWhale conversation compaction. Provider changes apply to the next request in each existing conversation.</p></section>
+            <div class="settings-actions"><span id="settings-status" role="status"></span><button class="save-button" type="submit">Save configuration</button></div>
+          </form>
+        </section>
+        <section id="world-manager-panel" class="settings-panel hidden" aria-labelledby="world-manager-title">
+          <h2 id="world-manager-title" class="sr-only">World Manager</h2>
+          <form id="create-world-form" class="create-world-form">
+            <label>World name<input id="new-world-name" type="text" maxlength="80" autocomplete="off" required placeholder="New world"></label>
+            <label>Seed<input id="new-world-seed" type="number" min="-2147483648" max="2147483647" step="1" required value="${loadUniverse(universeId).manifest.seed}"></label>
+            <button class="save-button" type="submit">Create world</button>
+          </form>
+          <p id="world-manager-status" class="world-manager-status" role="status"></p>
+          <div id="world-list" class="world-manager-list"></div>
+        </section>
+      </div>
     </div>
   </section>`:''}
 `;
@@ -92,7 +115,7 @@ let shownSecondsPerTurn:number|undefined;
 let epoch = 0, seekTimer: ReturnType<typeof setTimeout>, replayFrames: Frame[] = [], fetching = false, replayClock = 0, replayRequest = 0, lastPlayback = performance.now(), lastUi = 0, nextReplayFetch = 0, seeking = false;
 let dayCount = 0,detailsSignature='',statsSignature='';
 let memoryRequest=0,memoryView:{actor:string;tick:number;notes:string[];learned?:string[]}|undefined;
-const worldChat = new WorldChat($('world'),worldApi,()=>({available:!!meta,live:isLive&&!seeking,tick:cursor,
+const worldChat = new WorldChat($('world'),recordingApi,()=>({available:!!meta,live:isLive&&!seeking&&meta?.world.active===true,tick:cursor,
   entities:shown?.entities??[],voice:isAdmin?meta?.observerVoice:undefined,settingsOpen:isAdmin&&!$('llm-settings').classList.contains('hidden')}));
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
@@ -185,9 +208,40 @@ async function loadLlmSettings(){
   try{const response=await fetch(`${worldApi}/inference-config`);if(!response.ok)throw new Error();inferenceConfig=await response.json() as InferenceConfig;$<HTMLInputElement>('parallel-requests').checked=inferenceConfig.parallelRequests!==false;renderModelRows(inferenceConfig.providers);renderProviderStatus(inferenceConfig);$('settings-status').textContent='';}
   catch{$('settings-status').textContent='Could not load inference configuration.';}
 }
+function showSettingsPanel(panelId:string){
+  for(const panel of document.querySelectorAll<HTMLElement>('.settings-panel'))panel.classList.toggle('hidden',panel.id!==panelId);
+  for(const button of document.querySelectorAll<HTMLButtonElement>('[data-settings-panel]'))button.classList.toggle('active',button.dataset.settingsPanel===panelId);
+  if(panelId==='world-manager-panel')void loadWorldManager();
+}
+function renderWorldManager(worlds:WorldSummary[]){
+  const list=$('world-list');list.replaceChildren();
+  for(const world of worlds){
+    const card=document.createElement('article');card.className=`world-manager-card${world.active?' active':''}`;
+    const heading=document.createElement('div');heading.className='world-manager-card-heading';
+    const identity=document.createElement('div');identity.className='world-manager-identity';
+    const name=document.createElement('input');name.type='text';name.maxLength=80;name.value=world.name;name.setAttribute('aria-label',`Name for ${world.name}`);
+    const badge=document.createElement('span');badge.className='world-manager-badge';badge.textContent=world.active?'Current':'Saved';identity.append(name,badge);
+    const details=document.createElement('p');details.textContent=`Seed ${world.seed} · ${formatWorldDuration(world.latestTick)} recorded · ${world.id}`;identity.append(details);heading.append(identity);
+    const actions=document.createElement('div');actions.className='world-manager-actions';
+    const rename=document.createElement('button');rename.type='button';rename.className='secondary-button';rename.textContent='Rename';
+    rename.onclick=async()=>{rename.disabled=true;$('world-manager-status').textContent=`Renaming ${world.name}...`;try{const response=await fetch(`${worldApi}/worlds/${world.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.value})});const data=await response.json() as {error?:string};if(!response.ok)throw new Error(data.error??'World could not be renamed.');$('world-manager-status').textContent='World renamed.';await loadWorldManager();}catch(error){$('world-manager-status').textContent=error instanceof Error?error.message:'World could not be renamed.';rename.disabled=false;}};
+    actions.append(rename);
+    if(!world.active){const load=document.createElement('button');load.type='button';load.className='save-button';load.textContent='Load';load.disabled=!world.hasRecording;
+      load.onclick=async()=>{if(!window.confirm(`Load “${world.name}”? The current world will be saved before switching.`))return;load.disabled=true;$('world-manager-status').textContent=`Loading ${world.name}...`;try{const response=await fetch(`${worldApi}/worlds/${world.id}/activate`,{method:'POST'});const data=await response.json() as {error?:string};if(!response.ok)throw new Error(data.error??'World could not be loaded.');window.location.reload();}catch(error){$('world-manager-status').textContent=error instanceof Error?error.message:'World could not be loaded.';load.disabled=false;}};
+      const remove=document.createElement('button');remove.type='button';remove.className='world-delete';remove.textContent='Delete';
+      remove.onclick=async()=>{if(!window.confirm(`Delete “${world.name}” permanently? Its metadata and complete recording will be removed.`))return;remove.disabled=true;load.disabled=true;$('world-manager-status').textContent=`Deleting ${world.name}...`;try{const response=await fetch(`${worldApi}/worlds/${world.id}`,{method:'DELETE'});const data=await response.json() as {error?:string};if(!response.ok)throw new Error(data.error??'World could not be deleted.');$('world-manager-status').textContent='World deleted.';await loadWorldManager();}catch(error){$('world-manager-status').textContent=error instanceof Error?error.message:'World could not be deleted.';remove.disabled=false;load.disabled=!world.hasRecording;}};
+      actions.append(load,remove);}
+    heading.append(actions);card.append(heading);list.append(card);
+  }
+}
+async function loadWorldManager(){
+  const status=$('world-manager-status');status.textContent='Loading worlds...';
+  try{const response=await fetch(`${worldApi}/worlds`);const data=await response.json() as {worlds?:WorldSummary[];error?:string};if(!response.ok)throw new Error(data.error??'Worlds could not be loaded.');renderWorldManager(data.worlds??[]);status.textContent='';}
+  catch(error){status.textContent=error instanceof Error?error.message:'Worlds could not be loaded.';}
+}
 function showSettings(open:boolean){
   $('main').classList.toggle('hidden',open);$('llm-settings').classList.toggle('hidden',!open);$('llm-settings').setAttribute('aria-hidden',String(!open));
-  if(open)void loadLlmSettings();
+  if(open){showSettingsPanel('agent-settings-panel');void loadLlmSettings();}
 }
 function dayOf(tick:number){return worldTime(tick).day;}
 async function loadProviderStatus(){
@@ -215,8 +269,22 @@ function acceptTurnSpeed(frame:Frame){
 }
 async function loadMemory(){
   const request=++memoryRequest,actor=selected,tick=cursor;memoryView=undefined;renderDetails();
-  try{const response=await fetch(`${worldApi}/memory-record?tick=${tick}&actor=${encodeURIComponent(actor)}`);if(!response.ok)throw new Error();const record=await response.json() as {notes:string[];learned?:string[]};if(request===memoryRequest){memoryView={actor,tick,...record};renderDetails();}}
+  try{const response=await fetch(recordingApi('memory-record',{tick,actor}));if(!response.ok)throw new Error();const record=await response.json() as {notes:string[];learned?:string[]};if(request===memoryRequest){memoryView={actor,tick,...record};renderDetails();}}
   catch{if(request===memoryRequest){memoryView={actor,tick,notes:[]};renderDetails();}}
+}
+async function loadWorldSelector(){
+  if(isAdmin)return;
+  const select=$<HTMLSelectElement>('world-recording');
+  try{
+    const response=await fetch(`${worldApi}/worlds`);if(!response.ok)throw new Error();
+    const data=await response.json() as {worlds:WorldSummary[];activeWorldId:string};
+    select.replaceChildren();
+    for(const world of data.worlds){const label=`${world.name} · Seed ${world.seed}${world.active?' · Current':''}`;const option=new Option(label,world.id);option.disabled=!world.hasRecording;select.add(option);}
+    const chosen=selectedWorldId||data.activeWorldId;
+    if(!data.worlds.some(world=>world.id===chosen&&world.hasRecording)){const url=new URL(window.location.href);url.searchParams.delete('world');window.location.replace(url);return;}
+    select.value=chosen;
+    select.onchange=()=>{const url=new URL(window.location.href);if(select.value===data.activeWorldId)url.searchParams.delete('world');else url.searchParams.set('world',select.value);window.location.assign(url);};
+  }catch{select.replaceChildren(new Option('World list unavailable',''));select.disabled=true;}
 }
 function setBoot(boot: Boot) {
   meta = boot; latest = boot.latestTick; liveDynamic = boot.state;shownMetrics=boot.metrics;shownSecondsPerTurn=boot.secondsPerTurn; liveCells.clear();liveRemoved.clear();
@@ -224,12 +292,13 @@ function setBoot(boot: Boot) {
   for(const voxel of boot.state.removedBlocks??[])liveRemoved.add(voxel);
   if(!boot.state.entities.some(entity=>entity.id===selected)&&boot.state.entities[0]){selected=boot.state.entities[0].id;view.select(selected);}
   liveEvents = boot.events; $('loading').classList.add('hidden');
-  renderProviderStatus(meta.inferenceConfig);if(!meta.inferenceConfig)void loadProviderStatus();
-  $('module-name').textContent = meta.universe.name;
+  renderProviderStatus(meta.inferenceConfig);if(meta.world.active&&!meta.inferenceConfig)void loadProviderStatus();
+  $('module-name').textContent = `${meta.universe.name} · ${meta.world.name}`;
   renderWorldControls();
   if (isLive) goLive(); else renderTimeline();
 }
-const stream = new EventSource(`${worldApi}/stream`);
+if(!isAdmin)void loadWorldSelector();
+const stream = new EventSource(recordingApi('stream'));
 stream.addEventListener('boot', event => { setBoot(JSON.parse((event as MessageEvent).data)); });
 stream.addEventListener('inference-config',event=>{
   if(!meta)return;meta.inferenceConfig=JSON.parse((event as MessageEvent).data) as InferenceConfig;inferenceConfig=meta.inferenceConfig;renderProviderStatus();
@@ -266,7 +335,7 @@ async function seek(tick: number) {
   const request = ++epoch; replayRequest++; fetching = false; seeking = true; isLive = false; playing = false; scrubTarget = null; replayFrames = []; view.hold();
   cursor = Math.min(latest,Math.max(0,tick)); renderTimeline();
   try {
-    const response = await fetch(`${worldApi}/state?tick=${cursor}`); if (!response.ok) throw new Error('Could not load recorded history.');
+    const response = await fetch(recordingApi('state',{tick:cursor})); if (!response.ok) throw new Error('Could not load recorded history.');
     const data = await response.json() as Boot; if (request !== epoch) return;
     shown = data.state; cursor = shown.tick; replayClock = cursor;shownMetrics=data.recordedMetrics;shownSecondsPerTurn=data.recordedSecondsPerTurn;seeking = false; events = data.events; view.load(shown,meta.universe);worldChat?.reset(data.events); detailsSignature='';renderTimeline();renderInspector();renderJournal();void loadMemory();
   } catch (error) { if (request === epoch) toast(error instanceof Error ? error.message : 'History unavailable.'); }
@@ -278,7 +347,7 @@ async function fetchReplay() {
   nextReplayFetch = performance.now() + 200;
   try {
     const after = replayFrames.at(-1)?.tick ?? cursor;
-    const response = await fetch(`${worldApi}/frames?tick=${after}`); if (!response.ok) throw new Error('Replay fetch failed.');
+    const response = await fetch(recordingApi('frames',{tick:after})); if (!response.ok) throw new Error('Replay fetch failed.');
     const data = await response.json() as Frame[];
     if (request === replayRequest && modeEpoch === epoch && !isLive) replayFrames.push(...data);
   } catch { if (modeEpoch === epoch) { playing = false; toast('Replay interrupted. Press play to retry.'); } }
@@ -309,8 +378,9 @@ requestAnimationFrame(playback);
 function renderTimeline() {
   if (!meta) return;
   $('live').classList.toggle('active',isLive); $('play').textContent = isLive || playing ? 'Ⅱ' : '▶'; $('play').setAttribute('aria-label',isLive || playing ? 'Pause observation' : 'Play recording');
+  $('live-label').textContent=meta.world.active?'Live':'End';
   $('playback-time').textContent = formatWorldDuration(cursor,true);
-  $('time-to-live').textContent = isLive ? 'LIVE' : `${formatWorldDuration(Math.max(0,latest-cursor))} TO LIVE`;
+  $('time-to-live').textContent = isLive ? (meta.world.active?'LIVE':'RECORDED') : `${formatWorldDuration(Math.max(0,latest-cursor))} TO ${meta.world.active?'LIVE':'END'}`;
   $('range-end').textContent = formatWorldDuration(latest);
   const sliderTick=scrubTarget??cursor,slider = $<HTMLInputElement>('seek'); slider.max = String(Math.max(2,latest)); slider.value = String(sliderTick); slider.style.setProperty('--progress',`${sliderTick/Math.max(1,latest)*100}%`);
   const count = dayOf(latest);
@@ -512,6 +582,16 @@ function journalEventMessage(event:WorldEvent) {
 if(isAdmin){
   $('settings-open').onclick=()=>showSettings(true);
   $('settings-back').onclick=()=>showSettings(false);
+  for(const button of document.querySelectorAll<HTMLButtonElement>('[data-settings-panel]'))button.onclick=()=>showSettingsPanel(button.dataset.settingsPanel!);
+  $<HTMLFormElement>('create-world-form').onsubmit=async event=>{
+    event.preventDefault();const status=$('world-manager-status'),button=(event.currentTarget as HTMLFormElement).querySelector<HTMLButtonElement>('button')!;button.disabled=true;status.textContent='Creating world...';
+    try{
+      const name=$<HTMLInputElement>('new-world-name'),seed=$<HTMLInputElement>('new-world-seed');
+      const response=await fetch(`${worldApi}/worlds`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.value,seed:Number(seed.value)})});
+      const data=await response.json() as {error?:string};if(!response.ok)throw new Error(data.error??'World could not be created.');name.value='';status.textContent='World created. You can make it current when ready.';await loadWorldManager();
+    }catch(error){status.textContent=error instanceof Error?error.message:'World could not be created.';}
+    finally{button.disabled=false;}
+  };
 }
 $('debug-toggle').onclick=()=>{
   const panel=$('debug-panel'),open=panel.classList.contains('collapsed');panel.classList.toggle('collapsed',!open);
