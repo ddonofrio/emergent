@@ -64,7 +64,7 @@ async function openRoutedUniverse(id:string){
 function renderLauncher(){
   app.innerHTML=`
     <main class="launcher">
-      <header class="launcher-header"><a class="brand" href="${scopedPath('/')}" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent</a>${interfaceMode==='observer'?'<span class="observer-badge">Read only</span>':''}</header>
+      <header class="launcher-header"><a class="brand" href="${scopedPath('/')}" aria-label="Emergent home"><span class="brand-mark"><i></i><i></i><i></i></span>emergent</a></header>
       <section id="world-cards" class="world-cards" aria-label="Universes"></section>
       <p id="launcher-status" class="sr-only" aria-live="polite"></p>
     </main>`;
