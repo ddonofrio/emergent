@@ -34,8 +34,10 @@ export interface ProviderRequestStatus {
   detail?: string;
 }
 export const DEFAULT_CONTEXT_WINDOW = 49152;
+export const EMPTY_COMPLETION_RETRY_LINE = 'Your previous response contained no text or tool call. Call one available tool now.';
 const PROVIDER_TYPES = new Set(['openai-compatible', 'openai', 'openrouter', 'vast-ai', 'amazon-bedrock']);
 const REASONING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+class EmptyCompletionError extends Error {}
 
 /** Configuration is server-owned. Credentials never enter sessions or world recordings. */
 export function validateProviders(value: unknown): ProviderConfig[] {
@@ -227,6 +229,7 @@ export class InferenceClient {
     const started = performance.now();
     const failures: string[] = [];
     let attempts = 0;
+    let emptyCompletionFailures = 0;
     for (const config of configs) {
       signal.throwIfAborted();
       attempts++;
@@ -254,7 +257,7 @@ export class InferenceClient {
         const calls = response.content.filter(block => block.type === 'toolCall').map(({ id, name, arguments: args }) => ({ id, name, arguments: args }));
         // A reasoning-only response can exhaust its output budget before emitting text.
         // Preserve its finish reason and usage for the session and durable audit.
-        if (!content && !calls.length && response.stopReason !== 'length') throw new Error('Model returned no text or tool calls.');
+        if (!content && !calls.length && response.stopReason !== 'length') throw new EmptyCompletionError('Model returned no text or tool calls.');
         this.updateStatus(config.id, response.stopReason === 'length'
           ? { state: 'bad', detail: `Model reached its output limit after ${response.usage.output} tokens.` }
           : { state: 'ok', detail: 'Request completed.' });
@@ -265,6 +268,7 @@ export class InferenceClient {
         };
       } catch (error) {
         signal.throwIfAborted();
+        if (error instanceof EmptyCompletionError) emptyCompletionFailures++;
         const detail = safeError(error, configs);
         this.updateStatus(config.id, { state: 'bad', detail });
         failures.push(`${config.name}: ${detail}`);
@@ -272,8 +276,9 @@ export class InferenceClient {
         this.inFlight(config.id, -1);
       }
     }
-    const error = new Error(failures.join('; ') || 'No inference provider is configured.') as Error & { attempts: number };
+    const error = new Error(failures.join('; ') || 'No inference provider is configured.') as Error & { attempts: number; retryPromptLine?: string };
     error.attempts = attempts;
+    if (emptyCompletionFailures > 0) error.retryPromptLine = EMPTY_COMPLETION_RETRY_LINE;
     throw error;
   }
 }

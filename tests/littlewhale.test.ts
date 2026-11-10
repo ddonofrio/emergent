@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { PersistentSession, balancedCuts, validateArguments, type Completion, type CompletionRequest, type SessionSnapshot, type ToolCall } from '../vendor/littlewhale';
-import { InferenceClient, publicProviders, validateProviders, discoverModels, type ProviderConfig } from '../server/inference/providers';
+import { EMPTY_COMPLETION_RETRY_LINE, InferenceClient, publicProviders, validateProviders, discoverModels, type ProviderConfig } from '../server/inference/providers';
 
 const response = (calls: ToolCall[], content: string | null = null): Completion => ({
   calls, content, provider: 'fixture', model: 'fixture', latencyMs: 5,
@@ -124,6 +124,30 @@ test('unavailable inference retries the same retained conversation without inven
   assert.deepEqual(requests[1], requests[2]);
   assert.equal(session.metrics.retries, 2);
   assert.equal(session.metrics.llmCalls, 3);
+  abort.abort(new Error('Done'));
+  await assert.rejects(run, /Done/);
+});
+
+test('empty model completions add one transient recovery line per failed request', async () => {
+  const session = new PersistentSession('empty-retry');
+  session.appendUser('Local facts.');
+  const abort = new AbortController();
+  const requests: CompletionRequest[] = [];
+  const entered = deferred();
+  const run = session.run({
+    system: 'Embodied agent.', schemas: [], signal: abort.signal, retryDelayMs: 1,
+    complete: async request => {
+      requests.push(structuredClone(request));
+      if (requests.length < 3) throw Object.assign(new Error('Empty completion'), { retryPromptLine: EMPTY_COMPLETION_RETRY_LINE });
+      return response([{ id: 'wire', name: 'wait_for_event', arguments: {} }]);
+    },
+    tools: { wait_for_event: async (_args, _call, signal) => { entered.resolve(); return wait(signal); } },
+  });
+  await entered.promise;
+  assert.deepEqual(requests[0].messages, [{ role: 'user', content: 'Local facts.' }]);
+  assert.equal(requests[1].messages.at(-1)?.content, EMPTY_COMPLETION_RETRY_LINE);
+  assert.equal(requests[2].messages.at(-1)?.content, `${EMPTY_COMPLETION_RETRY_LINE}\n${EMPTY_COMPLETION_RETRY_LINE}`);
+  assert.equal(session.snapshot().messages.some(message => message.content?.includes(EMPTY_COMPLETION_RETRY_LINE)), false);
   abort.abort(new Error('Done'));
   await assert.rejects(run, /Done/);
 });

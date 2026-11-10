@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inflateSync } from 'node:zlib';
-import { InferenceClient, type ProviderConfig, type ProviderRequestStatus } from '../server/inference/providers';
+import { EMPTY_COMPLETION_RETRY_LINE, InferenceClient, type ProviderConfig, type ProviderRequestStatus } from '../server/inference/providers';
 import type { CompletionRequest } from '../vendor/littlewhale';
 import { AgentRuntime } from '../server/agents/runtime';
 import { AgentBridge } from '../server/simulation/agent-bridge';
@@ -21,6 +21,19 @@ function successfulResponse() {
   const ending = { id: 'response', object: 'chat.completion.chunk', created: 0, model: 'technical-model-id', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } };
   return new Response(`data: ${JSON.stringify(delta)}\n\ndata: ${JSON.stringify(ending)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
 }
+
+test('empty provider completions carry the recovery line into the session retry', async t => {
+  t.mock.method(globalThis, 'fetch', async () => {
+    const ending = { id: 'empty', object: 'chat.completion.chunk', created: 0, model: 'technical-model-id',
+      choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } };
+    return new Response(`data: ${JSON.stringify(ending)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  });
+  await assert.rejects(new InferenceClient([provider()]).complete(request, new AbortController().signal), error => {
+    assert.equal((error as Error & { retryPromptLine?: string }).retryPromptLine, EMPTY_COMPLETION_RETRY_LINE);
+    return true;
+  });
+});
 
 test('default output budgets shrink with the prompt and are recalculated for each fallback route', async t => {
   const limits: number[] = [];

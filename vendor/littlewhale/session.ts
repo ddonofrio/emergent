@@ -90,6 +90,7 @@ export class PersistentSession {
     this.running = true;
     const { signal } = options;
     let attempts = 0;
+    const retryPromptLines: string[] = [];
     try {
       await this.save(options);
       while (true) {
@@ -142,7 +143,11 @@ export class PersistentSession {
           }
           this.data.messages = context.history;
           const request: CompletionRequest = {
-            system: options.system, messages: context.messages, tools: toolkit.schemas,
+            system: options.system,
+            messages: retryPromptLines.length
+              ? [...context.messages, { role: 'user', content: retryPromptLines.join('\n') }]
+              : context.messages,
+            tools: toolkit.schemas,
             ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }), purpose: 'agent', sessionId: this.id,
           };
           this.data.metrics.llmCalls++;
@@ -169,6 +174,7 @@ export class PersistentSession {
             this.appendMessage({ role: 'user', content: 'Choose a tool to act, observe, or wait. Your text alone does not change the world.' });
           }
           attempts = 0;
+          retryPromptLines.length = 0;
           await this.save(options);
         } catch (error) {
           if (error instanceof SessionPersistenceError) throw error;
@@ -176,6 +182,8 @@ export class PersistentSession {
           attempts++;
           this.data.metrics.retries++;
           const message = error instanceof Error ? error.message : 'Inference unavailable.';
+          const retryPromptLine = (error as { retryPromptLine?: unknown } | null)?.retryPromptLine;
+          if (typeof retryPromptLine === 'string' && retryPromptLine.trim()) retryPromptLines.push(retryPromptLine.trim());
           await this.save(options);
           options.onState?.('retrying', message);
           await delay(Math.min(10000, (options.retryDelayMs ?? 1000) * 2 ** Math.min(attempts - 1, 4)), undefined, { signal });
