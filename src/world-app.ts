@@ -293,7 +293,7 @@ function setBoot(boot: Boot) {
   if(!boot.state.entities.some(entity=>entity.id===selected)&&boot.state.entities[0]){selected=boot.state.entities[0].id;view.select(selected);}
   liveEvents = boot.events; $('loading').classList.add('hidden');
   renderProviderStatus(meta.inferenceConfig);if(meta.world.active&&!meta.inferenceConfig)void loadProviderStatus();
-  $('module-name').textContent = `${meta.universe.name} · ${meta.world.name}`;
+  $('module-name').textContent = meta.world.name;
   renderWorldControls();
   if (isLive) goLive(); else renderTimeline();
 }
