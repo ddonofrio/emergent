@@ -13,6 +13,7 @@ import { RequestQueue } from './inference/request-queue';
 import { AdminAccess } from './admin-access';
 import { WorldManager, type WorldDefinition } from './world-manager';
 import { Store } from './store';
+import { RuntimeState } from './runtime-state';
 
 const port = Number(process.env.PORT ?? 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port.');
@@ -39,6 +40,8 @@ try {
   if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
 }
 const requestQueue = new RequestQueue(parallelRequests);
+const availableUniverseIds = universeCatalog.filter(universe => universe.available).map(universe => universe.id);
+const runtimeState = await RuntimeState.open(dataDirectory, availableUniverseIds);
 const worldManager = await WorldManager.open(dataDirectory, universeCatalog.map(entry => {
   const universe = loadUniverse(entry.id); return { id: entry.id, name: entry.name, seed: universe.manifest.seed };
 }));
@@ -53,7 +56,11 @@ const createUniverseRuntime = (entry: (typeof universeCatalog)[number], world = 
   providers, requestQueue, recordingPath: worldManager.recordingPath(world),
   fatal: fatal ?? (error => { console.error(`${entry.name} storage or runtime failure:`, error); void shutdown(1); }),
 });
-const runtimes = new Map(universeCatalog.filter(universe => universe.available).map(entry => [entry.id, createUniverseRuntime(entry, activeWorlds.get(entry.id)!)] as const));
+const runtimes = new Map(universeCatalog.filter(universe => universe.available).map(entry => {
+  const runtime = createUniverseRuntime(entry, activeWorlds.get(entry.id)!);
+  runtime.setRunning(runtimeState.isRunning(entry.id));
+  return [entry.id, runtime] as const;
+}));
 if (process.argv.includes('--check-startup')) {
   const result = { dataDirectory, universes: [...runtimes].map(([id, runtime]) => {
     const world = activeWorlds.get(id)!; return { id, worldId: world.id, recording: worldManager.recordingPath(world), tick: runtime.engine.tick, running: runtime.clock.status().enabled };
@@ -279,6 +286,7 @@ const server = createServer(async (req, res) => {
           json(res,{...replacement.metadata(publicInferenceConfig(replacement)),reset:true});return;
         }
         if(typeof data.running==='boolean'){
+          await runtimeState.setRunning(universe.id,data.running);
           const running=runtime.setRunning(data.running);json(res,{id:universe.id,...metadata(),running});return;
         }
         if(typeof data.entityId==='string'&&['manual','automaton'].includes(data.controlMode)){
