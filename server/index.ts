@@ -65,11 +65,12 @@ if (process.argv.includes('--check-startup')) {
 async function restartUniverse(entry: (typeof universeCatalog)[number]) {
   const current = runtimes.get(entry.id);
   if (!current) throw new Error('This universe runtime is unavailable.');
+  const wasRunning = current.clock.status().enabled;
   runtimes.delete(entry.id); current.close();
   const world = activeWorlds.get(entry.id)!;
   const recording = worldManager.recordingPath(world);
   await Promise.all([recording, `${recording}-shm`, `${recording}-wal`].map(path => rm(path, { force: true })));
-  const replacement = createUniverseRuntime(entry, world); runtimes.set(entry.id, replacement); replacement.setRunning(true); return replacement;
+  const replacement = createUniverseRuntime(entry, world); runtimes.set(entry.id, replacement); replacement.setRunning(wasRunning); return replacement;
 }
 async function activateUniverseWorld(entry: (typeof universeCatalog)[number], target: WorldDefinition) {
   const previous = activeWorlds.get(entry.id)!;
