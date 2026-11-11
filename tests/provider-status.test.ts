@@ -82,7 +82,7 @@ test('the agent runtime allows reasoning beyond the former fixed cap before a re
     outputLimit = payload.max_tokens ?? payload.max_completion_tokens;
     const ending = { id: 'reasoned', object: 'chat.completion.chunk', created: 0, model: 'technical-model-id',
       choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'Reasoning completed before choosing to wait.',
-        tool_calls: [{ index: 0, id: 'wait', type: 'function', function: { name: 'wait_for_event', arguments: '{"seconds":30}' } }] }, finish_reason: 'tool_calls' }],
+        tool_calls: [{ index: 0, id: 'wait', type: 'function', function: { name: 'wait_for_event', arguments: '{"seconds":5}' } }] }, finish_reason: 'tool_calls' }],
       usage: { prompt_tokens: 2000, completion_tokens: 5000, total_tokens: 7000 } };
     return new Response(`data: ${JSON.stringify(ending)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
   });

@@ -51,7 +51,7 @@ test('a sky message reaches the next model request through the durable speech to
   const f = fixture();
   try {
     f.clock.setEnabled(true); await until(() => f.requests.length === 1);
-    f.requests[0].respond('wait_for_event', { seconds: 30 });
+    f.requests[0].respond('wait_for_event', { seconds: 5 });
     await until(() => f.runtime.ready());
     assert.equal(f.engine.broadcastSpeech('Hello from above, curious islanders.').ok, true);
     f.bridge.flush();
@@ -158,7 +158,7 @@ test('physics records at frame cadence without saving or reading the conversatio
   const f = fixture();
   try {
     f.clock.setEnabled(true); await until(() => f.requests.length === 1);
-    f.requests[0].respond('wait_for_event', { seconds: 10, eventTypes: [] });
+    f.requests[0].respond('wait_for_event', { seconds: 5, eventTypes: [] });
     await until(() => f.runtime.ready());
     await new Promise(resolve => setImmediate(resolve));
     f.pump(0);
@@ -220,7 +220,7 @@ test('ready actions survive an unavailable peer, pause, and restart without dupl
     resumed = fixture(true, { state: f.engine.state(), runtime: snapshot });
     resumed.clock.setEnabled(true); await until(() => resumed!.requests.length === 1);
     assert.equal(resumed.requests[0].request.sessionId, 'speaker');
-    resumed.requests[0].respond('wait_for_event', { seconds: 20 }); await until(() => resumed!.runtime.ready());
+    resumed.requests[0].respond('wait_for_event', { seconds: 5 }); await until(() => resumed!.runtime.ready());
     for (let i = 0; i < 5; i++) resumed.pump();
     assert.ok(resumed.engine.tick > 0); assert.ok(resumed.engine.entity('walker').motion);
     assert.equal(resumed.engine.recentEvents.filter(event => event.actor === 'walker' && event.type === 'action').length, 1);

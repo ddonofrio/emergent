@@ -72,7 +72,7 @@ app.innerHTML = `
   ${isAdmin?`<section id="llm-settings" class="settings-screen hidden" aria-labelledby="settings-title" aria-hidden="true">
     <header class="settings-header"><button id="settings-back" class="settings-back">Back</button><div><span class="eyebrow">EMERGENT / SETTINGS</span><h1 id="settings-title">Settings</h1></div></header>
     <div class="settings-layout">
-      <nav class="settings-nav" aria-label="Settings sections"><button type="button" class="active" data-settings-panel="agent-settings-panel">Agent</button><button type="button" data-settings-panel="world-manager-panel">World Manager</button></nav>
+      <nav class="settings-nav" aria-label="Settings sections"><button type="button" class="active" data-settings-panel="agent-settings-panel">Agent</button><button type="button" data-settings-panel="server-settings-panel">Server</button><button type="button" data-settings-panel="world-manager-panel">World Manager</button></nav>
       <div class="settings-content">
         <section id="agent-settings-panel" class="settings-panel">
           <form id="llm-settings-form">
@@ -80,6 +80,16 @@ app.innerHTML = `
             <section class="settings-section"><div class="settings-section-heading"><h2>Models</h2><button id="add-model" class="secondary-button" type="button">Add model</button></div><div id="model-list" class="model-list"></div><p class="settings-note">Credentials stay on the server. Context limits control LittleWhale conversation compaction. Provider changes apply to the next request in each existing conversation.</p></section>
             <div class="settings-actions"><span id="settings-status" role="status"></span><button class="save-button" type="submit">Save configuration</button></div>
           </form>
+        </section>
+        <section id="server-settings-panel" class="settings-panel hidden" aria-labelledby="server-settings-title">
+          <div class="server-runtime-card">
+            <h2 id="server-settings-title">Server</h2>
+            <div class="server-runtime-control">
+              <div class="server-runtime-state"><span>Status</span><strong id="server-runtime-state">Unavailable</strong><small id="server-runtime-detail">Waiting for runtime status.</small></div>
+              <button id="server-runtime-toggle" class="server-runtime-toggle" type="button" disabled>Play</button>
+            </div>
+            <p id="server-runtime-status" class="server-runtime-status" role="status"></p>
+          </div>
         </section>
         <section id="world-manager-panel" class="settings-panel hidden" aria-labelledby="world-manager-title">
           <h2 id="world-manager-title" class="sr-only">World Manager</h2>
@@ -120,6 +130,10 @@ const worldChat = new WorldChat($('world'),recordingApi,()=>({available:!!meta,l
 
 function toast(message: string) { $('toast').textContent = message; $('toast').classList.add('visible'); setTimeout(() => $('toast').classList.remove('visible'),3500); }
 let inferenceConfig:InferenceConfig={version:1,parallelRequests:true,providers:[]};
+const settingsPanelIds=new Set(['agent-settings-panel','server-settings-panel','world-manager-panel']);
+const settingsPanelStorageKey=`emergent:settings-panel:${universeId}`;
+let lastSettingsPanel='agent-settings-panel';
+try{const saved=window.localStorage.getItem(settingsPanelStorageKey);if(saved&&settingsPanelIds.has(saved))lastSettingsPanel=saved;}catch{/* Settings still work when browser storage is unavailable. */}
 function settingField(parent:HTMLElement,title:string,field:string,value:string,type='text',placeholder=''){
   const label=document.createElement('label');label.className='model-field';label.textContent=title;
   const input=document.createElement('input');input.type=type;input.dataset.field=field;input.value=value;input.placeholder=placeholder;input.autocomplete=type==='password'?'new-password':'off';label.append(input);parent.append(label);return input;
@@ -209,9 +223,13 @@ async function loadLlmSettings(){
   catch{$('settings-status').textContent='Could not load inference configuration.';}
 }
 function showSettingsPanel(panelId:string){
+  if(!settingsPanelIds.has(panelId))panelId='agent-settings-panel';
+  lastSettingsPanel=panelId;try{window.localStorage.setItem(settingsPanelStorageKey,panelId);}catch{/* Keep the in-memory selection. */}
   for(const panel of document.querySelectorAll<HTMLElement>('.settings-panel'))panel.classList.toggle('hidden',panel.id!==panelId);
   for(const button of document.querySelectorAll<HTMLButtonElement>('[data-settings-panel]'))button.classList.toggle('active',button.dataset.settingsPanel===panelId);
-  if(panelId==='world-manager-panel')void loadWorldManager();
+  if(panelId==='agent-settings-panel')void loadLlmSettings();
+  else if(panelId==='server-settings-panel')renderWorldControls();
+  else if(panelId==='world-manager-panel')void loadWorldManager();
 }
 function renderWorldManager(worlds:WorldSummary[]){
   const list=$('world-list');list.replaceChildren();
@@ -226,8 +244,14 @@ function renderWorldManager(worlds:WorldSummary[]){
     const rename=document.createElement('button');rename.type='button';rename.className='secondary-button';rename.textContent='Rename';
     rename.onclick=async()=>{rename.disabled=true;$('world-manager-status').textContent=`Renaming ${world.name}...`;try{const response=await fetch(`${worldApi}/worlds/${world.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.value})});const data=await response.json() as {error?:string};if(!response.ok)throw new Error(data.error??'World could not be renamed.');$('world-manager-status').textContent='World renamed.';await loadWorldManager();}catch(error){$('world-manager-status').textContent=error instanceof Error?error.message:'World could not be renamed.';rename.disabled=false;}};
     actions.append(rename);
-    if(!world.active){const load=document.createElement('button');load.type='button';load.className='save-button';load.textContent='Load';load.disabled=!world.hasRecording;
-      load.onclick=async()=>{if(!window.confirm(`Load “${world.name}”? The current world will be saved before switching.`))return;load.disabled=true;$('world-manager-status').textContent=`Loading ${world.name}...`;try{const response=await fetch(`${worldApi}/worlds/${world.id}/activate`,{method:'POST'});const data=await response.json() as {error?:string};if(!response.ok)throw new Error(data.error??'World could not be loaded.');window.location.reload();}catch(error){$('world-manager-status').textContent=error instanceof Error?error.message:'World could not be loaded.';load.disabled=false;}};
+    if(world.active){const restart=document.createElement('button');restart.type='button';restart.className='world-restart';restart.textContent='Restart';
+      restart.onclick=async()=>{if(!window.confirm(`Restart “${world.name}” from zero? This permanently deletes all recorded history, agent conversations, and runtime state for this world. This cannot be undone.`))return;
+        for(const button of actions.querySelectorAll<HTMLButtonElement>('button'))button.disabled=true;$('world-manager-status').textContent=`Restarting ${world.name} from zero...`;
+        try{const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reset:true})});const data=await response.json() as {error?:string};if(!response.ok)throw new Error(data.error??'World could not be restarted.');await loadWorldManager();$('world-manager-status').textContent='World restarted from zero.';}
+        catch(error){$('world-manager-status').textContent=error instanceof Error?error.message:'World could not be restarted.';for(const button of actions.querySelectorAll<HTMLButtonElement>('button'))button.disabled=false;}};
+      actions.append(restart);
+    }else{const load=document.createElement('button');load.type='button';load.className='save-button';load.textContent='Load';load.disabled=!world.hasRecording;
+      load.onclick=async()=>{if(!window.confirm(`Load “${world.name}”? The current world will be saved before switching.`))return;load.disabled=true;$('world-manager-status').textContent=`Loading ${world.name}...`;try{const response=await fetch(`${worldApi}/worlds/${world.id}/activate`,{method:'POST'});const data=await response.json() as Metadata&{error?:string};if(!response.ok)throw new Error(data.error??'World could not be loaded.');if(meta){meta={...meta,...data};renderWorldControls();}await loadWorldManager();$('world-manager-status').textContent='World loaded.';}catch(error){$('world-manager-status').textContent=error instanceof Error?error.message:'World could not be loaded.';load.disabled=false;}};
       const remove=document.createElement('button');remove.type='button';remove.className='world-delete';remove.textContent='Delete';
       remove.onclick=async()=>{if(!window.confirm(`Delete “${world.name}” permanently? Its metadata and complete recording will be removed.`))return;remove.disabled=true;load.disabled=true;$('world-manager-status').textContent=`Deleting ${world.name}...`;try{const response=await fetch(`${worldApi}/worlds/${world.id}`,{method:'DELETE'});const data=await response.json() as {error?:string};if(!response.ok)throw new Error(data.error??'World could not be deleted.');$('world-manager-status').textContent='World deleted.';await loadWorldManager();}catch(error){$('world-manager-status').textContent=error instanceof Error?error.message:'World could not be deleted.';remove.disabled=false;load.disabled=!world.hasRecording;}};
       actions.append(load,remove);}
@@ -241,7 +265,7 @@ async function loadWorldManager(){
 }
 function showSettings(open:boolean){
   $('main').classList.toggle('hidden',open);$('llm-settings').classList.toggle('hidden',!open);$('llm-settings').setAttribute('aria-hidden',String(!open));
-  if(open){showSettingsPanel('agent-settings-panel');void loadLlmSettings();}
+  if(open)showSettingsPanel(lastSettingsPanel);
 }
 function dayOf(tick:number){return worldTime(tick).day;}
 async function loadProviderStatus(){
@@ -423,29 +447,28 @@ function renderInspector() {
   renderDetails();
   renderStats();
 }
+let runtimeControlPending=false;
 function renderWorldControls(){
-  if(!isAdmin||!rosterLayout||!meta)return;
-  const running=meta.runtime.enabled,state=$('roster-world-state'),play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop');
-  state.textContent=running?'Running':'Stopped';state.classList.toggle('running',running);play.disabled=running;stop.disabled=!running;
+  if(!isAdmin||!meta)return;
+  const running=meta.runtime.enabled,toggle=$<HTMLButtonElement>('server-runtime-toggle'),state=$('server-runtime-state'),detail=$('server-runtime-detail');
+  state.textContent=running?'Running':'Stopped';state.classList.toggle('running',running);detail.textContent=`Phase: ${meta.runtime.phase} · Tick ${meta.runtime.tick}`;
+  toggle.textContent=running?'Stop':'Play';toggle.classList.toggle('stop',running);toggle.disabled=runtimeControlPending;toggle.setAttribute('aria-label',`${running?'Stop':'Play'} the active world runtime`);
+  if(!rosterLayout)return;
+  const rosterState=$('roster-world-state'),play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop'),reset=$<HTMLButtonElement>('roster-reset');
+  rosterState.textContent=running?'Running':'Stopped';rosterState.classList.toggle('running',running);play.disabled=runtimeControlPending||running;stop.disabled=runtimeControlPending||!running;reset.disabled=runtimeControlPending;
 }
-async function playWorld(){
-  const play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop'),reset=$<HTMLButtonElement>('roster-reset'),message=$('roster-control-message');play.disabled=true;stop.disabled=true;reset.disabled=true;message.textContent='Resuming world...';
+async function setWorldRunning(running:boolean){
+  const serverMessage=$('server-runtime-status'),rosterMessage=$('roster-control-message');runtimeControlPending=true;renderWorldControls();
+  serverMessage.textContent=running?'Starting world runtime...':'Stopping world runtime...';rosterMessage.textContent=running?'Resuming world...':'Stopping world...';
   try{
-    const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({running:true})});
-    const packet=await response.json() as Metadata&{error?:string};if(!response.ok)throw new Error(packet.error??'Could not resume the world.');
-    meta.runtime=packet.runtime;message.textContent='World running.';renderWorldControls();
-  }catch(error){message.textContent=error instanceof Error?error.message:'Could not resume the world.';}
-  finally{reset.disabled=false;renderWorldControls();}
+    const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({running})});
+    const packet=await response.json() as Metadata&{error?:string};if(!response.ok)throw new Error(packet.error??`Could not ${running?'start':'stop'} the world.`);
+    meta.runtime=packet.runtime;serverMessage.textContent=running?'World runtime started.':'World runtime stopped.';rosterMessage.textContent=running?'World running.':'World stopped.';
+  }catch(error){const message=error instanceof Error?error.message:`Could not ${running?'start':'stop'} the world.`;serverMessage.textContent=message;rosterMessage.textContent=message;}
+  finally{runtimeControlPending=false;renderWorldControls();}
 }
-async function stopWorld(){
-  const play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop'),reset=$<HTMLButtonElement>('roster-reset'),message=$('roster-control-message');play.disabled=true;stop.disabled=true;reset.disabled=true;message.textContent='Stopping world...';
-  try{
-    const response=await fetch(`${worldApi}/control`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({running:false})});
-    const packet=await response.json() as Metadata&{error?:string};if(!response.ok)throw new Error(packet.error??'Could not stop the world.');
-    meta.runtime=packet.runtime;message.textContent='World stopped.';renderWorldControls();
-  }catch(error){message.textContent=error instanceof Error?error.message:'Could not stop the world.';}
-  finally{reset.disabled=false;renderWorldControls();}
-}
+async function playWorld(){await setWorldRunning(true);}
+async function stopWorld(){await setWorldRunning(false);}
 async function resetWorld(){
   if(!window.confirm('Restart Robots vs Robots from zero? This permanently deletes its active history and cannot be undone.'))return;
   const play=$<HTMLButtonElement>('roster-play'),stop=$<HTMLButtonElement>('roster-stop'),reset=$<HTMLButtonElement>('roster-reset'),message=$('roster-control-message');play.disabled=true;stop.disabled=true;reset.disabled=true;message.textContent='Restarting world from zero...';
@@ -583,6 +606,7 @@ if(isAdmin){
   $('settings-open').onclick=()=>showSettings(true);
   $('settings-back').onclick=()=>showSettings(false);
   for(const button of document.querySelectorAll<HTMLButtonElement>('[data-settings-panel]'))button.onclick=()=>showSettingsPanel(button.dataset.settingsPanel!);
+  $('server-runtime-toggle').onclick=()=>void setWorldRunning(!meta.runtime.enabled);
   $<HTMLFormElement>('create-world-form').onsubmit=async event=>{
     event.preventDefault();const status=$('world-manager-status'),button=(event.currentTarget as HTMLFormElement).querySelector<HTMLButtonElement>('button')!;button.disabled=true;status.textContent='Creating world...';
     try{

@@ -4,7 +4,7 @@ import type { ItemCapability } from '../../src/core/crafting';
 import { isRawBlock } from '../../src/core/materials';
 import { TURN_TICKS } from '../../src/core/time';
 import { sanitizeAgentIntent, type Action, type AgentIntent, type Observation, type Vec3 } from '../../src/core/types';
-import { type ActionProgress, type AgentPort, type BodyActivity, type PerceivedEvent, type ToolOutcome, type WaitOptions } from '../simulation/agent-port';
+import { MAX_WAIT_SECONDS, type ActionProgress, type AgentPort, type BodyActivity, type PerceivedEvent, type ToolOutcome, type WaitOptions } from '../simulation/agent-port';
 import { validateArguments, type ToolExecutor, type ToolSchema } from '../../vendor/littlewhale';
 import { eventTypesSchema, namedEventTypesSchema, sequenceActions, sequenceTools, validateEventTypes, type SequenceMemory } from './sequences';
 
@@ -321,8 +321,8 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
   else tool('say', 'Speak in clear hearing range.',
     object({ word: { type: 'string', minLength: 1, maxLength: 100 } }, ['word']),
     async () => ({ error: 'say is unavailable because the speech budget is exhausted until the next world turn. Use wait_for_event to advance time.' }), false);
-  tool('wait_for_event', 'Wait for an ongoing actionId, selected event or timeout. After an action ends, omit actionId to wait again. An empty eventTypes needs actionId or seconds.',
-    object({ actionId: text, seconds: { ...number, exclusiveMinimum: 0, maximum: 3600 }, eventTypes: namedEventTypesSchema }),
+  tool('wait_for_event', 'Wait for an ongoing actionId, selected event or timeout, for at most five world seconds. Omitted seconds defaults to five. After an action ends, omit actionId to wait again. An empty eventTypes needs actionId or seconds.',
+    object({ actionId: text, seconds: { ...number, exclusiveMinimum: 0, maximum: MAX_WAIT_SECONDS }, eventTypes: namedEventTypesSchema }),
     (args, call, signal) => {
       if (Array.isArray(args.eventTypes) && !args.eventTypes.length && !args.actionId && args.seconds === undefined) throw new Error('An empty eventTypes list requires actionId or seconds.');
       return port.wait(call.id, args as WaitOptions, signal);

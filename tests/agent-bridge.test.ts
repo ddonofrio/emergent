@@ -294,6 +294,53 @@ test('waiting on a terminal action uses an explicit timeout instead of returning
   } finally { bridge.close(); }
 });
 
+test('event waits default to five world seconds and clamp larger requests', async () => {
+  const { engine, bridge, port, signal, advance } = fixture();
+  try {
+    let defaultResolved = false;
+    const defaultWait = port.wait('default-wait', { eventTypes: [] }, signal)
+      .then(result => { defaultResolved = true; return result; });
+    advance(99); await Promise.resolve();
+    assert.equal(defaultResolved, false);
+    advance(1);
+    const defaultResult = await defaultWait;
+    assert.equal(defaultResult.reason, 'timeout');
+    assert.equal(defaultResult.tick, 100);
+
+    const clampedWait = port.wait('clamped-wait', { seconds: 30, eventTypes: [] }, signal);
+    assert.equal(bridge.snapshot().entities.a.requests.find(request => request.callId === 'clamped-wait')?.untilTick, 200);
+    advance(100);
+    const clampedResult = await clampedWait;
+    assert.equal(clampedResult.reason, 'timeout');
+    assert.equal(clampedResult.tick, 200);
+    assert.equal(engine.tick, 200);
+  } finally { bridge.close(); }
+});
+
+test('resuming a legacy unbounded event wait applies the five-second limit', async () => {
+  const setup = fixture();
+  const paused = new AbortController();
+  const pending = setup.port.wait('legacy-wait', { eventTypes: ['speech'] }, paused.signal);
+  const cancelled = assert.rejects(pending, /Pause/);
+  const state = setup.engine.state(), snapshot = setup.bridge.snapshot();
+  delete snapshot.entities.a.requests.find(request => request.callId === 'legacy-wait')!.untilTick;
+  paused.abort(new Error('Pause')); await cancelled; setup.bridge.close();
+
+  const engine = new Engine(island, state), bridge = new AgentBridge(engine, snapshot), port = bridge.ports()[0];
+  try {
+    let resolved = false;
+    const resumed = port.resume('legacy-wait', new AbortController().signal)!
+      .then(result => { resolved = true; return result; });
+    for (let tick = 0; tick < 99; tick++) { engine.step(); bridge.afterStep(); }
+    await Promise.resolve();
+    assert.equal(resolved, false);
+    engine.step(); bridge.afterStep();
+    const result = await resumed;
+    assert.equal(result.reason, 'timeout');
+    assert.equal(result.tick, 100);
+  } finally { bridge.close(); }
+});
+
 test('walk and a parallel event wait both return on speech without stopping movement', async () => {
   const { engine, bridge, port, signal, advance } = fixture([3.5, 1, .5]);
   try {

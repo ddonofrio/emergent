@@ -2,6 +2,7 @@ import type { Action, ActionResult, AgentIntent, AgentMemoryRecord, Entity, Obse
 import type { ItemCapability } from '../../src/core/crafting';
 
 export const wakeEventTypes = ['speech', 'encounter', 'discovery', 'terrain', 'block-impact', 'collision', 'blocked', 'arrived', 'scanned', 'follow-ended', 'follow-blocked', 'rebound-ended', 'action-completed', 'action-blocked', 'action-cancelled', 'action-rejected'] as const;
+export const MAX_WAIT_SECONDS = 5;
 export interface WaitOptions { actionId?: string; seconds?: number; eventTypes?: (typeof wakeEventTypes)[number][]; }
 export type ActionWaitOptions = Pick<WaitOptions, 'eventTypes'>;
 export interface BodyActivity { id: string; kind: string; untilTick?: number; }

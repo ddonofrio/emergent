@@ -53,6 +53,15 @@ test('held wood exposes semantic experiments and learned recipes without reveali
   } finally { f.bridge.close(); }
 });
 
+test('wait_for_event advertises the enforced five-second maximum', () => {
+  const f = fixture();
+  try {
+    const waiting = agentTools(f.port, { notes: [] }).schemas.find(tool => tool.name === 'wait_for_event')!;
+    assert.equal((waiting.parameters.properties as { seconds: { maximum: number } }).seconds.maximum, 5);
+    assert.match(waiting.description, /at most five world seconds/i);
+  } finally { f.bridge.close(); }
+});
+
 test('front-edge wood experiments require an explicit orientation before entering the simulation', async () => {
   const f = fixture();
   try {

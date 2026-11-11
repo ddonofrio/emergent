@@ -3,7 +3,7 @@ import { knowledgeDescription } from '../../src/core/knowledge';
 import { itemCapabilities } from '../../src/core/crafting';
 import { TURN_TICKS, TICKS_PER_SECOND } from '../../src/core/time';
 import { clone, distance, type Action, type WorldEvent } from '../../src/core/types';
-import type { ActionProgress, ActionWaitOptions, AgentPort, PerceivedEvent, SimulationAction, ToolOutcome, WaitOptions } from './agent-port';
+import { MAX_WAIT_SECONDS, type ActionProgress, type ActionWaitOptions, type AgentPort, type PerceivedEvent, type SimulationAction, type ToolOutcome, type WaitOptions } from './agent-port';
 
 interface WaitRequest { callId: string; actionId?: string; untilTick?: number; eventTypes?: WaitOptions['eventTypes']; }
 interface EntityTasks {
@@ -86,7 +86,11 @@ export class AgentBridge {
           if (yieldRequest) return this.bind(id, yieldRequest, signal);
           if (state.receipts[callId]) return Promise.resolve(clone(state.receipts[callId]));
           const action = state.actions.find(action => action.callId === callId);
-          const request = state.requests.find(request => request.callId === callId);
+          let request = state.requests.find(request => request.callId === callId);
+          const existing = request;
+          if (existing && (!existing.actionId || state.actions.find(candidate => candidate.id === existing.actionId)?.callId !== existing.callId)) {
+            request = this.boundWaitRequest(state, existing);
+          }
           return request || action ? this.bind(id, request ?? { callId, actionId: action!.id }, signal) : undefined;
         },
         retainCalls: callIds => {
@@ -155,9 +159,18 @@ export class AgentBridge {
     }
     const actionId = referencedAction && (allowCompleted || !terminal(referencedAction)) ? referencedAction.id : undefined;
     const previous = state.requests.find(request => request.callId === callId);
-    return this.bind(id, previous ?? { callId, ...(actionId ? { actionId } : {}),
+    const seconds = Math.min(options.seconds ?? MAX_WAIT_SECONDS, MAX_WAIT_SECONDS);
+    const request = this.boundWaitRequest(state, previous ?? { callId, ...(actionId ? { actionId } : {}),
       ...(options.eventTypes === undefined ? {} : { eventTypes: [...options.eventTypes] }),
-      ...(options.seconds === undefined ? {} : { untilTick: this.engine.tick + Math.max(1, Math.ceil(options.seconds * TICKS_PER_SECOND)) }) }, signal);
+      untilTick: this.engine.tick + Math.max(1, Math.ceil(seconds * TICKS_PER_SECOND)) });
+    return this.bind(id, request, signal);
+  }
+  private boundWaitRequest(state: EntityTasks, request: WaitRequest) {
+    const bounded = { ...request, untilTick: Math.min(request.untilTick ?? Number.POSITIVE_INFINITY,
+      this.engine.tick + MAX_WAIT_SECONDS * TICKS_PER_SECOND) };
+    const index = state.requests.findIndex(candidate => candidate.callId === request.callId);
+    if (index >= 0) state.requests[index] = clone(bounded);
+    return bounded;
   }
   private hasWakeEvent(request: WaitRequest, events: PerceivedEvent[]) {
     return events.some(event => {
