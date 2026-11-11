@@ -1,8 +1,9 @@
 import type { Action, ActionResult, AgentIntent, AgentMemoryRecord, Entity, Observation, Vec3 } from '../../src/core/types';
 import type { ItemCapability } from '../../src/core/crafting';
+import { MAX_OPEN_ENDED_ACTION_SECONDS } from '../../src/core/time';
 
 export const wakeEventTypes = ['speech', 'encounter', 'discovery', 'terrain', 'block-impact', 'collision', 'blocked', 'arrived', 'scanned', 'follow-ended', 'follow-blocked', 'rebound-ended', 'action-completed', 'action-blocked', 'action-cancelled', 'action-rejected'] as const;
-export const MAX_WAIT_SECONDS = 5;
+export const MAX_WAIT_SECONDS = MAX_OPEN_ENDED_ACTION_SECONDS;
 export interface WaitOptions { actionId?: string; seconds?: number; eventTypes?: (typeof wakeEventTypes)[number][]; }
 export type ActionWaitOptions = Pick<WaitOptions, 'eventTypes'>;
 export interface BodyActivity { id: string; kind: string; untilTick?: number; }

@@ -1,5 +1,5 @@
 import { Voxels } from './voxels';
-import { TICKS_PER_SECOND, TURN_TICKS } from './time';
+import { MAX_OPEN_ENDED_ACTION_SECONDS, TICKS_PER_SECOND, TURN_TICKS } from './time';
 import { exchangeInventory, normalizeInventory } from './inventory';
 import { itemUseDescription, itemUseKnowledge, recipeRemovals } from './crafting';
 import { knowledgeDescription, observedMaterialKnowledge } from './knowledge';
@@ -643,8 +643,8 @@ export class Engine {
       if(!target||!this.canFollow(e,target,a.angle??0))return fail('Follow requires another visible living entity within 20 metres, with a clear line of sight.');
       if(e.motion&&!e.following)return fail('Wait until your movement finishes before following.');
       if(target.following)this.endFollowing(target,`${e.name} started following you. You stop following and continue with your own actions.`);
-      e.following={entityId:target.id};delete e.motion;e.status='following';e.yaw=((Math.atan2(target.position[0]-e.position[0],target.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
-      return ok(`You follow ${target.name}, stopping one metre away. Following continues while you speak or wait for events. Use stop_follow or cancel your movement to stop.`);
+      e.following={entityId:target.id,untilTick:this.tick+MAX_OPEN_ENDED_ACTION_SECONDS*TICKS_PER_SECOND};delete e.motion;e.status='following';e.yaw=((Math.atan2(target.position[0]-e.position[0],target.position[2]-e.position[2])*180/Math.PI)%360+360)%360;
+      return ok(`You follow ${target.name} for at most five world seconds, stopping one metre away. Following continues while you speak or wait for events, and then stops automatically.`);
     }
     if (a.action === 'say') {
       const remaining=speechWordsRemaining(e,this.tick),problem=speechProblem(a.word,remaining);
@@ -935,8 +935,8 @@ export class Engine {
     }
     return collapsed;
   }
-  private endFollowing(e:Entity,message:string){
-    delete e.following;delete e.motion;e.status='idle';e.lastAction={ok:false,message,feedback:{outcome:'stopped',to:clone(e.position),facing:e.yaw}};
+  private endFollowing(e:Entity,message:string,successful=false){
+    delete e.following;delete e.motion;e.status='idle';e.lastAction={ok:successful,message,feedback:{outcome:'stopped',to:clone(e.position),facing:e.yaw}};
     this.event(e.id,'follow-ended',message,e.lastAction.feedback);
   }
   private bounceEntity(e:Entity,other:Entity,actionOrigin:Vec3){
@@ -988,6 +988,8 @@ export class Engine {
   }
   private advanceFollowing(e:Entity){
     const following=e.following!,target=this.entities.find(other=>other.id===following.entityId);
+    following.untilTick??=this.tick+MAX_OPEN_ENDED_ACTION_SECONDS*TICKS_PER_SECOND;
+    if(this.tick>=following.untilTick){this.endFollowing(e,'You stop following after five world seconds. Choose another action.',true);return;}
     if(!target||!this.active(target)||distance(e.position,target.position)>20||!this.voxels.clearLine(this.eye(e),this.eye(target))){this.endFollowing(e,'You lose direct contact with the entity you were following. Choose another action.');return;}
     const dx=target.position[0]-e.position[0],dz=target.position[2]-e.position[2],metres=Math.hypot(dx,dz);
     e.yaw=((Math.atan2(dx,dz)*180/Math.PI)%360+360)%360;

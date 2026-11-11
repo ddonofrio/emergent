@@ -62,6 +62,30 @@ test('wait_for_event advertises the enforced five-second maximum', () => {
   } finally { f.bridge.close(); }
 });
 
+test('three consecutive event-wait timeouts remove the tool until another tool is used', async () => {
+  const f = fixture();
+  try {
+    const memory: AgentToolMemory = { notes: [] };
+    const timeout = (id: string) => {
+      const pending = agentTools(f.port, memory).executors.wait_for_event({ seconds: 5, eventTypes: [] },
+        { id, name: 'wait_for_event', arguments: { seconds: 5, eventTypes: [] } }, f.signal) as Promise<any>;
+      f.advance(100);
+      return pending;
+    };
+    assert.equal((await timeout('wait-1')).toolControl.failures, 1);
+    assert.equal((await timeout('wait-2')).toolControl.failures, 2);
+    const third = await timeout('wait-3');
+    assert.equal(third.toolControl.failures, 3);
+    assert.equal(third.toolControl.unavailable, true);
+    assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'wait_for_event'), false);
+
+    const tools = agentTools(f.port, memory);
+    await tools.executors.recall({ query: 'wood' }, { id: 'after-waits', name: 'recall', arguments: { query: 'wood' } }, f.signal);
+    assert.equal(memory.toolFailures?.wait_for_event, undefined);
+    assert.equal(agentTools(f.port, memory).schemas.some(tool => tool.name === 'wait_for_event'), true);
+  } finally { f.bridge.close(); }
+});
+
 test('front-edge wood experiments require an explicit orientation before entering the simulation', async () => {
   const f = fixture();
   try {

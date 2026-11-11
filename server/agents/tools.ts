@@ -268,7 +268,9 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
           const reason = error instanceof Error ? error.message : 'Tool execution failed.';
           return fail(name, args, call, signal, startTurn, { error: reason }, reason);
         }
-        const reason = failureReason(result);
+        const reason = failureReason(result) ?? (name === 'wait_for_event' && result && typeof result === 'object'
+          && (result as { reason?: unknown }).reason === 'timeout'
+          ? 'No selected event or action completion occurred before the five-second timeout.' : undefined);
         if (reason) return fail(name, args, call, signal, startTurn, result, reason);
         clearToolFailure(memory, name);
         return present(result);
@@ -321,7 +323,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
   else tool('say', 'Speak in clear hearing range.',
     object({ word: { type: 'string', minLength: 1, maxLength: 100 } }, ['word']),
     async () => ({ error: 'say is unavailable because the speech budget is exhausted until the next world turn. Use wait_for_event to advance time.' }), false);
-  tool('wait_for_event', 'Wait for an ongoing actionId, selected event or timeout, for at most five world seconds. Omitted seconds defaults to five. After an action ends, omit actionId to wait again. An empty eventTypes needs actionId or seconds.',
+  tool('wait_for_event', 'Wait for an ongoing actionId, selected event or timeout, for at most five world seconds. Omitted seconds defaults to five. Three consecutive timeouts make this tool unavailable until you use another tool. After an action ends, omit actionId to wait again. An empty eventTypes needs actionId or seconds.',
     object({ actionId: text, seconds: { ...number, exclusiveMinimum: 0, maximum: MAX_WAIT_SECONDS }, eventTypes: namedEventTypesSchema }),
     (args, call, signal) => {
       if (Array.isArray(args.eventTypes) && !args.eventTypes.length && !args.actionId && args.seconds === undefined) throw new Error('An empty eventTypes list requires actionId or seconds.');
@@ -332,7 +334,7 @@ export function agentTools(port: AgentPort, memory: AgentToolMemory) {
 
   if (!bodyActivity && view.interactions.follow.length) {
     const choices = view.interactions.follow.map(entity => entity.id);
-    submit('follow', 'Follow a visible creature until blocked, cancelled or unavailable.',
+    submit('follow', 'Follow a visible creature for at most five world seconds, until blocked, cancelled or unavailable.',
       object({ entityId: { ...text, enum: choices } }, ['entityId']), args => ({ action: 'follow', entityId: args.entityId as string, ...(viewAngle ? { angle: viewAngle } : {}) }));
   }
   if (view.self.following) submit('stop_follow', 'Stop following at the shared commit boundary.', object({}));

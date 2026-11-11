@@ -317,6 +317,24 @@ test('event waits default to five world seconds and clamp larger requests', asyn
   } finally { bridge.close(); }
 });
 
+test('following ends after the same five-world-second bound as event waits', async () => {
+  const { engine, bridge, port, signal, advance } = fixture([.5, 1, 4.5]);
+  try {
+    const following = port.submit('bounded-follow', { action: 'follow', entityId: 'b' }, signal, { eventTypes: [] });
+    bridge.commit();
+    assert.equal(engine.entity('a').following?.untilTick, 100);
+    advance(99);
+    assert.ok(engine.entity('a').following);
+    advance(1);
+    const result = await following;
+    assert.equal(result.reason, 'completed');
+    assert.equal(result.action?.status, 'completed');
+    assert.equal(engine.entity('a').following, undefined);
+    assert.equal(engine.entity('a').status, 'idle');
+    assert.match(engine.entity('a').lastAction!.message, /five world seconds/i);
+  } finally { bridge.close(); }
+});
+
 test('resuming a legacy unbounded event wait applies the five-second limit', async () => {
   const setup = fixture();
   const paused = new AbortController();

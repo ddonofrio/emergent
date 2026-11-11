@@ -56,7 +56,7 @@ export interface Entity {
   status: string; speech?: { word: string; until: number }; speechResponseCooldownUntil?: number;
   speechBudget?: { turn: number; words: number };
   intent?: AgentIntent;
-  following?: { entityId: string; blocked?: MovementIssue };
+  following?: { entityId: string; untilTick?: number; blocked?: MovementIssue };
   motion?: { kind?: 'walk' | 'run' | 'reverse' | 'jump' | 'bounce' | 'scan' | 'showcase'; destination: Vec3; speed: number; currentSpeed?: number; inWater?: boolean; origin?: Vec3; progress?: number; duration?: number; startYaw?: number; stopIssue?: MovementIssue; requestedDistance?: number; scanType?: 'find_material' | 'find_entity'; result?: ActionResult };
   lastAction?: ActionResult;
   automation?: Record<string, unknown>;

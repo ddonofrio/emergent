@@ -3,6 +3,7 @@ export const TURN_TICKS = TICKS_PER_SECOND;
 export const FRAME_TICKS = 2;
 export const STEP_MS = 1000 / TICKS_PER_SECOND;
 export const WORLD_DAY_SECONDS = 24 * 60 * 60;
+export const MAX_OPEN_ENDED_ACTION_SECONDS = 5;
 export const CLOCK_VERSION = 'persistent-tools';
 
 export function worldTime(tick: number) {
