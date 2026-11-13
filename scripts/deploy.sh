@@ -62,16 +62,19 @@ run_remote "mkdir -p '${DEPLOY_BASE}/releases' && rm -rf '${REMOTE_RELEASE}' && 
 scp "${SCP_OPTS[@]}" "$ARCHIVE_PATH" "$REMOTE:${REMOTE_RELEASE}/release.tgz"
 run_remote "cd '${REMOTE_RELEASE}' && tar -xzf release.tgz && rm release.tgz && /usr/local/bin/npm ci"
 
+# Provision outside releases before switching. Only a non-authenticating verifier is shipped.
+run_remote "cd '${REMOTE_RELEASE}' && /usr/local/bin/node --import tsx server/provision-admin.ts /var/lib/emergent"
+
 RELATIVE_TARGET="releases/${RELEASE_ID}"
 run_remote "ln -sfn '${RELATIVE_TARGET}' '${DEPLOY_BASE}/.current-link' && mv -Tf '${DEPLOY_BASE}/.current-link' '${CURRENT_LINK}' && sudo systemctl restart '${SERVICE_NAME}'"
 
 if ! curl -fsSL --retry 5 --retry-delay 2 "$DEPLOY_URL" >/dev/null; then
-  if [ -n "$PREVIOUS_TARGET" ]; then
+  if [ -n "$PREVIOUS_TARGET" ] && run_remote "test -f '${DEPLOY_BASE}/${PREVIOUS_TARGET}/server/provision-admin.ts'"; then
     run_remote "ln -sfn '${PREVIOUS_TARGET}' '${DEPLOY_BASE}/.current-link' && mv -Tf '${DEPLOY_BASE}/.current-link' '${CURRENT_LINK}' && sudo systemctl restart '${SERVICE_NAME}'"
   else
     run_remote "sudo systemctl stop '${SERVICE_NAME}' && rm -f '${CURRENT_LINK}'"
   fi
-  echo "Smoke test failed; the previous release was restored" >&2
+  echo "Smoke test failed; restored a compatible release or stopped the service safely" >&2
   exit 1
 fi
 

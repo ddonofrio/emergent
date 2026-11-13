@@ -1,21 +1,32 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { resolveDataDirectory } from './config';
 
-export const ADMIN_ACCESS_KEY = "+¡`'p0o9o";
+// Set your own password through private deployment configuration, never source code.
+export function loadAdminVerifier(): string | undefined {
+  try {
+    const record = JSON.parse(readFileSync(resolve(resolveDataDirectory(process.env.DATA_DIR), 'admin-access.json'), 'utf8'));
+    return record.version === 1 && typeof record.sha256 === 'string' && /^[a-f0-9]{64}$/.test(record.sha256) ? record.sha256 : undefined;
+  } catch { return undefined; }
+}
 export const ADMIN_COOKIE_NAME = 'emergent_admin';
 
 const SESSION_LIFETIME_MS = 12 * 60 * 60 * 1000;
 
 function equalSecret(candidate: string, expected: string) {
-  const candidateBytes = Buffer.from(candidate);
-  const expectedBytes = Buffer.from(expected);
-  return candidateBytes.length === expectedBytes.length && timingSafeEqual(candidateBytes, expectedBytes);
+  const candidateBytes = createHash('sha256').update(candidate).digest();
+  const expectedBytes = Buffer.from(expected, 'hex');
+  return expectedBytes.length === candidateBytes.length && timingSafeEqual(candidateBytes, expectedBytes);
 }
 
 export class AdminAccess {
   private sessions = new Map<string, number>();
 
+  constructor(private readonly verifier = loadAdminVerifier()) {}
+
   login(candidate: unknown, now = Date.now()) {
-    if (typeof candidate !== 'string' || !equalSecret(candidate, ADMIN_ACCESS_KEY)) return undefined;
+    if (typeof candidate !== 'string' || !candidate || candidate.length > 1024 || !this.verifier || !equalSecret(candidate, this.verifier)) return undefined;
     const token = randomBytes(32).toString('base64url');
     this.sessions.set(token, now + SESSION_LIFETIME_MS);
     return token;
