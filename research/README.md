@@ -4,6 +4,13 @@ This directory documents the research programme built around the [original hypot
 
 It will serve as a growing record of the experiments, results, and analyses used to evaluate that hypothesis and develop the thesis. The hypothesis is the starting point; experimental protocols and findings will be added as the research progresses.
 
+## Current documents
+
+- **[Original research hypothesis](original_hypothesis.md)** — the initial hypothesis and its theoretical motivation. Retained as the reference point for the research.
+- **[Research plan — working draft](research_plan_working_draft.md)** — an evolving research document containing the project summary, theoretical background, research question, objectives, operational definitions, and proposed comparative methodology. It is **work in progress**, not a finalized experimental protocol or a report of results.
+
+The working draft is intended to be revised as the experimental design is developed. Its current methodology specifies the observation, recording, traceability, and reproducibility requirements of the experimental environment without tying the research design to a particular platform.
+
 ## Research materials
 
 The directory will progressively include:
